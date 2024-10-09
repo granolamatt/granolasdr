@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <unordered_map>
 #include <functional>
+#include <thread>
 
 struct SynchroObjects {
     static std::mutex synchro_mutex;
@@ -99,7 +100,7 @@ private:
 
 class Thread : public Runnable {
 private:
-    pthread_t thd;
+    std::thread thd;
     static void* startThread(void* thd);
     Runnable* myrunnable;
 public:

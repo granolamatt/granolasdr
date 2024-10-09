@@ -7,12 +7,14 @@ std::mutex SynchroObjects::synchro_mutex; //Static initialization is needed
 namespace gm {
     
 void Thread::join() {
-    pthread_join(thd, NULL);
+    // pthread_join(thd, NULL);
+    thd.join();
 }
 
 void Thread::start() {
     //printf("Starting the pthread\n");
-    pthread_create (&thd, NULL, &Thread::startThread, this);
+    // pthread_create (&thd, NULL, &Thread::startThread, this);
+    thd = std::thread(Thread::startThread,this);
 }
 
 void* Thread::startThread(void* thd) {
@@ -25,6 +27,7 @@ void* Thread::startThread(void* thd) {
         myrunnable->setRunning(false);
     // }
     ((Runnable*)thd)->doCallback((Runnable*)thd);
+    return thd;
 }
 
 }
