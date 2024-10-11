@@ -1,6 +1,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <time.h>
 #include "gm/buffer/shared.h"
 #include "gm/common/tuner_mem.h"
 #include "gm/rx888/rx888.h"
@@ -34,10 +35,13 @@ int testBlade() {
 
     long ask = 10000000L;
     printf("Asking now\n");
-    while (ask < 100000000) {
+    time_t now;
+
+    while (1) {
         bp->getPosition(ask);
-        printf("Got the position %ld\n", ask);
-        ask += 10000000L;
+        time(&now);
+        printf("Got the position %ld at %ld\n", ask, now);
+        ask += 140000000L;
     }
 
     printf("Program started\n");
