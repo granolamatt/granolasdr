@@ -35,12 +35,12 @@ int testBlade() {
 
     long ask = 10000000L;
     printf("Asking now\n");
-    time_t now;
+    struct timespec now;
 
     while (1) {
         bp->getPosition(ask);
-        time(&now);
-        printf("Got the position %ld at %ld\n", ask, now);
+	clock_gettime(CLOCK_REALTIME, &now);
+        printf("Got the position %ld at %ld.%f\n", ask, now.tv_sec, (double)now.tv_nsec/1e9);
         ask += 140000000L;
     }
 
