@@ -6,15 +6,18 @@
 
 namespace gm {
 namespace cuda {
+
+template<class T>
 class CopyBuffer : public Runnable {
 public:
-    CopyBuffer(gm::buffer::BufferPosition<std::complex<short>>* inP);
+    CopyBuffer(gm::buffer::BufferPosition<T>* inP);
     ~CopyBuffer();
     void run();
     void stop() {
         setRunning(false);
     }
-    gm::buffer::BufferPosition<std::complex<short>>* getOutputBufferPos() {
+    
+    gm::buffer::BufferPosition<T>* getOutputBufferPos() {
         return &outPos;
     }
     void setSize(int nsize) {
@@ -26,10 +29,10 @@ private:
     int outSize;
     int inSize;
     int sampleSize;
-    std::complex<short>* outData_d;
-    std::complex<short>* inData;
-    gm::buffer::BufferPosition<std::complex<short>>* inPos;
-    gm::buffer::BufferPosition<std::complex<short>> outPos;
+    T* outData_d;
+    T* inData;
+    gm::buffer::BufferPosition<T>* inPos;
+    gm::buffer::BufferPosition<T> outPos;
     int doCopy(long now, long length);
 };
 }

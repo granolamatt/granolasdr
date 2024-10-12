@@ -28,7 +28,7 @@ int main() {
 //    myblade.change_rx_freq(440000000);
     myblade.change_rx_freq(150000000);
     
-    gm::cuda::CopyBuffer cpybuffer(myblade.getRxBufferPosition());
+    gm::cuda::CopyBuffer<std::complex<int16_t>> cpybuffer(myblade.getRxBufferPosition());
     cpybuffer.setSize(gm::cuda::UHFFMDemod::NEPOCH * gm::cuda::UHFFMDemod::NSBUFFERS);
     gm::Thread nvcpy(cpybuffer);
     nvcpy.start();

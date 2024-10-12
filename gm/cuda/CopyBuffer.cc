@@ -8,18 +8,21 @@
 
 namespace gm {
 namespace cuda {
-CopyBuffer::CopyBuffer(gm::buffer::BufferPosition<std::complex<short>>* inP) :
-inPos(inP), outPos(), sampleSize(131072), outSize(64*1024*1024) {
+
+template<class T>
+CopyBuffer<T>::CopyBuffer(gm::buffer::BufferPosition<T>* inP) :
+inPos(inP), outPos(), sampleSize(131072), outSize(64*1024*1024), outData_d(NULL) {
     inSize = inPos->getBufferSize();
-    //outSize = inSize;
-    inData = (std::complex<short>*)inPos->getBuffer();
+    inData = (T*)inPos->getBuffer();
 }
 
-CopyBuffer::~CopyBuffer() {
-    
+template<class T>
+CopyBuffer<T>::~CopyBuffer() {
+    if (outData_d) cudaFree(outData_d);
 }
 
-int CopyBuffer::doCopy(long now, long length) {
+template<class T>
+int CopyBuffer<T>::doCopy(long now, long length) {
         int out_position = (int)(now % outSize);
         int in_position = (int)(now % inSize);
         
@@ -35,6 +38,7 @@ int CopyBuffer::doCopy(long now, long length) {
             //std::cout << "Copying from " << in_position << " to " << out_position << " size " << length << std::endl;
             return (int) length;
         } else {
+            // wrap issue handle at layer above
             cuda_check_error(cudaMemcpy(&outData_d[out_position], &inData[in_position], 
                 firstCopy*inPos->getElementSize(), cudaMemcpyHostToDevice));
             //std::cout << "Copying from " << in_position << " to " << out_position << " size " << firstCopy << std::endl;
@@ -42,10 +46,11 @@ int CopyBuffer::doCopy(long now, long length) {
         }
 }
 
-void CopyBuffer::run() {
+template<class T>
+void CopyBuffer<T>::run() {
     try {
-        //cuda_check_error(cudaHostAlloc((void**)&outData_d, sizeof(std::complex<short>) * outSize, cudaHostAllocPortable));
-        cuda_check_error(cudaMalloc((void**)&outData_d, sizeof(std::complex<short>) * outSize));
+        //cuda_check_error(cudaHostAlloc((void**)&outData_d, sizeof(T) * outSize, cudaHostAllocPortable));
+        cuda_check_error(cudaMalloc((void**)&outData_d, sizeof(T) * outSize));
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error after cudaSetDevice: " << e.what() << std::endl;
     }
@@ -69,6 +74,15 @@ void CopyBuffer::run() {
         }
         
     }
+}
+
+
+void TemporaryFunction()
+{
+    // needed to put the compile time objects into the object table for proper linking
+    CopyBuffer<std::complex<short>> TempObjCS((gm::buffer::BufferPosition<std::complex<short>>*) NULL);
+    CopyBuffer<std::complex<float>> TempObjCF((gm::buffer::BufferPosition<std::complex<float>>*) NULL);
+    CopyBuffer<short> TempObjS((gm::buffer::BufferPosition<short>*) NULL);
 }
 
 }
