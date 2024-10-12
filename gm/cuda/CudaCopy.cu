@@ -10,9 +10,8 @@ namespace cuda {
 #define NSMALL 4096
 
 /**
-*  This function copies data from the icepic into the device memory used for fft
 *  We copy two samples at a time for coelescence and so that we can invert the
-*  rx spectrum from the icepic.  This puts freq 0 from the tuner at FFTSIZE / 2
+*  rx spectrum.  This puts freq 0 from the tuner at FFTSIZE / 2
 *  bin allowing us to never have to deal with the ends of the fft data.
 */
 __global__ void copyKernelShort(thrust::complex<short>* inData_d, thrust::complex<float>* outData_d, int size)

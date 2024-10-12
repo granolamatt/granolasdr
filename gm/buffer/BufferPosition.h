@@ -12,7 +12,7 @@ namespace buffer {
 template<class T>
 class BufferPosition {
 private:
-    long buffPosition;
+    uint64_t buffPosition;
     int lastWait;
     bool running;
     T* buffer;
@@ -24,7 +24,7 @@ public:
             free(buffer);
         }
     }
-    void setPosition(long position) {
+    void setPosition(uint64_t position) {
         buffPosition = position;
         running=true;
         notifyAll(*this);
@@ -38,18 +38,15 @@ public:
     void setRunning(bool nrun) {
         running=nrun;
     }
-    long getNow() {
+    uint64_t getNow() {
         return buffPosition;
     }
     int getLastWait() {
         return lastWait;
     }
-    long getPosition(long desired) {
+    uint64_t getPosition(uint64_t desired) {
 //	printf("Asked for %ld\n", desired);
-        if (desired < 0) {
-            printf("Can't be less than one\n");
-            return -1L;
-        }
+
         int waitCount = 0;
         while (buffPosition < desired) {
 //		printf("Waiting on %ld\n", buffPosition);
