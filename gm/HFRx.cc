@@ -31,9 +31,10 @@ int main() {
     uint64_t now = 1;
 
     while (now < 10000) {
-        uint64_t posnow = bpos->getPosition(now);
+        uint64_t posnow = bpos->getPosition(now, 1);
+	uint64_t azpos = bpos->getNow();
         now += 1;
-        printf("Got a new position %lu now %lu\n", posnow, now);
+        printf("Got a new position %lu now %lu element %f\n", posnow, now, (double)azpos / 140e6);
     }
 
     return 0;
