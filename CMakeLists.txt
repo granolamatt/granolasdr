@@ -68,6 +68,9 @@ target_link_libraries (zmqclient ${LIBLOC} zmq)
 add_executable(cudatest gm/CudaHostTest.cc)
 target_link_libraries (cudatest lib_granolamatt gmcuda ${GM_LIBS})
 
+add_executable(buffertest gm/test_bufferpos.cc)
+target_link_libraries (buffertest lib_granolamatt gmcuda ${GM_LIBS})
+
 add_executable(uhf_rx gm/UHFRx.cc)
 target_link_libraries (uhf_rx lib_granolamatt gmcuda ${GM_LIBS} lib_wav)
 

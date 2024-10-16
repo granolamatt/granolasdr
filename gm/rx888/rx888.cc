@@ -75,7 +75,7 @@ struct sddc* rx888::initialize_device()
         sddc_set_rf_mode(sddc, HF_MODE);
 
         int16_t* rxBuffer = (int16_t*)calloc(rx_buffer_size, sizeof(int16_t));
-        rxBufferPosition.setBuffer(rxBuffer, rx_buffer_size);
+        rxBufferPosition.setBuffer(rxBuffer, {BUFFERS,NLARGE});
 
         if (sddc_start_streaming(sddc) < 0) {
             throw "ERROR - sddc_start_streaming() failed\n";
