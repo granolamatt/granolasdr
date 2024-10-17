@@ -25,6 +25,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/ProcessFreqs.cc"
     "gm/cuda/SumFreqs.cc"
     "gm/cuda/CopyBuffer.cc"
+    "gm/cuda/CopyEpoch.cc"
     )
 
 enable_language("CUDA")
