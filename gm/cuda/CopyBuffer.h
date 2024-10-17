@@ -28,7 +28,6 @@ private:
     // bool running;
     int outSize;
     int inSize;
-    int sampleSize;
     T* outData_d;
     T* inData;
     gm::buffer::BufferPosition<T>* inPos;
