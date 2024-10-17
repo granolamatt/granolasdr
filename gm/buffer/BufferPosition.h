@@ -129,6 +129,10 @@ public:
         return shape;
     }
 
+    std::vector<size_t> getStride() {
+        return stride;
+    }
+
     size_t getBufferSize() {
         size_t ret = 0;
         if (shape.size()) {

@@ -22,26 +22,13 @@ CopyEpoch<T>::~CopyEpoch() {
 }
 
 template<class T>
-int CopyEpoch<T>::doCopy(long now, long length) {
-        // int out_remaining = outSize - out_position;
-        // int in_remaining = inSize - in_position;
-        
-        // int firstCopy = in_remaining < out_remaining ? in_remaining : out_remaining;
-        
-        // //Everything fits in buffer
-        // if (firstCopy > length) {
-        //     cuda_check_error(cudaMemcpy(&outData_d[out_position], &inData[in_position], 
-        //         (size_t)length*inPos->getElementSize(), cudaMemcpyHostToDevice));
-        //     //std::cout << "Copying from " << in_position << " to " << out_position << " size " << length << std::endl;
-        //     return (int) length;
-        // } else {
-        //     // wrap issue handle at layer above
-        //     cuda_check_error(cudaMemcpy(&outData_d[out_position], &inData[in_position], 
-        //         firstCopy*inPos->getElementSize(), cudaMemcpyHostToDevice));
-        //     //std::cout << "Copying from " << in_position << " to " << out_position << " size " << firstCopy << std::endl;
-        //     return firstCopy;
-        // }
-    return 0;
+int CopyEpoch<T>::doCopy(uint64_t now) {
+    size_t length = inShape[1];
+    int in_position = (now % inShape[0]) * length;
+
+    cuda_check_error(cudaMemcpy(&outData_d[in_position], &inData[in_position], 
+        length*inPos->getElementSize(), cudaMemcpyHostToDevice));
+    return 1;
 }
 
 template<class T>
@@ -53,20 +40,20 @@ void CopyEpoch<T>::run() {
         std::cerr << "CUDA error after cudaSetDevice: " << e.what() << std::endl;
     }
     outPos.setBuffer(outData_d, inShape);
-    long now = inPos->getNow(1) + 1;
+    uint64_t now = inPos->getNow(1) + 1;
     
     while(isRunning()) {
-        long next = inPos->getPosition(now, 1);        
+        uint64_t next = inPos->getPosition(now, 1);        
         while(now < next) {
-            long length = next - now;
+            uint64_t length = next - now;
             if (length > 4) {
                 std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
                 now = next;
                 outPos.setPosition(now, 1);
                 break;
             }
-            //int numCopied = doCopy(now, length);
-            now += 1;
+            int numCopied = doCopy(now);
+            now += numCopied;
             outPos.setPosition(now, 1);
         }
     }

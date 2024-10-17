@@ -28,7 +28,7 @@ private:
     T* inData;
     gm::buffer::BufferPosition<T>* inPos;
     gm::buffer::BufferPosition<T> outPos;
-    int doCopy(long now, long length);
+    int doCopy(uint64_t now);
 };
 }
 }
