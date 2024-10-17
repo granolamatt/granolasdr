@@ -43,17 +43,19 @@ void CopyEpoch<T>::run() {
     uint64_t now = inPos->getNow(1) + 1;
     
     while(isRunning()) {
-        uint64_t next = inPos->getPosition(now, 1);        
+        uint64_t next = inPos->getPosition(now, 1);
+        printf("Got epoch %d\n", next);        
         while(now < next) {
             uint64_t length = next - now;
-            if (length > 4) {
-                std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
-                now = next;
-                outPos.setPosition(now, 1);
-                break;
-            }
-            int numCopied = doCopy(now);
-            now += numCopied;
+            // if (length > 4) {
+            //     std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
+            //     now = next;
+            //     outPos.setPosition(now, 1);
+            //     break;
+            // }
+            // int numCopied = doCopy(now);
+            // now += numCopied;
+            now += 1;
             outPos.setPosition(now, 1);
         }
     }
