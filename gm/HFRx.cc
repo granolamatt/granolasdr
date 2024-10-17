@@ -20,10 +20,10 @@ int main() {
 
     gm::buffer::BufferPosition<int16_t>* bpos = mydsp.getRxBufferPosition();
     
-    gm::cuda::CopyBuffer<int16_t> cpybuffer(mydsp.getRxBufferPosition());
+    // gm::cuda::CopyBuffer<int16_t> cpybuffer(mydsp.getRxBufferPosition());
     // cpybuffer.setSize(gm::cuda::UHFFMDemod::NEPOCH * gm::cuda::UHFFMDemod::NSBUFFERS);
-    gm::Thread nvcpy(cpybuffer);
-    nvcpy.start();
+    // gm::Thread nvcpy(cpybuffer);
+    // nvcpy.start();
     // // wait until at least an epoch has gone by
     // cpybuffer.getOutputBufferPos()->getPosition(gm::cuda::UHFFMDemod::NEPOCH);
 
@@ -31,9 +31,10 @@ int main() {
     uint64_t now = 1;
 
     while (now < 10000) {
-        uint64_t posnow = bpos->getPosition(now, axis=1);
+        uint64_t posnow = bpos->getPosition(now, 1);
+	uint64_t azpos = bpos->getNow();
         now += 1;
-        printf("Got a new position %lu now %lu\n", posnow, now);
+        printf("Got a new position %lu now %lu element %f\n", posnow, now, (double)azpos / 140e6);
     }
 
     return 0;

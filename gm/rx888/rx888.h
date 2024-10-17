@@ -25,7 +25,7 @@ private:
 public:
     rx888();
     ~rx888();
-    const static int NLARGE = 1048576*4;
+    const static int NLARGE = 1048576*8;
     const static int BUFFERS = 16;
 
     const static int rx_buffer_size = NLARGE * BUFFERS; // Normally rx888 gets 65536 samples
