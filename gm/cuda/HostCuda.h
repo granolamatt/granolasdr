@@ -11,6 +11,24 @@ namespace cuda {
 
 void throw_on_cuda_error(cudaError_t code, const char *file, int line);
 
+class HostCuda {
+public:
+    HostCuda();
+    HostCuda(cudaStream_t strm);
+    ~HostCuda();
+    void copyKernel();
+    void setInput(std::complex<short>* in);
+    void setOutput(std::complex<float>* out);
+    void setAve(float* ave);
+    void setSize(int sz);
+    void averageKernel();
+private:
+    cudaStream_t stream;
+    bool stream_set;
+    float* aveData_d;
+    int size;
+};
+
 
 }
 }

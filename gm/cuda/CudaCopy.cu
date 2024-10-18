@@ -34,6 +34,24 @@ __global__ void copyKernelShort(thrust::complex<short>* inData_d, thrust::comple
     }
     __syncthreads();
 }
+
+__global__ void copyKernelReal(short* inData_d, float* outData_d, int size)
+{
+    const int idx = (blockIdx.x * blockDim.x + threadIdx.x); // this thread
+    const int numThreads = (blockDim.x * gridDim.x);
+    const int end = size;
+
+    for (int cnt = idx; cnt < end; cnt += numThreads)
+    {
+        short sig = inData_d[cnt];
+
+        float c = (((float) sig) / 8192.0f);
+        outData_d[cnt] = c;
+    }
+    __syncthreads();
+}
+
+
 __global__ void averageKernelWork(thrust::complex<float>* outData_d, float* aveData_d) {
 // Reduction (min/max/avr/sum), valid only when blockDim.x is a power of two:
     int  thread2;
@@ -81,6 +99,7 @@ __global__ void averageKernelWork(thrust::complex<float>* outData_d, float* aveD
 CudaCopy::CudaCopy(cudaStream_t strm) : stream(strm), stream_set(true) {}
 CudaCopy::~CudaCopy() {}
 CudaCopy::CudaCopy() : stream_set(false) {}
+
 void CudaCopy::setInput(std::complex<short>* in) {
     inData_d = (thrust::complex<short>*)in;
 }
@@ -93,6 +112,7 @@ void CudaCopy::setAve(float* ave) {
 void CudaCopy::setSize(int sz) {
     size = sz;
 }
+
 
 void CudaCopy::copyKernel() {
     if (stream_set) {
@@ -107,6 +127,30 @@ void CudaCopy::averageKernel() {
         averageKernelWork <<< NSMALL, NLARGE/NSMALL, 0, stream >>>(outData_d, aveData_d);
     } else {
         averageKernelWork <<< NSMALL, NLARGE/NSMALL >>>(outData_d, aveData_d);
+    }
+}
+
+void CudaCopy::copyKernel(thrust::complex<float>* oData_d, thrust::complex<short>* iData_d, int data_size) {
+    if (stream_set) {
+        copyKernelShort <<< 32, 256, 0, stream >>>(iData_d, oData_d, data_size);
+    } else {
+        copyKernelShort <<< 32, 256 >>>(iData_d, oData_d, data_size);
+    }
+}
+
+void CudaCopy::copyKernel(float* oData_d, short* iData_d, int data_size) {
+    if (stream_set) {
+        copyKernelReal <<< 32, 256, 0, stream >>>(iData_d, oData_d, data_size);
+    } else {
+        copyKernelReal <<< 32, 256 >>>(iData_d, oData_d, data_size);
+    }
+}
+
+void CudaCopy::averageKernel(thrust::complex<float>* oData_d, float* aData_d) {
+    if (stream_set) {
+        averageKernelWork <<< NSMALL, NLARGE/NSMALL, 0, stream >>>(oData_d, aData_d);
+    } else {
+        averageKernelWork <<< NSMALL, NLARGE/NSMALL >>>(oData_d, aData_d);
     }
 }
 
