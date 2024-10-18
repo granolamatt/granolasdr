@@ -109,6 +109,157 @@ __global__ void averageKernelWork(thrust::complex<float>* outData_d, float* aveD
 //    }
 }
 
+__global__ void polarDescKernel(thrust::complex<float>* inData_d, float* outData_d, int size) {
+    const int idx = (blockIdx.x * blockDim.x + threadIdx.x); // this thread
+    const int numThreads = (blockDim.x * gridDim.x);
+    const int end = size;
+
+    for (int cnt = idx; cnt < end; cnt += numThreads)
+    {
+        thrust::complex<float> sig1 = inData_d[cnt];
+        thrust::complex<float> sig2 = -conj(inData_d[cnt + 1]);
+        
+        thrust::complex<float> mult = sig1*sig2;
+        float ang = atan2(mult.imag(), mult.real());
+        __syncthreads();
+        outData_d[cnt] = ang;
+    }
+    __syncthreads();
+}
+
+__global__ void deEmphasisKernel(thrust::complex<float>* inData_d, thrust::complex<float>* deEmphasisData_d, int size) {
+    const int idx = (blockIdx.x * blockDim.x + threadIdx.x); // this thread
+    const int numThreads = (blockDim.x * gridDim.x);
+    const int end = size;
+
+    for (int cnt = idx; cnt < end; cnt += numThreads)
+    {
+        thrust::complex<float> in = inData_d[cnt] * deEmphasisData_d[cnt];
+        inData_d[cnt] = in;
+    }
+}
+
+__global__ void doFilterKernel(thrust::complex<float>* inData_d, thrust::complex<float>* outData_d, thrust::complex<float>* filterData_d, int size) {
+    const int idx = (blockIdx.x * blockDim.x + threadIdx.x); // this thread
+    const int numThreads = (blockDim.x * gridDim.x);
+    const int end = size;
+
+    for (int cnt = idx; cnt < end; cnt += numThreads)
+    {
+        thrust::complex<float> in = inData_d[cnt] * filterData_d[cnt];
+        outData_d[cnt] = in;
+    }
+}
+
+// The size of the frequency is 256+1, ignore last sample and give offset with 256 threads
+__global__ void stddevKernel(float* inData_d, float* squelch) {
+    const int start = blockIdx.x * (512) + 128;
+// Reduction (min/max/avr/sum), valid only when blockDim.x is a power of two:
+    int  thread2;
+    __shared__ float sum[256];
+    __shared__ float stddev[256];
+    
+    sum[threadIdx.x] = inData_d[threadIdx.x + start];
+    stddev[threadIdx.x] = sum[threadIdx.x];
+
+    __syncthreads();
+    int nTotalThreads = blockDim.x; // Total number of active threads
+
+    while (nTotalThreads > 1)
+    {
+        int halfPoint = (nTotalThreads >> 1); // divide by two
+        // only the first half of the threads will be active.
+        if (threadIdx.x < halfPoint)
+        {
+            thread2 = threadIdx.x + halfPoint;
+
+            sum[threadIdx.x] += sum[thread2];
+
+        }
+        __syncthreads();
+
+        // Reducing the binary tree size by two:
+        nTotalThreads = halfPoint;
+    }
+        
+    // if (threadIdx.x == 0) {
+    //     squelch[blockIdx.x] = sum[0] / 256;
+    // }
+    __syncthreads();
+    float ave = sum[0] / 256.0f;
+    stddev[threadIdx.x] = stddev[threadIdx.x] - ave;
+    stddev[threadIdx.x] = stddev[threadIdx.x] * stddev[threadIdx.x];
+    nTotalThreads = blockDim.x; // Total number of active threads
+    __syncthreads();
+    while (nTotalThreads > 1)
+    {
+        int halfPoint = (nTotalThreads >> 1); // divide by two
+        // only the first half of the threads will be active.
+        if (threadIdx.x < halfPoint)
+        {
+            thread2 = threadIdx.x + halfPoint;
+
+            stddev[threadIdx.x] += stddev[thread2];
+
+        }
+        __syncthreads();
+
+        // Reducing the binary tree size by two:
+        nTotalThreads = halfPoint;
+    }
+        
+    if (threadIdx.x == 0) {
+        squelch[blockIdx.x] = stddev[0];
+    }
+    __syncthreads();
+    
+}
+
+
+// The size of the frequency is 256+1, ignore last sample and give offset with 256 threads
+__global__ void squelchKernel(thrust::complex<float>* inData_d, float* squelch) {
+    const int start = blockIdx.x * (512);
+// Reduction (min/max/avr/sum), valid only when blockDim.x is a power of two:
+    int  thread2;
+    __shared__ float sum[512];
+    
+    // sum[threadIdx.x] = inData_d[threadIdx.x + start].real() * inData_d[threadIdx.x + start].real() 
+    //     + inData_d[threadIdx.x + start].imag() * inData_d[threadIdx.x + start].imag();
+    
+    //thrust::complex<float> val = threadIdx.x & 1 ? inData_d[threadIdx.x + start] : -inData_d[threadIdx.x + start];
+    float val = threadIdx.x & 1 ? abs(inData_d[threadIdx.x + start]) : 0;
+    
+    sum[threadIdx.x] = val;
+
+    __syncthreads();
+    int nTotalThreads = blockDim.x; // Total number of active threads
+
+    while (nTotalThreads > 1)
+    {
+        int halfPoint = (nTotalThreads >> 1); // divide by two
+        // only the first half of the threads will be active.
+        if (threadIdx.x < halfPoint)
+        {
+            thread2 = threadIdx.x + halfPoint;
+
+            sum[threadIdx.x] += sum[thread2];
+
+        }
+        __syncthreads();
+
+        // Reducing the binary tree size by two:
+        nTotalThreads = halfPoint;
+    }
+        
+    if (threadIdx.x == 0) {
+        squelch[blockIdx.x] = sum[0] / 256;
+    }
+    __syncthreads();
+
+
+}
+
+
 }
 
 }

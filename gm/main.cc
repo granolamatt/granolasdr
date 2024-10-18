@@ -1,7 +1,6 @@
 
 #include <stdio.h>
 #include <unistd.h>
-#include "gm/buffer/shared.h"
 #include "gm/common/tuner_mem.h"
 #include "gm/bladerf/bladerf.h"
 #include "gm/zmqcode/zmqserver.h"
