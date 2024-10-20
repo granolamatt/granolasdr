@@ -146,7 +146,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
-        printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, freqsperbin);
+        printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
         // Now make a png
 
         return 1;
