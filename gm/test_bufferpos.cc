@@ -7,8 +7,6 @@
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
 #include "gm/cuda/CopyBuffer.h"
-#include "gm/zmqcode/zmqserver.h"
-#include "gm/zmqcode/zmqworker.h"
 
 int main() {
 

@@ -24,6 +24,8 @@ private:
     // bool running;
     cudaStream_t stream;
     cufftHandle plan;
+    cufftHandle iplan;
+
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
     int16_t* inData_d; // cuda copy of rx data
@@ -32,6 +34,10 @@ private:
     std::complex<float>* fftData_d;
     gm::buffer::BufferPosition<int16_t>* inPos;
     int doCopy(uint64_t now);
+    std::complex<float>* channelData_d;
+    std::vector<std::vector<uint32_t>> bins;
+    std::vector<std::vector<uint32_t>> getBins();
+    uint32_t fft_length;
 };
 }
 }

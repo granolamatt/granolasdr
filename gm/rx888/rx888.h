@@ -14,7 +14,6 @@ class rx888 {
 
 private:
     std::string device_str;
-    unsigned int rx_samplerate;
     struct sddc *dev;
     gm::buffer::BufferPosition<int16_t> rxBufferPosition;
     struct sddc* initialize_device();
@@ -26,6 +25,7 @@ public:
     ~rx888();
     const static int NLARGE = 1048576*2;
     const static int BUFFERS = 16;
+    const static uint32_t rx_samplerate = 140000000;
 
     const static int rx_buffer_size = NLARGE * BUFFERS; // Normally rx888 gets 65536 samples
     int start_card();
@@ -37,12 +37,12 @@ public:
     struct sddc* getDev() {
         return dev;
     }
-    unsigned int getRxSampleRate() {
-        return rx_samplerate;
-    }
-    void setRxSampleRate(unsigned int samplerate) {
-        rx_samplerate = samplerate;
-    }
+    // unsigned int getRxSampleRate() {
+    //     return rx_samplerate;
+    // }
+    // void setRxSampleRate(unsigned int samplerate) {
+    //     rx_samplerate = samplerate;
+    // }
     gm::buffer::BufferPosition<int16_t>* getRxBufferPosition() {
         return &rxBufferPosition;
     }

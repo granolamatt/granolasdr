@@ -11,7 +11,11 @@ namespace gm {
 namespace cuda {
 
 HFChannelizer::HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP) :
-inPos(inP), inData_d(NULL), fftInData_d(NULL), fftData_d(NULL) {
+inPos(inP), 
+inData_d(NULL), 
+fftInData_d(NULL), 
+fftData_d(NULL),
+channelData_d(NULL) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
     try {
@@ -25,19 +29,84 @@ inPos(inP), inData_d(NULL), fftInData_d(NULL), fftData_d(NULL) {
         cuda_check_error(cudaSetDevice(0));
         cuda_check_error(cudaStreamCreate(&stream));
         cufftResult fftRes = cufftPlan1d(&plan, gm::rx888::rx888::NLARGE*2, CUFFT_R2C, 1);
+        if (fftRes) {
+            printf("Error: exit for now\n");
+        }
+        fftRes = cufftSetStream(plan, stream);
+        if (fftRes) {
+            printf("Error: exit for now\n");
+        }
         cuda_h = gm::cuda::device::HostCuda(stream);
+        bins = getBins();
+        fft_length = 0;
+        for(const std::vector<uint32_t>& b : bins) {
+            fft_length += b[2];
+        }
+        cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
+        printf("Total fft length is %u\n", fft_length);
+        // fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
+        // if (fftRes) {
+        //     printf("Error: exit for now\n");
+        // }
+        // fftRes = cufftSetStream(iplan, stream);
+        // if (fftRes) {
+        //     printf("Error: exit for now\n");
+        // }
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error after cudaSetDevice: " << e.what() << std::endl;
     }
-
 }
 
 HFChannelizer::~HFChannelizer() {
     if (inData_d) cudaFree(inData_d);
     if (fftInData_d) cudaFree(fftInData_d);
     if (fftData_d) cudaFree(fftData_d);
+    if (channelData_d) cudaFree(channelData_d);
     cufftDestroy(plan);
+    // cufftDestroy(iplan);
     cudaStreamDestroy(stream);
+}
+
+std::vector<std::vector<uint32_t>> HFChannelizer::getBins() {
+        double srate = (double)gm::rx888::rx888::rx_samplerate / 2e6;
+        double freqsperbin = (double)gm::rx888::rx888::NLARGE * 2.0 / srate;
+        // Now we need the HF bands
+        // 160 Meters 1.8 - 2.0 MHz
+        // 80 Meters 3.5 - 4.0 MHz
+        // 60 Meters USB 5.3305 - 5.4355 channels 5.332 5.348 5.3585 5.373 5.405
+        // 40 Meters 7.0 - 7.3 MHz
+        // 30 Meters 10.1 - 10.15 MHz
+        // 20 Meters 14.0 - 14.35 MHz
+        // 17 Meters 18.068 - 18.168 MHz
+        // 15 Meters 21.0 - 21.45 MHz
+        // 12 Meters 24.89 - 24.99 MHz
+        // 10 Meters 28.0 - 29.7 MHz
+        const std::vector<std::vector<double>> frequencies = {
+            {1.8,2.0},
+            {3.5,4.0},
+            {5.3305, 5.4355},
+            {7.0,7.3},
+            {10.1,10.15},
+            {14.0,14.35},
+            {18.068, 18.168},
+            {21.0, 21.45},
+            {24.89, 24.99},
+            {28,29.7}
+        };
+        std::vector<std::vector<uint32_t>> ret;
+        for(const std::vector<double>& f : frequencies) {
+            uint32_t start = (int)(f[0] * freqsperbin);
+            uint32_t stop = (int)(f[1] * freqsperbin);
+            if (start % 4) {
+                start = (start + 4) - (start % 4);
+            }
+            if (stop % 4) {
+                stop = (stop + 4) - (stop % 4);
+            }
+            uint32_t length = stop - start;
+            ret.push_back({start, stop, length});
+        }
+        return ret;
 }
 
 int HFChannelizer::doCopy(uint64_t now) {
@@ -60,6 +129,18 @@ int HFChannelizer::doCopy(uint64_t now) {
             printf("Error in fft\n");
             return 0;
         }
+        uint32_t offset = 0;
+        // Does the USB really belong here??  It is really
+        // the same just inverted spectrum
+        // copy it in backwards maybe
+        for(const std::vector<uint32_t>& b : bins) {
+            cuda_check_error(cudaMemcpyAsync(&channelData_d[offset], 
+                &fftData_d[b[0]], 
+                b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
+            offset += b[2];
+        }
+        printf("Copied out %u\n", offset);
+        // Now make a png
 
         return 1;
     } catch (thrust::system_error &e) {

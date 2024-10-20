@@ -21,7 +21,6 @@ static void count_bytes_callback(uint32_t data_size,
 }
 
 rx888::rx888() :
-    rx_samplerate(140000000),
     device_str("\0"),
     dev(NULL),
     position(0),
