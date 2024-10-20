@@ -42,6 +42,12 @@ channelData_d(NULL) {
         for(const std::vector<uint32_t>& b : bins) {
             fft_length += b[2];
         }
+        // now make length power of 2
+        uint32_t binsize = 1024;
+        while(binsize < fft_length) {
+            binsize *= 2;
+        }
+        fft_length = binsize;
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
         // fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
@@ -130,6 +136,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             return 0;
         }
         uint32_t offset = 0;
+        cuda_check_error(cudaMemsetAsync(fftData_d, 0, fft_length*sizeof(std::complex<float>), stream));
         // Does the USB really belong here??  It is really
         // the same just inverted spectrum
         // copy it in backwards maybe
@@ -139,7 +146,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
-        printf("Copied out %u\n", offset);
+        printf("Copied out %u total size %u\n", offset, fft_length);
         // Now make a png
 
         return 1;
