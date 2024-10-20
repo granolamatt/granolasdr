@@ -8,7 +8,7 @@
 namespace gm {
 namespace cuda {
 
-#define NLARGE (262144)
+#define NLARGE (1048576)
 #define NSMALL 1024
 
 void throw_on_cuda_error(cudaError_t code, const char *file, int line)
