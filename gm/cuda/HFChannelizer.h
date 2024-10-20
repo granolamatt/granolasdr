@@ -31,6 +31,7 @@ private:
     int16_t* inData_d; // cuda copy of rx data
     int16_t* inData; // rx data
     float* fftInData_d;
+    double freqsperbin;
     std::complex<float>* fftData_d;
     gm::buffer::BufferPosition<int16_t>* inPos;
     int doCopy(uint64_t now);

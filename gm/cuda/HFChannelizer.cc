@@ -75,7 +75,7 @@ HFChannelizer::~HFChannelizer() {
 
 std::vector<std::vector<uint32_t>> HFChannelizer::getBins() {
         double srate = (double)gm::rx888::rx888::rx_samplerate / 2e6;
-        double freqsperbin = (double)gm::rx888::rx888::NLARGE * 2.0 / srate;
+        freqsperbin = (double)gm::rx888::rx888::NLARGE * 2.0 / srate;
         // Now we need the HF bands
         // 160 Meters 1.8 - 2.0 MHz
         // 80 Meters 3.5 - 4.0 MHz
@@ -146,7 +146,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
-        printf("Copied out %u total size %u\n", offset, fft_length);
+        printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, freqsperbin);
         // Now make a png
 
         return 1;
