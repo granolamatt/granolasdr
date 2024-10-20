@@ -5,7 +5,6 @@
 #include <cmath>
 #include <libsddc.h>
 #include "gm/Thread.h"
-#include "gm/zmqcode/zmqworker.h"
 #include "gm/buffer/BufferPosition.h"
 
 namespace gm {
@@ -19,13 +18,13 @@ private:
     struct sddc *dev;
     gm::buffer::BufferPosition<int16_t> rxBufferPosition;
     struct sddc* initialize_device();
-    gm::zmqcode::func_t setRxGain();
+    //gm::zmqcode::func_t setRxGain();
     const static int N = 4096;
     uint64_t position;
 public:
     rx888();
     ~rx888();
-    const static int NLARGE = 1048576*8;
+    const static int NLARGE = 1048576*2;
     const static int BUFFERS = 16;
 
     const static int rx_buffer_size = NLARGE * BUFFERS; // Normally rx888 gets 65536 samples

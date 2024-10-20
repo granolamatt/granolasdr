@@ -255,10 +255,35 @@ __global__ void squelchKernel(thrust::complex<float>* inData_d, float* squelch) 
         squelch[blockIdx.x] = sum[0] / 256;
     }
     __syncthreads();
-
-
 }
 
+HostCuda::HostCuda(cudaStream_t strm) : stream(strm), stream_set(true) {}
+HostCuda::~HostCuda() {}
+HostCuda::HostCuda() : stream_set(false) {}
+
+void HostCuda::copyKernel(thrust::complex<float>* oData_d, thrust::complex<short>* iData_d, int data_size) {
+    if (stream_set) {
+        copyKernelComplexShort <<< 32, 256, 0, stream >>>(iData_d, oData_d, data_size);
+    } else {
+        copyKernelComplexShort <<< 32, 256 >>>(iData_d, oData_d, data_size);
+    }
+}
+
+void HostCuda::copyKernel(float* oData_d, short* iData_d, int data_size) {
+    if (stream_set) {
+        copyKernelShort <<< 32, 256, 0, stream >>>(iData_d, oData_d, data_size);
+    } else {
+        copyKernelShort <<< 32, 256 >>>(iData_d, oData_d, data_size);
+    }
+}
+
+void HostCuda::averageKernel(thrust::complex<float>* oData_d, float* aData_d) {
+    if (stream_set) {
+        averageKernelWork <<< NSMALL, NLARGE/NSMALL, 0, stream >>>(oData_d, aData_d);
+    } else {
+        averageKernelWork <<< NSMALL, NLARGE/NSMALL >>>(oData_d, aData_d);
+    }
+}
 
 }
 

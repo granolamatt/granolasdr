@@ -1,6 +1,9 @@
 #ifndef _GM_CUDA_HOSTCUDA_
 #define _GM_CUDA_HOSTCUDA_
 
+#include <cuda.h>
+#include <complex>
+#include <thrust/complex.h>
 #include <thrust/system_error.h>
 #include <thrust/system/cuda/error.h>
 
@@ -11,24 +14,21 @@ namespace cuda {
 
 void throw_on_cuda_error(cudaError_t code, const char *file, int line);
 
+namespace device {
+
 class HostCuda {
 public:
     HostCuda();
     HostCuda(cudaStream_t strm);
     ~HostCuda();
-    void copyKernel();
-    void setInput(std::complex<short>* in);
-    void setOutput(std::complex<float>* out);
-    void setAve(float* ave);
-    void setSize(int sz);
-    void averageKernel();
+    void copyKernel(thrust::complex<float>* oData_d, thrust::complex<short>* iData_d, int data_size);
+    void copyKernel(float* oData_d, short* iData_d, int data_size);
+    void averageKernel(thrust::complex<float>* oData_d, float* aData_d);
 private:
     cudaStream_t stream;
     bool stream_set;
-    float* aveData_d;
-    int size;
 };
-
+}
 
 }
 }

@@ -1,16 +1,19 @@
 #ifndef _GM_CUDA_HFCHANNELIZER_H_
 #define _GM_CUDA_HFCHANNELIZER_H_
 
+#include <cuda.h>
+#include <cufft.h>
+#include "gm/cuda/HostCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
+
 
 namespace gm {
 namespace cuda {
 
-template<class T>
 class HFChannelizer : public Runnable {
 public:
-    HFChannelizer(gm::buffer::BufferPosition<T>* inP);
+    HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP);
     ~HFChannelizer();
     void run();
     void stop() {
@@ -19,10 +22,15 @@ public:
         
 private:
     // bool running;
+    cudaStream_t stream;
+    cufftHandle plan;
+    gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
-    T* outData_d;
-    T* inData;
-    gm::buffer::BufferPosition<T>* inPos;
+    int16_t* inData_d; // cuda copy of rx data
+    int16_t* inData; // rx data
+    float* fftInData_d;
+    std::complex<float>* fftData_d;
+    gm::buffer::BufferPosition<int16_t>* inPos;
     int doCopy(uint64_t now);
 };
 }
