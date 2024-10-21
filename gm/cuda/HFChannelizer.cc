@@ -70,7 +70,7 @@ demodData_d(NULL) {
         nChannels = fft_length / nTune - 1; // -1 because the last channel will be sub divided
         printf("Making batch fft with %u bins and %u channels\n", nTune, nChannels);
 
-        cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(nTune*nChannels*sizeof(std::complex<float>) + 1024)));
+        cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(fft_length*sizeof(std::complex<float>) + 1024)));
 
         // Now for the sub channels
         fftRes = cufftPlan1d(&iplan, nTune, CUFFT_C2C, nChannels);
@@ -174,7 +174,7 @@ int HFChannelizer::doCopy(uint64_t now) {
         // printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
         for (int cnt = 0; cnt < 8; cnt++) {
             cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/8],
-                 (cufftComplex *)&demodData_d[nTune*nChannels*cnt], CUFFT_INVERSE);
+                 (cufftComplex *)&demodData_d[fft_length*cnt], CUFFT_INVERSE);
             if (rval) {
                 printf("Error in fft\n");
                 return 0;
