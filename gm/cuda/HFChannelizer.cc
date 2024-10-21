@@ -61,7 +61,7 @@ demodData_d(NULL) {
          * 8th   |  2100*2|2100*2| .....              end|
          **/
 
-        uint32_t baseband_bins = (uint32_t)(4200.0*1e6/freqsperbin);
+        uint32_t baseband_bins = (uint32_t)(4200.0/(1e6/freqsperbin));
         binsize = 256;
         while (binsize < baseband_bins) {
             binsize *= 2;
@@ -173,7 +173,7 @@ int HFChannelizer::doCopy(uint64_t now) {
         }
         // printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
         for (int cnt = 0; cnt < 8; cnt++) {
-            cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/8],
+            cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/16],
                  (cufftComplex *)&demodData_d[fft_length*cnt], CUFFT_INVERSE);
             if (rval) {
                 printf("Error in fft\n");
