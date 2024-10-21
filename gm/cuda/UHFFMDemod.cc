@@ -87,7 +87,7 @@ UHFFMDemod::UHFFMDemod(gm::buffer::BufferPosition<std::complex<short>>* inP) :
         std::cerr << "CUDA error after cudaSetDevice: " << e.what() << std::endl;
     }
     
-	gm::zmqcode::zmqWorker().getFuncMap().insert({"getData", processSamples()});
+//	gm::zmqcode::zmqWorker().getFuncMap().insert({"getData", processSamples()});
 //	gm::zmqcode::zmqWorker().getFuncMap().insert({"freqRange", setFreqRange()});
 //	gm::zmqcode::zmqWorker().getFuncMap().insert({"getFreqs", getFreqs()});
     

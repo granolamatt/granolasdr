@@ -15,13 +15,14 @@ inPos(inP),
 inData_d(NULL), 
 fftInData_d(NULL), 
 fftData_d(NULL),
-channelData_d(NULL) {
+channelData_d(NULL),
+demodData_d(NULL) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
     try {
         //cuda_check_error(cudaHostAlloc((void**)&inData_d, inPos->getByteSize(), cudaHostAllocPortable));
         cuda_check_error(cudaMalloc((void**)&inData_d, inPos->getByteSize()));
-        cuda_check_error(cudaMalloc((void**)&fftInData_d, 
+        cuda_check_error(cudaMalloc((void**)&fftInData_d,
             sizeof(float)*(gm::rx888::rx888::NLARGE*gm::rx888::rx888::BUFFERS + gm::rx888::rx888::NLARGE)));
         cuda_check_error(cudaMalloc((void**)&fftData_d, 
             sizeof(std::complex<float>)*(2*gm::rx888::rx888::NLARGE + 1024))); // 1024 is pad for the extra data from realfft
@@ -50,14 +51,37 @@ channelData_d(NULL) {
         fft_length = binsize;
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
-        // fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
-        // if (fftRes) {
-        //     printf("Error: exit for now\n");
-        // }
-        // fftRes = cufftSetStream(iplan, stream);
-        // if (fftRes) {
-        //     printf("Error: exit for now\n");
-        // }
+
+        /**
+         *       | band 1 | band 2 | band 3 | ... band 10|
+         * 1st   |2100*2|2100*2| .....              end|
+         * 2nd   |  2100*2|2100*2| .....              end|
+         * .
+         * .
+         * 8th   |  2100*2|2100*2| .....              end|
+         **/
+
+        uint32_t baseband_bins = (uint32_t)(4200.0*1e6/freqsperbin);
+        binsize = 256;
+        while (binsize < baseband_bins) {
+            binsize *= 2;
+        }
+        nTune = binsize;
+        nChannels = fft_length / nTune - 1; // -1 because the last channel will be sub divided
+        printf("Making batch fft with %u bins and %u channels\n", nTune, nChannels);
+
+        cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(nTune*nChannels*sizeof(std::complex<float>) + 1024)));
+
+        // Now for the sub channels
+        fftRes = cufftPlan1d(&iplan, nTune, CUFFT_C2C, nChannels);
+        if (fftRes) {
+            printf("Error: exit for now\n");
+        }
+        fftRes = cufftSetStream(iplan, stream);
+        if (fftRes) {
+            printf("Error: exit for now\n");
+        }
+
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error after cudaSetDevice: " << e.what() << std::endl;
     }
@@ -68,8 +92,9 @@ HFChannelizer::~HFChannelizer() {
     if (fftInData_d) cudaFree(fftInData_d);
     if (fftData_d) cudaFree(fftData_d);
     if (channelData_d) cudaFree(channelData_d);
+    if (demodData_d) cudaFree(demodData_d);
     cufftDestroy(plan);
-    // cufftDestroy(iplan);
+    cufftDestroy(iplan);
     cudaStreamDestroy(stream);
 }
 
@@ -146,9 +171,15 @@ int HFChannelizer::doCopy(uint64_t now) {
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
-        printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
-        // Now make a png
-
+        // printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
+        for (int cnt = 0; cnt < 8; cnt++) {
+            cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/8],
+                 (cufftComplex *)&demodData_d[nTune*nChannels*cnt], CUFFT_INVERSE);
+            if (rval) {
+                printf("Error in fft\n");
+                return 0;
+            }
+        }
         return 1;
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error after cudaCopy: " << e.what() << std::endl;

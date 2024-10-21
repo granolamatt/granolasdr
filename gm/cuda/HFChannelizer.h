@@ -36,9 +36,14 @@ private:
     gm::buffer::BufferPosition<int16_t>* inPos;
     int doCopy(uint64_t now);
     std::complex<float>* channelData_d;
+    std::complex<float>* demodData_d;
     std::vector<std::vector<uint32_t>> bins;
     std::vector<std::vector<uint32_t>> getBins();
     uint32_t fft_length;
+    uint32_t nTune;
+    uint32_t nChannels;
+
+
 };
 }
 }

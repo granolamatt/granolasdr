@@ -8,6 +8,13 @@
 namespace gm {
 namespace cuda {
 
+// Everything now is final HF 1048576 samples at 4.172325 Hz per bin
+// So 600 bins for 2.5 khz 1200 if we want to filter it by averaging
+// Do we do 2048 then so we can make it easy?  Also if we change the 
+// sample rate to be slower we have to change these definitions
+// they are only hard coded for the shared memory in the kernels
+// in the average kernel so let's try and eliminate that kernel
+
 #define NLARGE (1048576)
 #define NSMALL 1024
 
