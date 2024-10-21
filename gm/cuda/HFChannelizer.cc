@@ -67,10 +67,10 @@ demodData_d(NULL) {
             binsize *= 2;
         }
         nTune = binsize;
-        nChannels = fft_length / nTune - 1; // -1 because the last channel will be sub divided
+        nChannels = fft_length / nTune; // -1 because the last channel will be sub divided
         printf("Making batch fft with %u bins and %u channels\n", nTune, nChannels);
 
-        cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(fft_length*sizeof(std::complex<float>) + 1024)));
+        cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(fft_length*sizeof(std::complex<float>) + nTune)));
 
         // Now for the sub channels
         fftRes = cufftPlan1d(&iplan, nTune, CUFFT_C2C, nChannels);
@@ -180,6 +180,13 @@ int HFChannelizer::doCopy(uint64_t now) {
                 return 0;
             }
         }
+        printf("Finished processing %d x8 samples for %d tuners\n", fft_length, nTune);
+
+        // Now need to conjugate the USB then filter
+        // Then we are ready to look for channels
+
+        // Can probably make a video of the channels too
+
         return 1;
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error after cudaCopy: " << e.what() << std::endl;
