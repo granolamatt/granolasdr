@@ -57,6 +57,8 @@ pixel_d(NULL) {
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
 
+        cuda_check_error(cudaMalloc((void**)&demodData_d, rfft_length*sizeof(std::complex<float>) + 1024));
+        printf("Total rfft length is %u\n", rfft_length);
 
         // Now for the sub channels
         fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
@@ -64,6 +66,16 @@ pixel_d(NULL) {
             printf("Error: exit for now\n");
         }
         fftRes = cufftSetStream(iplan, stream);
+        if (fftRes) {
+            printf("Error: exit for now\n");
+        }
+
+        // Now for the sub channels
+        fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
+        if (fftRes) {
+            printf("Error: exit for now\n");
+        }
+        fftRes = cufftSetStream(rplan, stream);
         if (fftRes) {
             printf("Error: exit for now\n");
         }
@@ -78,10 +90,11 @@ HFChannelizer::~HFChannelizer() {
     if (fftInData_d) cudaFree(fftInData_d);
     if (fftData_d) cudaFree(fftData_d);
     if (channelData_d) cudaFree(channelData_d);
-    // if (demodData_d) cudaFree(demodData_d);
+    if (demodData_d) cudaFree(demodData_d);
     // if (pixel_d) cudaFree(pixel_d);
     cufftDestroy(plan);
     cufftDestroy(iplan);
+    cufftDestroy(rplan);
     cudaStreamDestroy(stream);
 }
 
@@ -111,7 +124,6 @@ int HFChannelizer::doCopy(uint64_t now) {
         // the same just inverted spectrum
         // copy it in backwards maybe
         for(const std::vector<uint32_t>& b : bins) {
-            printf("Offset %u\n", offset);
             cuda_check_error(cudaMemcpyAsync(&channelData_d[offset], 
                 &fftData_d[b[0]],
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));

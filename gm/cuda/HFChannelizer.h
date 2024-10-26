@@ -25,6 +25,7 @@ private:
     cudaStream_t stream;
     cufftHandle plan;
     cufftHandle iplan;
+    cufftHandle rplan;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
