@@ -292,6 +292,14 @@ void HostCuda::averageKernel(thrust::complex<float>* oData_d, float* aData_d) {
     }
 }
 
+void HostCuda::makePixesKernel(thrust::complex<float>* oData_d, char* pixel_d) {
+    // if (stream_set) {
+    //     averageKernelWork <<< NSMALL, NLARGE/NSMALL, 0, stream >>>(oData_d, aData_d);
+    // } else {
+    //     averageKernelWork <<< NSMALL, NLARGE/NSMALL >>>(oData_d, aData_d);
+    // }
+}
+
 }
 
 }

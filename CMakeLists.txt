@@ -2,9 +2,33 @@ cmake_minimum_required (VERSION 3.5)
 
 project("GronolaSDR")
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+if(NOT PYTHON_EXECUTABLE)
+   find_program(PYTHON_EXECUTABLE python)
+endif(NOT PYTHON_EXECUTABLE)
+
+execute_process(
+	COMMAND ${PYTHON_EXECUTABLE} "-c" 
+	"import pybind11 as _; [_] = _.__path__; print(_)"
+	RESULT_VARIABLE _pybind11_status
+	OUTPUT_VARIABLE _pybind11_location
+	OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+if (NOT _pybind11_status)
+	set(pybind11_DIR ${_pybind11_location}/share/cmake/pybind11)
+endif()
+
+find_package(Python COMPONENTS Interpreter Development)
+find_package(PythonLibs)
+find_package(pybind11 REQUIRED)
+
 set (CMAKE_BUILD_TYPE Debug)
 #set (CMAKE_BUILD_TYPE RelWithDebInfo)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${PYTHON_INCLUDE_DIRS} "/opt/cuda/include")
+
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 50 70 75)
 endif()
@@ -12,7 +36,8 @@ endif()
 set(LIBUSB usb pthread rt)
 set(LIBLOG)
 set(LIBLOC "-L/opt/cuda/lib64")
-include_directories("/opt/cuda/include")
+
+
 
 set(GM_CUDA_SOURCES
     "gm/cuda/HostCuda.cu"
@@ -62,3 +87,6 @@ add_executable(copytest gm/copytest.cc)
 target_link_libraries (copytest lib_granolamatt gmcuda ${GM_LIBS})
 
 #adb push cudatest /data/local/develop/
+
+pybind11_add_module(granolasdr gm/PythonModel.cc)
+target_link_libraries(granolasdr PRIVATE lib_granolamatt ${GM_LIBS})

@@ -24,6 +24,7 @@ public:
     void copyKernel(thrust::complex<float>* oData_d, thrust::complex<short>* iData_d, int data_size);
     void copyKernel(float* oData_d, short* iData_d, int data_size);
     void averageKernel(thrust::complex<float>* oData_d, float* aData_d);
+    void makePixesKernel(thrust::complex<float>* oData_d, char* pixel_d);
 private:
     cudaStream_t stream;
     bool stream_set;

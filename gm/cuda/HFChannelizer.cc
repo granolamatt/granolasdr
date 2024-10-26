@@ -16,7 +16,8 @@ inData_d(NULL),
 fftInData_d(NULL), 
 fftData_d(NULL),
 channelData_d(NULL),
-demodData_d(NULL) {
+demodData_d(NULL),
+pixel_d(NULL) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
     try {
@@ -70,7 +71,8 @@ demodData_d(NULL) {
         nChannels = fft_length / nTune; // -1 because the last channel will be sub divided
         printf("Making batch fft with %u bins and %u channels\n", nTune, nChannels);
 
-        cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(fft_length*sizeof(std::complex<float>) + nTune)));
+        // cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(fft_length*sizeof(std::complex<float>) + nTune)));
+        // cuda_check_error(cudaMalloc((void**)&pixel_d, 1024*128));
 
         // Now for the sub channels
         fftRes = cufftPlan1d(&iplan, nTune, CUFFT_C2C, nChannels);
@@ -92,7 +94,8 @@ HFChannelizer::~HFChannelizer() {
     if (fftInData_d) cudaFree(fftInData_d);
     if (fftData_d) cudaFree(fftData_d);
     if (channelData_d) cudaFree(channelData_d);
-    if (demodData_d) cudaFree(demodData_d);
+    // if (demodData_d) cudaFree(demodData_d);
+    // if (pixel_d) cudaFree(pixel_d);
     cufftDestroy(plan);
     cufftDestroy(iplan);
     cudaStreamDestroy(stream);
@@ -172,15 +175,17 @@ int HFChannelizer::doCopy(uint64_t now) {
             offset += b[2];
         }
         // printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
-        for (int cnt = 0; cnt < 8; cnt++) {
-            cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/16],
-                 (cufftComplex *)&demodData_d[fft_length*cnt], CUFFT_INVERSE);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
-            }
-        }
-        printf("Finished processing %d x8 samples for %d tuners\n", fft_length, nTune);
+        // for (int cnt = 0; cnt < 8; cnt++) {
+        //     cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/16],
+        //          (cufftComplex *)&demodData_d[fft_length*cnt], CUFFT_INVERSE);
+        //     if (rval) {
+        //         printf("Error in fft\n");
+        //         return 0;
+        //     }
+        // }
+        // printf("Finished processing %d x8 samples for %d tuners\n", fft_length, nTune);
+        // at 1048576 for all hf with 1024 samples oversampled by 8
+        // cuda_h.averageKernel((cufftComplex *)demodData_d, char* pixel_d);
 
         // Now need to conjugate the USB then filter
         // Then we are ready to look for channels
