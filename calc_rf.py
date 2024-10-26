@@ -51,7 +51,7 @@ for freq in am_freqs:
     print(f"{freq[0]} start {start} - {freq[1]} stop {stop} bins {total_bins} bw {mybins * freqsperbin}")
     bins.append([start, stop, stop-start])
 
-hf_fft = int(mybins)
+hf_fft = int(total_bins)
 p = 1024
 while p < hf_fft:
     p *= 2

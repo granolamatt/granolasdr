@@ -49,10 +49,10 @@ pixel_d(NULL) {
                 {135324,136076,752},
                 {157284,160660,3376},
                 {186420,187172,752},
-                {209712,222448,12736}
+                {209712,222448,12736},
             };
-        fft_length = 16384;
-        rfft_length = 1397764;
+        fft_length = 32768;
+        rfft_length = 2795528;
 
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
