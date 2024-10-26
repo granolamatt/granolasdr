@@ -111,8 +111,9 @@ int HFChannelizer::doCopy(uint64_t now) {
         // the same just inverted spectrum
         // copy it in backwards maybe
         for(const std::vector<uint32_t>& b : bins) {
+            printf("Offset %u\n", offset);
             cuda_check_error(cudaMemcpyAsync(&channelData_d[offset], 
-                &fftData_d[b[0]], 
+                &fftData_d[b[0]],
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
