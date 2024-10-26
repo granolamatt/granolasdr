@@ -39,44 +39,27 @@ pixel_d(NULL) {
             printf("Error: exit for now\n");
         }
         cuda_h = gm::cuda::device::HostCuda(stream);
-        bins = getBins();
-        fft_length = 0;
-        for(const std::vector<uint32_t>& b : bins) {
-            fft_length += b[2];
-        }
-        uint32_t fft_orig = fft_length;
-        // now make length power of 2
-        uint32_t binsize = 1024;
-        while(binsize < fft_length) {
-            binsize *= 2;
-        }
-        fft_length = binsize;
+        // From calc_rf.py
+        bins = {{13480,14980},
+                {26212,29960},
+                {39920,40712},
+                {52424,54676},
+                {75644,76024},
+                {104856,107480},
+                {135324,136076},
+                {157284,160660},
+                {186420,187172},
+                {209712,222448}
+            };
+        fft_length = 16384;
+        rfft_length = 1397764;
+        
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
-        printf("Total fft length is %u power2 %u\n", fft_orig, fft_length);
+        printf("Total fft length is %u\n", fft_length);
 
-        /**
-         *       | band 1 | band 2 | band 3 | ... band 10|
-         * 1st   |2100*2|2100*2| .....              end|
-         * 2nd   |  2100*2|2100*2| .....              end|
-         * .
-         * .
-         * 8th   |  2100*2|2100*2| .....              end|
-         **/
-
-        uint32_t baseband_bins = (uint32_t)(4200.0/(1e6/freqsperbin));
-        binsize = 256;
-        while (binsize < baseband_bins) {
-            binsize *= 2;
-        }
-        nTune = binsize;
-        nChannels = fft_length / nTune; // -1 because the last channel will be sub divided
-        printf("Making batch fft with %u bins and %u channels\n", nTune, nChannels);
-
-        // cuda_check_error(cudaMalloc((void**)&demodData_d, 8*(fft_length*sizeof(std::complex<float>) + nTune)));
-        // cuda_check_error(cudaMalloc((void**)&pixel_d, 1024*128));
 
         // Now for the sub channels
-        fftRes = cufftPlan1d(&iplan, nTune, CUFFT_C2C, nChannels);
+        fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
         if (fftRes) {
             printf("Error: exit for now\n");
         }
@@ -100,48 +83,6 @@ HFChannelizer::~HFChannelizer() {
     cufftDestroy(plan);
     cufftDestroy(iplan);
     cudaStreamDestroy(stream);
-}
-
-std::vector<std::vector<uint32_t>> HFChannelizer::getBins() {
-        double srate = (double)gm::rx888::rx888::rx_samplerate / 2e6;
-        freqsperbin = (double)gm::rx888::rx888::NLARGE * 2.0 / srate;
-        // Now we need the HF bands
-        // 160 Meters 1.8 - 2.0 MHz
-        // 80 Meters 3.5 - 4.0 MHz
-        // 60 Meters USB 5.3305 - 5.4355 channels 5.332 5.348 5.3585 5.373 5.405
-        // 40 Meters 7.0 - 7.3 MHz
-        // 30 Meters 10.1 - 10.15 MHz
-        // 20 Meters 14.0 - 14.35 MHz
-        // 17 Meters 18.068 - 18.168 MHz
-        // 15 Meters 21.0 - 21.45 MHz
-        // 12 Meters 24.89 - 24.99 MHz
-        // 10 Meters 28.0 - 29.7 MHz
-        const std::vector<std::vector<double>> frequencies = {
-            {1.8,2.0},
-            {3.5,4.0},
-            {5.3305, 5.4355},
-            {7.0,7.3},
-            {10.1,10.15},
-            {14.0,14.35},
-            {18.068, 18.168},
-            {21.0, 21.45},
-            {24.89, 24.99},
-            {28,29.7}
-        };
-        std::vector<std::vector<uint32_t>> ret;
-        for(const std::vector<double>& f : frequencies) {
-            uint32_t start = (int)(f[0] * freqsperbin);
-            uint32_t stop = (int)(f[1] * freqsperbin);
-            if (start % 4) {
-                start = (start + 4) - (start % 4);
-            }
-            if (stop % 4) {
-                stop = (stop + 4) - (stop % 4);
-            }
-            uint32_t length = stop - start;
-            ret.push_back({start, stop, length});
-        }
-        return ret;
 }
 
 int HFChannelizer::doCopy(uint64_t now) {
@@ -175,23 +116,17 @@ int HFChannelizer::doCopy(uint64_t now) {
                 b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
-        // printf("Copied out %u total size %u freqsperbin %f\n", offset, fft_length, 1e6/freqsperbin);
-        // for (int cnt = 0; cnt < 8; cnt++) {
-        //     cufftResult_t rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[cnt*nTune/16],
-        //          (cufftComplex *)&demodData_d[fft_length*cnt], CUFFT_INVERSE);
-        //     if (rval) {
-        //         printf("Error in fft\n");
-        //         return 0;
-        //     }
-        // }
-        // printf("Finished processing %d x8 samples for %d tuners\n", fft_length, nTune);
-        // at 1048576 for all hf with 1024 samples oversampled by 8
-        // cuda_h.averageKernel((cufftComplex *)demodData_d, char* pixel_d);
 
-        // Now need to conjugate the USB then filter
-        // Then we are ready to look for channels
-
-        // Can probably make a video of the channels too
+        // now time data of all our freqs
+        rval = cufftExecC2C(iplan, (cufftComplex *)&channelData_d[0],
+            (cufftComplex *)&channelData_d[0], CUFFT_INVERSE);        
+        if (rval) {
+            printf("Error in fft\n");
+            return 0;
+        }
+        // we are done so put it in a buffer so others can use it??
+        // but it stays in cuda so reuse the stream and have events??
+        // I guess for now lets do ft8 here to make sure we have a concept
 
         return 1;
     } catch (thrust::system_error &e) {
