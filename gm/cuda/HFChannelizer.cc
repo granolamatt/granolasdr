@@ -11,7 +11,8 @@ namespace gm {
 namespace cuda {
 
 HFChannelizer::HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP) :
-inPos(inP), 
+inPos(inP),
+buff_pos{0},
 inData_d(NULL), 
 fftInData_d(NULL), 
 fftData_d(NULL),
@@ -57,7 +58,8 @@ pixel_d(NULL) {
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
 
-        cuda_check_error(cudaMalloc((void**)&demodData_d, rfft_length*sizeof(std::complex<float>) + 1024));
+        // Two so we can use it as a buffer also
+        cuda_check_error(cudaMalloc((void**)&demodData_d, 2*rfft_length*sizeof(std::complex<float>) + 1024));
         printf("Total rfft length is %u\n", rfft_length);
 
         // Now for the sub channels
@@ -140,6 +142,26 @@ int HFChannelizer::doCopy(uint64_t now) {
         // we are done so put it in a buffer so others can use it??
         // but it stays in cuda so reuse the stream and have events??
         // I guess for now lets do ft8 here to make sure we have a concept
+        
+
+        cuda_check_error(cudaMemcpyAsync(&demodData_d[buff_pos], 
+            &channelData_d[0],
+            fft_length / 2 * sizeof(float),cudaMemcpyDeviceToDevice, stream));
+        buff_pos += fft_length / 2;
+
+        if (buff_pos > rfft_length) {
+            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
+                (cufftComplex *)&demodData_d[0], CUFFT_FORWARD);
+            if (rval) {
+                printf("Error in fft\n");
+                return 0;
+            }
+            buff_pos -= rfft_length / oversample;
+            cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
+                &channelData_d[rfft_length / oversample],
+                buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
+            printf("Do the bb fft %u\n", buff_pos);
+        }
 
         return 1;
     } catch (thrust::system_error &e) {

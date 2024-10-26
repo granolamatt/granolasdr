@@ -19,6 +19,7 @@ public:
     void stop() {
         setRunning(false);
     }
+    const static int oversample = 4;
         
 private:
     // bool running;
@@ -44,6 +45,8 @@ private:
     uint32_t rfft_length;
     uint32_t nTune;
     uint32_t nChannels;
+
+    uint32_t buff_pos;
 
 
 };
