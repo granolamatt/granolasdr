@@ -27,6 +27,7 @@ private:
     cufftHandle plan;
     cufftHandle iplan;
     cufftHandle rplan;
+    double lastepoch;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;

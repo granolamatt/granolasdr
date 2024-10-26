@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cuda.h>
 #include <complex>
+#include <chrono>
 #include "gm/cuda/HFChannelizer.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/buffer/BufferPosition.h"
@@ -150,6 +151,10 @@ int HFChannelizer::doCopy(uint64_t now) {
         buff_pos += fft_length / 2;
 
         if (buff_pos > rfft_length) {
+            auto now = std::chrono::system_clock::now();
+            auto duration = now.time_since_epoch();
+            double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
+
             rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
                 (cufftComplex *)&demodData_d[0], CUFFT_FORWARD);
             if (rval) {
@@ -160,7 +165,8 @@ int HFChannelizer::doCopy(uint64_t now) {
             cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
                 &channelData_d[rfft_length / oversample],
                 buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
-            printf("Do the bb fft %u\n", buff_pos);
+            printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
+            lastepoch = seconds;
         }
 
         return 1;
