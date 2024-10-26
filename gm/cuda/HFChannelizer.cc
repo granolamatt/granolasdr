@@ -175,7 +175,6 @@ void HFChannelizer::run() {
     
     while(isRunning()) {
         uint64_t next = inPos->getPosition(now+1, 1);
-        printf("Got epoch %d\n", next);
         while(now < next) {
             uint64_t length = next - now;
             if (length > 4) {
@@ -183,7 +182,6 @@ void HFChannelizer::run() {
                 now = next;
                 break;
             }
-            printf("Going copy on epoch %d\n", now);
             int numCopied = doCopy(now);
             if (!numCopied) exit(-200);
             //outPos.setPosition(now, 1);
