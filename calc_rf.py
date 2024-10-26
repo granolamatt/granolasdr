@@ -49,7 +49,7 @@ for freq in am_freqs:
     mybins = stop - start
     total_bins += mybins
     print(f"{freq[0]} start {start} - {freq[1]} stop {stop} bins {total_bins} bw {mybins * freqsperbin}")
-    bins.append([start, stop])
+    bins.append([start, stop, stop-start])
 
 hf_fft = int(mybins)
 p = 1024
@@ -78,5 +78,5 @@ print(f"gm::cuda::HFChannelizer::rfft_length = {rhf_fft}")
 print("gm::cuda::HFChannelizer::frequencies")
 print("const std::vector<std::vector<uint32_t>> bins = {")
 for n in bins:
-    print("{"+f"{n[0]},{n[1]}" + "},")
+    print("{"+f"{n[0]},{n[1]},{n[2]}" + "},")
 print("};")
