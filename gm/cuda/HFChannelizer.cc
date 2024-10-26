@@ -44,6 +44,7 @@ pixel_d(NULL) {
         for(const std::vector<uint32_t>& b : bins) {
             fft_length += b[2];
         }
+        uint32_t fft_orig = fft_length;
         // now make length power of 2
         uint32_t binsize = 1024;
         while(binsize < fft_length) {
@@ -51,7 +52,7 @@ pixel_d(NULL) {
         }
         fft_length = binsize;
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
-        printf("Total fft length is %u\n", fft_length);
+        printf("Total fft length is %u power2 %u\n", fft_orig, fft_length);
 
         /**
          *       | band 1 | band 2 | band 3 | ... band 10|
