@@ -45,6 +45,7 @@ private:
     std::complex<float>* channelData_d;
     std::complex<float>* demodData_d;
     std::complex<float>* demodFT8_d;
+    std::complex<float> demodFT8[1048576];
     char* pixel_d;
     std::vector<std::vector<uint32_t>> bins;
     uint32_t fft_length;

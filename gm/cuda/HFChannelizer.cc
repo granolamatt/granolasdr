@@ -153,7 +153,7 @@ int HFChannelizer::doCopy(uint64_t now) {
         
 
         cuda_check_error(cudaMemcpyAsync(&demodData_d[buff_pos], 
-            &channelData_d[0],
+            &channelData_d[fft_length/4],
             fft_length / 2 * sizeof(float),cudaMemcpyDeviceToDevice, stream));
         buff_pos += fft_length / 2;
 
@@ -168,14 +168,18 @@ int HFChannelizer::doCopy(uint64_t now) {
                 printf("Error in fft\n");
                 return 0;
             }
-            cuda_check_error(cudaMemcpyAsync(&demodFT8_d[0], 
-                &_d[rfft_length / oversample],
-                buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
+            cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
+                &demodFT8_d[0],
+                rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
+
+            cudaStreamSynchronize(stream);
+            fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
 
             buff_pos -= rfft_length / oversample;
 
+            // I think this will not stomp on the data
             cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
-                &channelData_d[rfft_length / oversample],
+                &demodData_d[rfft_length / oversample],
                 buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
             printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
             lastepoch = seconds;

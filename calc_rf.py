@@ -59,7 +59,7 @@ hf_fft = p
 # if (hf_fft % 4) != 0:
 #     hf_fft = (hf_fft + 4) - (hf_fft % 4)
 
-hf_rate = (hf_fft/epoch) / 2
+hf_rate = (hf_fft/epoch) / 4
 print(f"HF fft {hf_fft} rate is {hf_rate}")
 
 hfepoch = 1/baud
