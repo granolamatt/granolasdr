@@ -23,6 +23,7 @@ demodFT8_d(NULL),
 pixel_d(NULL) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
+    fs = std::ofstream("ft8.bin", std::ios::out | std::ios::binary | std::ios::app);
     try {
         //cuda_check_error(cudaHostAlloc((void**)&inData_d, inPos->getByteSize(), cudaHostAllocPortable));
         cuda_check_error(cudaMalloc((void**)&inData_d, inPos->getByteSize()));
@@ -55,7 +56,7 @@ pixel_d(NULL) {
                 {209712,222448,12736},
             };
         fft_length = 32768;
-        rfft_length = 698880;
+        rfft_length = 349440; // half off for some reason
 
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
@@ -167,7 +168,12 @@ int HFChannelizer::doCopy(uint64_t now) {
                 printf("Error in fft\n");
                 return 0;
             }
+            cuda_check_error(cudaMemcpyAsync(&demodFT8_d[0], 
+                &_d[rfft_length / oversample],
+                buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
+
             buff_pos -= rfft_length / oversample;
+
             cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
                 &channelData_d[rfft_length / oversample],
                 buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));

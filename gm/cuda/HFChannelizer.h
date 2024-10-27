@@ -1,6 +1,8 @@
 #ifndef _GM_CUDA_HFCHANNELIZER_H_
 #define _GM_CUDA_HFCHANNELIZER_H_
 
+#include <fstream>
+#include <iostream>
 #include <cuda.h>
 #include <cufft.h>
 #include "gm/cuda/HostCuda.h"
@@ -28,6 +30,8 @@ private:
     cufftHandle iplan;
     cufftHandle rplan;
     double lastepoch;
+
+    std::ofstream fs;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
