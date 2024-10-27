@@ -19,7 +19,7 @@ public:
     void stop() {
         setRunning(false);
     }
-    const static int oversample = 4;
+    const static int oversample = 1;
         
 private:
     // bool running;
@@ -40,6 +40,7 @@ private:
     int doCopy(uint64_t now);
     std::complex<float>* channelData_d;
     std::complex<float>* demodData_d;
+    std::complex<float>* demodFT8_d;
     char* pixel_d;
     std::vector<std::vector<uint32_t>> bins;
     uint32_t fft_length;

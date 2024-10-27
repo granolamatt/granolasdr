@@ -19,6 +19,7 @@ fftInData_d(NULL),
 fftData_d(NULL),
 channelData_d(NULL),
 demodData_d(NULL),
+demodFT8_d(NULL),
 pixel_d(NULL) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
@@ -54,13 +55,17 @@ pixel_d(NULL) {
                 {209712,222448,12736},
             };
         fft_length = 32768;
-        rfft_length = 2795528;
+        rfft_length = 698880;
 
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
 
         // Two so we can use it as a buffer also
         cuda_check_error(cudaMalloc((void**)&demodData_d, 2*rfft_length*sizeof(std::complex<float>) + 1024));
+        printf("Total rfft length is %u\n", rfft_length);
+
+        // Two so we can use it as a buffer also
+        cuda_check_error(cudaMalloc((void**)&demodFT8_d, rfft_length*sizeof(std::complex<float>) + 1024));
         printf("Total rfft length is %u\n", rfft_length);
 
         // Now for the sub channels
@@ -94,6 +99,7 @@ HFChannelizer::~HFChannelizer() {
     if (fftData_d) cudaFree(fftData_d);
     if (channelData_d) cudaFree(channelData_d);
     if (demodData_d) cudaFree(demodData_d);
+    if (demodFT8_d) cudaFree(demodFT8_d);
     // if (pixel_d) cudaFree(pixel_d);
     cufftDestroy(plan);
     cufftDestroy(iplan);
@@ -156,7 +162,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
 
             rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
-                (cufftComplex *)&demodData_d[0], CUFFT_FORWARD);
+                (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
             if (rval) {
                 printf("Error in fft\n");
                 return 0;

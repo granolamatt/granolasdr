@@ -62,15 +62,14 @@ hf_fft = p
 hf_rate = (hf_fft/epoch) / 2
 print(f"HF fft {hf_fft} rate is {hf_rate}")
 
-oversample = 4 # maybe 8 but 4 fits great into fft land
 hfepoch = 1/baud
-rhf_fft = int(hfepoch * hf_rate * oversample)
+# rhf_fft = int(hf_rate / (spacing + 0.005))
+rhf_fft = int(hfepoch * hf_rate)
 if (rhf_fft % 4) != 0:
-    rhf_fft = (rhf_fft + 4) - (rhf_fft % 4)
+    rhf_fft = (rhf_fft + 0) - (rhf_fft % 4)
 rhfepoch = rhf_fft / hf_rate
 hf_res = hf_rate / rhf_fft
 
-print(f"HF fft is {rhf_fft} epoch {rhfepoch} vs {1/baud} total {message_length/baud} resolution {hf_res}")
 
 print(f"Summary put \ngm::rx888::rx888::NLARGE = {large_fft}")
 print(f"gm::cuda::HFChannelizer::fft_length = {hf_fft}")
@@ -80,3 +79,6 @@ print("const std::vector<std::vector<uint32_t>> bins = {")
 for n in bins:
     print("{"+f"{n[0]},{n[1]},{n[2]}" + "},")
 print("};")
+
+print(f"HF fft is {rhf_fft} epoch {rhfepoch} vs {1/baud} total {message_length/baud} vs {message_length*rhfepoch} resolution {hf_res} vs {spacing}")
+
