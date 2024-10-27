@@ -23,7 +23,7 @@ private:
 public:
     rx888();
     ~rx888();
-    const static int NLARGE = 1048576;
+    const static int NLARGE = 524288;
     const static int BUFFERS = 16;
     const static uint32_t rx_samplerate = 140000000;
 

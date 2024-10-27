@@ -21,7 +21,7 @@ public:
     void stop() {
         setRunning(false);
     }
-    const static int oversample = 8;
+    const static int oversample = 1;
         
 private:
     // bool running;

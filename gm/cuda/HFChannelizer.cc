@@ -119,20 +119,23 @@ int HFChannelizer::doCopy(uint64_t now) {
         cuda_check_error(cudaMemcpyAsync(&inData_d[in_position], &inData[in_position], 
             length*inPos->getElementSize(), cudaMemcpyHostToDevice, stream));
         // now cast it to floats and scale it
-        cuda_h.copyKernel(&fftInData_d[in_position + gm::rx888::rx888::NLARGE], &inData_d[in_position], length);
+        cuda_h.copyKernel(&fftInData_d[in_position + length], &inData_d[in_position], length);
         // if we are on first buffer then do the wrap
+
         if (!(now % gm::rx888::rx888::BUFFERS)) {
             cudaMemcpyAsync(&fftInData_d, 
-                            &fftInData_d[in_position + gm::rx888::rx888::NLARGE], 
-                            inShape[1]*sizeof(float),cudaMemcpyDeviceToDevice, stream);
+                            &fftInData_d[gm::rx888::rx888::BUFFERS*length], 
+                            length*sizeof(float),cudaMemcpyDeviceToDevice, stream);
         }
+        
         cufftResult_t rval = cufftExecR2C(plan, &fftInData_d[in_position], (cufftComplex *) fftData_d);
         if (rval) {
             printf("Error in fft\n");
             return 0;
         }
+        
         uint32_t offset = 0;
-        cuda_check_error(cudaMemsetAsync(fftData_d, 0, fft_length*sizeof(std::complex<float>), stream));
+        cuda_check_error(cudaMemsetAsync(channelData_d, 0, fft_length*sizeof(std::complex<float>), stream));
         // Does the USB really belong here??  It is really
         // the same just inverted spectrum
         // copy it in backwards maybe
@@ -150,6 +153,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             printf("Error in fft\n");
             return 0;
         }
+        
         // we are done so put it in a buffer so others can use it??
         // but it stays in cuda so reuse the stream and have events??
         // I guess for now lets do ft8 here to make sure we have a concept
@@ -159,16 +163,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             &channelData_d[fft_length/4],
             fft_length / 2 * sizeof(float),cudaMemcpyDeviceToDevice, stream));
         buff_pos += fft_length / 2;
-        cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
-            &demodData_d[0],
-            rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
-       
-	cudaStreamSynchronize(stream);
-	printf("First few ");
-	for (int cnt = 0; cnt < 5; cnt++)
-	   printf(" (%f,%f)", demodFT8[cnt].real(), demodFT8[cnt].imag());
-	printf("\n");
         if (buff_pos > rfft_length) {
             auto now = std::chrono::system_clock::now();
             auto duration = now.time_since_epoch();
@@ -184,13 +179,6 @@ int HFChannelizer::doCopy(uint64_t now) {
                 &demodFT8_d[0],
                 rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
-            //cudaStreamSynchronize(stream);
-	    printf("First few ");
-	    for (int cnt = 0; cnt < 5; cnt++)
-	      printf(" (%f,%f)", demodFT8[cnt].real(), demodFT8[cnt].imag());
-	    printf("\n");
-            //fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-
             buff_pos -= rfft_length / oversample;
 
             // I think this will not stomp on the data
@@ -199,6 +187,20 @@ int HFChannelizer::doCopy(uint64_t now) {
                 buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
             printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
             lastepoch = seconds;
+
+            cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
+                &demodFT8_d[0],
+                rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));       
+            cudaStreamSynchronize(stream);
+            fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
+            // printf("First few length %u NLARGE %u ", length, gm::rx888::rx888::NLARGE);
+            // for (int cnt = 0; cnt < 5; cnt++)
+            // printf(" (%f,%f)", 
+            //             demodFT8[cnt].real(),
+            //             demodFT8[cnt].imag());
+            // printf("\n");
+            
+
         }
 
         return 1;

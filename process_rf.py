@@ -1,3 +1,6 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
 am_freqs = [
             [1.8,2.0],
             [3.5,4.0],
@@ -70,15 +73,11 @@ if (rhf_fft % 4) != 0:
 rhfepoch = rhf_fft / hf_rate
 hf_res = hf_rate / rhf_fft
 
-
-print(f"Summary put \ngm::rx888::rx888::NLARGE = {large_fft}")
-print(f"gm::cuda::HFChannelizer::fft_length = {hf_fft}")
-print(f"gm::cuda::HFChannelizer::rfft_length = {rhf_fft}")
-print("gm::cuda::HFChannelizer::frequencies")
-print("const std::vector<std::vector<uint32_t>> bins = {")
-for n in bins:
-    print("{"+f"{n[0]},{n[1]},{n[2]}" + "},")
-print("};")
-
 print(f"HF fft is {rhf_fft} epoch {rhfepoch} vs {1/baud} total {message_length/baud} vs {message_length*rhfepoch} resolution {hf_res} vs {spacing}")
+
+
+pts = np.fromfile("ft8.bin", dtype=np.complex64, count=rhf_fft)
+plt.figure()
+plt.plot(np.abs(pts.real))
+plt.show()
 
