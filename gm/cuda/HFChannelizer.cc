@@ -159,7 +159,16 @@ int HFChannelizer::doCopy(uint64_t now) {
             &channelData_d[fft_length/4],
             fft_length / 2 * sizeof(float),cudaMemcpyDeviceToDevice, stream));
         buff_pos += fft_length / 2;
+        cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
+            &demodData_d[0],
+            rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
+       
+	cudaStreamSynchronize(stream);
+	printf("First few ");
+	for (int cnt = 0; cnt < 5; cnt++)
+	   printf(" (%f,%f)", demodFT8[cnt].real(), demodFT8[cnt].imag());
+	printf("\n");
         if (buff_pos > rfft_length) {
             auto now = std::chrono::system_clock::now();
             auto duration = now.time_since_epoch();
@@ -176,6 +185,10 @@ int HFChannelizer::doCopy(uint64_t now) {
                 rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
             //cudaStreamSynchronize(stream);
+	    printf("First few ");
+	    for (int cnt = 0; cnt < 5; cnt++)
+	      printf(" (%f,%f)", demodFT8[cnt].real(), demodFT8[cnt].imag());
+	    printf("\n");
             //fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
 
             buff_pos -= rfft_length / oversample;
