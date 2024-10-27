@@ -21,7 +21,7 @@ public:
     void stop() {
         setRunning(false);
     }
-    const static int oversample = 1;
+    const static int oversample = 8;
         
 private:
     // bool running;
@@ -45,7 +45,7 @@ private:
     std::complex<float>* channelData_d;
     std::complex<float>* demodData_d;
     std::complex<float>* demodFT8_d;
-    std::complex<float> demodFT8[1048576];
+    std::complex<float>* demodFT8;
     char* pixel_d;
     std::vector<std::vector<uint32_t>> bins;
     uint32_t fft_length;

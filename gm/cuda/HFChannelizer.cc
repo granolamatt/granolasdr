@@ -58,6 +58,9 @@ pixel_d(NULL) {
         fft_length = 32768;
         rfft_length = 349440; // half off for some reason
 
+        demodFT8 = (std::complex<float>*)malloc(rfft_length*sizeof(std::complex<float>));
+
+
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
 
@@ -172,8 +175,8 @@ int HFChannelizer::doCopy(uint64_t now) {
                 &demodFT8_d[0],
                 rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
-            cudaStreamSynchronize(stream);
-            fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
+            //cudaStreamSynchronize(stream);
+            //fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
 
             buff_pos -= rfft_length / oversample;
 
