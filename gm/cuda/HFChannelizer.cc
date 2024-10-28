@@ -171,23 +171,22 @@ int HFChannelizer::doCopy(uint64_t now) {
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
             uint64_t trigger = (uint64_t)(seconds) % 15;
             
-            bool gotime = (trigger == 14 && trunc(seconds) > 0.9);
+            bool gotime = (trigger == 14 && trunc(seconds) > 0.99);
             if (gotime && ~startcap) {
                 startcap = true;
             }
+            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
+                (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
+            if (rval) {
+                printf("Error in fft\n");
+                return 0;
+            }
+            cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
+                &demodFT8_d[0],
+                rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
+
+            buff_pos -= rfft_length / oversample;
             if (startcap) {
-                rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
-                    (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
-                if (rval) {
-                    printf("Error in fft\n");
-                    return 0;
-                }
-                cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
-                    &demodFT8_d[0],
-                    rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
-
-                buff_pos -= rfft_length / oversample;
-
                 // I think this will not stomp on the data
                 cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
                     &demodData_d[rfft_length / oversample],
