@@ -14,7 +14,8 @@ namespace cuda {
 HFChannelizer::HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP) :
 inPos(inP),
 buff_pos{0},
-inData_d(NULL), 
+inData_d(NULL),
+startcap(false),
 fftInData_d(NULL), 
 fftData_d(NULL),
 channelData_d(NULL),
@@ -56,7 +57,7 @@ pixel_d(NULL) {
                 {209712,222448,12736},
             };
         fft_length = 32768;
-        rfft_length = 349440; // half off for some reason
+        rfft_length = 698880; // half off for some reason
 
         demodFT8 = (std::complex<float>*)malloc(rfft_length*sizeof(std::complex<float>));
 
@@ -142,7 +143,7 @@ int HFChannelizer::doCopy(uint64_t now) {
         for(const std::vector<uint32_t>& b : bins) {
             cuda_check_error(cudaMemcpyAsync(&channelData_d[offset], 
                 &fftData_d[b[0]],
-                b[2]*sizeof(float),cudaMemcpyDeviceToDevice, stream));
+                b[2]*sizeof(std::complex<float>),cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
 
@@ -168,37 +169,44 @@ int HFChannelizer::doCopy(uint64_t now) {
             auto now = std::chrono::system_clock::now();
             auto duration = now.time_since_epoch();
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
-
-            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
-                (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
+            uint64_t trigger = (uint64_t)(seconds) % 15;
+            
+            bool gotime = (trigger == 14 && trunc(seconds) > 0.9);
+            if (gotime && ~startcap) {
+                startcap = true;
             }
-            cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
-                &demodFT8_d[0],
-                rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
+            if (startcap) {
+                rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
+                    (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
+                if (rval) {
+                    printf("Error in fft\n");
+                    return 0;
+                }
+                cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
+                    &demodFT8_d[0],
+                    rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
-            buff_pos -= rfft_length / oversample;
+                buff_pos -= rfft_length / oversample;
 
-            // I think this will not stomp on the data
-            cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
-                &demodData_d[rfft_length / oversample],
-                buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
-            printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
-            lastepoch = seconds;
+                // I think this will not stomp on the data
+                cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
+                    &demodData_d[rfft_length / oversample],
+                    buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
+                printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
+                lastepoch = seconds;
 
-            cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
-                &demodFT8_d[0],
-                rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));       
-            cudaStreamSynchronize(stream);
-            fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-            // printf("First few length %u NLARGE %u ", length, gm::rx888::rx888::NLARGE);
-            // for (int cnt = 0; cnt < 5; cnt++)
-            // printf(" (%f,%f)", 
-            //             demodFT8[cnt].real(),
-            //             demodFT8[cnt].imag());
-            // printf("\n");
+                cuda_check_error(cudaMemcpyAsync(&demodFT8[0], 
+                    &demodFT8_d[0],
+                    rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));       
+                cudaStreamSynchronize(stream);
+                fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
+                // printf("First few length %u NLARGE %u ", length, gm::rx888::rx888::NLARGE);
+                // for (int cnt = 0; cnt < 5; cnt++)
+                // printf(" (%f,%f)", 
+                //             demodFT8[cnt].real(),
+                //             demodFT8[cnt].imag());
+                // printf("\n");
+            }
             
 
         }

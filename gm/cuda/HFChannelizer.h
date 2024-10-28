@@ -32,6 +32,7 @@ private:
     double lastepoch;
 
     std::ofstream fs;
+    bool startcap;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;

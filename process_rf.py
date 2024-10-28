@@ -1,6 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+def envelope(data, red=1024):
+    den = len(data) // red
+    env = abs(data[:den*red]).reshape((red, -1))
+    env = np.mean(env, axis=1)
+    return env
+
 am_freqs = [
             [1.8,2.0],
             [3.5,4.0],
@@ -78,6 +84,6 @@ print(f"HF fft is {rhf_fft} epoch {rhfepoch} vs {1/baud} total {message_length/b
 
 pts = np.fromfile("ft8.bin", dtype=np.complex64, count=rhf_fft)
 plt.figure()
-plt.plot(np.abs(pts.real))
+plt.plot(envelope(pts))
 plt.show()
 
