@@ -141,7 +141,7 @@ void decode(const monitor_t* mon, double tm_slot_start)
     {
         const ftx_candidate_t* cand = &candidate_list[idx];
 
-        float freq_hz = (mon->min_bin + cand->freq_offset + (float)cand->freq_sub / wf->freq_osr) / mon->symbol_period;
+        float freq_hz = mon->min_bin + cand->freq_offset;
         float time_sec = (cand->time_offset + (float)cand->time_sub / wf->time_osr) * mon->symbol_period;
 
         ftx_message_t message;
@@ -206,9 +206,10 @@ void decode(const monitor_t* mon, double tm_slot_start)
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
     
     for(int cc=0; cc < callsign_hashtable_size; cc++) {
-        printf("Age is %d \n", (uint8_t)(callsign_hashtable[idx_hash].hash >> 24));
-        if (callsign_hashtable[cc].callsign)
-            printf("Callsign seen %s\n",callsign_hashtable[cc].callsign);
+	printf("Callsign list");
+        if (callsign_hashtable[cc].callsign[0])
+            printf(" %s age %d",callsign_hashtable[cc].callsign,(uint8_t)(callsign_hashtable[cc].hash >> 24));
+	printf("\n");
     }
 
     hashtable_cleanup(10);
@@ -294,8 +295,8 @@ namespace hf {
                     float db = 10.0f * log10f(1E-12f + mag2);
                     int scaled = (int)(2 * db + 240);
                     mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
-                    if (offset == 0) 
-                       printf("real %f imag %f db %f scaled %d", real, imag, db, scaled);
+                    //if (offset == 0) 
+                    //   printf("real %f imag %f db %f scaled %d", real, imag, db, scaled);
                     if (db > mon.max_mag)
                         mon.max_mag = db;
                     offset += 1;
