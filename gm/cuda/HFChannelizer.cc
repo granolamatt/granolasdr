@@ -476,6 +476,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                 }
                 ++mon.wf.num_blocks;
                 if (mon.wf.num_blocks % FT8_NN == 0) {
+                    printf("Processing\n");
                     // Decode accumulated data (containing slightly less than a full time slot)
                     decode(&mon, seconds);
                     monitor_reset(&mon);
