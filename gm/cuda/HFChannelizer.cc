@@ -188,32 +188,32 @@ int HFChannelizer::doCopy(uint64_t now) {
                 printf("Error in fft\n");
                 return 0;
             }
-
             buff_pos -= rfft_length / oversample;
             // I think this will not stomp on the data
             cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
                 &demodData_d[rfft_length / oversample],
                 buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
-            printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
-            lastepoch = seconds;
             if (startcap) {
+                printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
                 int buffnum = buffer_number % BUFFERS;
                 cuda_check_error(cudaMemcpyAsync(&demodFT8[num_blocks*rfft_length + buffnum*rfft_length*FT8_NN], 
                     &demodFT8_d[0],
                     rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));
                 num_blocks++;
                 // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-                if (num_blocks >= FT8_NN) {
-                    printf("Processing buffer %ul\n", buffer_number);
+                if (num_blocks > FT8_NN) {
+                    printf("Processing buffer %u\n", buffer_number);
                     cudaStreamSynchronize(stream);
                     rt8BufferPosition.setPosition(buffer_number, 1);
                     // Decode accumulated data (containing slightly less than a full time slot)
                     //decode(&mon, seconds);
                     startcap = false;
                     buffer_number++;
+                    num_blocks = 0;
                 }
 
             }
+            lastepoch = seconds;
             
         }
 
