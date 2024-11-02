@@ -194,7 +194,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                 &demodData_d[rfft_length / oversample],
                 buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
             if (startcap) {
-                printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
+                // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
                 int buffnum = buffer_number % BUFFERS;
                 cuda_check_error(cudaMemcpyAsync(&demodFT8[num_blocks*rfft_length + buffnum*rfft_length*FT8_NN], 
                     &demodFT8_d[0],

@@ -20,6 +20,9 @@ public:
     void stop() {
         setRunning(false);
     }
+    gm::buffer::BufferPosition<std::complex<float>>* getBuffer() {
+        return &rt8BufferPosition;
+    }
     const static int oversample = 1;
         
 private:

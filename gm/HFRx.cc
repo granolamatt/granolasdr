@@ -10,6 +10,7 @@
 #include "gm/buffer/BufferPosition.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/cuda/HFChannelizer.h"
+#include "gm/hf/ft8.cc"
 
 
 int main() {
@@ -24,6 +25,10 @@ int main() {
     // wait until at least an epoch has gone by
     // gm::buffer::BufferPosition<int16_t>* bpos = epochbuffer.getOutputBufferPos();
     // bpos->getPosition(1,1);
+
+    gm::hf::FT8 ft8(epochbuffer.getBuffer());
+    gm::Thread nvft8(ft8);
+    nvcpy.start();
 
     while (true) {
         usleep(1000000);
