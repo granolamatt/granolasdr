@@ -8,13 +8,19 @@
 namespace gm {
 namespace hf {
 
-class ft8 {
-
-private:
-    monitor_t mon;
+class FT8 : public Runnable {
 
 public:
-
+    FT8(gm::buffer::BufferPosition<std::complex<float>>* inP);
+    ~FT8();
+    void run();
+    void stop() {
+        setRunning(false);
+    }
+private:
+    monitor_t mon;
+    gm::buffer::BufferPosition<std::complex<float>>* inPos;
+    std::complex<float>* demodFT8;
 
 };
 

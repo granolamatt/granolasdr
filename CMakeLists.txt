@@ -59,6 +59,7 @@ set(GM_SOURCES
     "gm/rx888/rx888.cc"
     "gm/zmqcode/zmqserver.cc" 
     "gm/zmqcode/zmqworker.cc"
+    "gm/hf/ft8.cc"
     "gm/zmqcode/ZMQPub.cc")
 
 set(GM_LIBS ${LIBLOC} ${LIBLOG} bladeRF sddc ${LIBUSB} zmq)

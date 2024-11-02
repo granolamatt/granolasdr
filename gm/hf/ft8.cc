@@ -1,4 +1,14 @@
 
+#include <unistd.h>
+#include <iostream>
+#include <string.h>
+#include <complex>
+#include <chrono>
+
+#include "gm/hf/ft8.h"
+#include "gm/buffer/BufferPosition.h"
+
+
 #include "ft8_lib/ft8/decode.h"
 #include "ft8_lib/ft8/encode.h"
 #include "ft8_lib/ft8/message.h"
@@ -239,41 +249,59 @@ void load_monitor(monitor_t* me)
     me->max_mag = -120.0f;
 }
 
+namespace gm {
+namespace hf {
 
-ft8::ft8() {
-    hashtable_init();
-    load_monitor(&mon);
-}
+    FT8::FT8(gm::buffer::BufferPosition<std::complex<float>>* inP) :
+      inPos(inP) {
+        hashtable_init();
+        load_monitor(&mon);
+        demodFT8 = inPos->getBuffer();
+    }
+
+    FT8::~FT8() {
+        // waterfall destroy   
+    }
 
 
-ft8::run() {
-                    // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-
-                    // XXX Do this instead
-                    // int num = fread(buffer,8,sample_rate,ptr); // read 10 bytes to our buffer
-                    // is_live = (num > 0);
-                    int offset = mon.wf.num_blocks * mon.wf.block_stride;
-
-                    for (int cc=0; cc< 698880; cc++) {
-                    //for (int cc=0; cc< 0; cc++) {
-                        float real = demodFT8[cc].real() / 100e6;
-                        float imag = demodFT8[cc].imag() / 100e6;
-                        float mag2 = real*real + imag*imag;
-                        float db = 10.0f * log10f(1E-12f + mag2);
-                        int scaled = (int)(2 * db + 240);
-                        mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
-                        if (db > mon.max_mag)
-                            mon.max_mag = db;
-                        offset += 1;
-                    }
-                    ++mon.wf.num_blocks;
-                    if (mon.wf.num_blocks % FT8_NN == 0) {
-                        printf("Processing\n");
-                        // Decode accumulated data (containing slightly less than a full time slot)
-                        //decode(&mon, seconds);
-                        monitor_reset(&mon);
-                        startcap = false;
-                    }
-
+    void FT8::run() {
+        uint64_t now = inPos->getNow(0);
+        
+        while(isRunning()) {
+            uint64_t next = inPos->getPosition(now+1, 1);
+            while(now < next) {
+                uint64_t length = next - now;
+                if (length > 4) {
+                    std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
+                    now = next;
+                    break;
                 }
+                printf("Looking for messages\n");
+                int offset = mon.wf.num_blocks * mon.wf.block_stride;
+
+                for (int cc=0; cc< 698880*FT8_NN; cc++) {
+                    int buff = now % 16;
+                    int idx = 698880*FT8_NN*buff;
+                    float real = demodFT8[cc + idx].real() / 100e6;
+                    float imag = demodFT8[cc + idx].imag() / 100e6;
+                    float mag2 = real*real + imag*imag;
+                    float db = 10.0f * log10f(1E-12f + mag2);
+                    int scaled = (int)(2 * db + 240);
+                    mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
+                    if (db > mon.max_mag)
+                        mon.max_mag = db;
+                    offset += 1;
+                }
+                printf("Processing\n");
+                // Decode accumulated data (containing slightly less than a full time slot)
+                decode(&mon, 0);
+                monitor_reset(&mon);
+            }
+            now += 1;
+        }
+
+    }
 }
+
+}
+

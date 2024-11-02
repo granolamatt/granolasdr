@@ -201,14 +201,15 @@ int HFChannelizer::doCopy(uint64_t now) {
                     rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));
                 num_blocks++;
                 // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-                if (num_blocks > FT8_NN) {
+                if (num_blocks >= FT8_NN) {
                     printf("Processing buffer %u\n", buffer_number);
                     cudaStreamSynchronize(stream);
+                    buffer_number++;
+
                     rt8BufferPosition.setPosition(buffer_number, 1);
                     // Decode accumulated data (containing slightly less than a full time slot)
                     //decode(&mon, seconds);
                     startcap = false;
-                    buffer_number++;
                     num_blocks = 0;
                 }
 
