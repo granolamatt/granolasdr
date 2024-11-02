@@ -278,7 +278,7 @@ namespace hf {
                 }
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
                 printf("Looking for messages %d offset %d\n", now, offset);
-                printf("Stride is %d mysize %d \n", inPos->stride[1], 698880*FT8_NN);
+                //printf("Stride is %d mysize %d \n", inPos->stride[1], 698880*FT8_NN);
                 int buff = now % 16;
                 int idx = 698880*FT8_NN*buff;
                 for (int cc=0; cc< 698880*FT8_NN; cc++) {
