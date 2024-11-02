@@ -37,8 +37,6 @@ set(LIBUSB usb pthread rt)
 set(LIBLOG)
 set(LIBLOC "-L/opt/cuda/lib64")
 
-
-
 set(GM_CUDA_SOURCES
     "gm/cuda/HostCuda.cu"
     "gm/cuda/OverlapSave.cc"
@@ -75,7 +73,7 @@ add_executable(rx888_capture "gm/rx888_test.cc")
 target_link_libraries (rx888_capture lib_granolamatt ${GM_LIBS})
 
 add_executable(hf_rx "gm/HFRx.cc")
-target_link_libraries (hf_rx lib_granolamatt gmcuda ${GM_LIBS})
+target_link_libraries (hf_rx -fsanitize=address -lm lib_granolamatt gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a ${GM_LIBS})
 
 add_executable(zmqclient gm/zmqcode/client.cc)
 target_link_libraries (zmqclient ${LIBLOC} zmq)

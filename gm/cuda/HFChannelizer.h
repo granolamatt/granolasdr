@@ -8,7 +8,7 @@
 #include "gm/cuda/HostCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
-
+#include "ft8_lib/common/monitor.h"
 
 namespace gm {
 namespace cuda {
@@ -33,6 +33,8 @@ private:
 
     std::ofstream fs;
     bool startcap;
+
+    monitor_t mon;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;

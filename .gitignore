@@ -1,2 +1,8 @@
 build
 ft8.bin
+granolasdr.code-workspace
+**/*.a
+ft8_lib
+ft8_lib/decode_ft8
+ft8_lib/gen_ft8
+ft8_lib/test_ft8
