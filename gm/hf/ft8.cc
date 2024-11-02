@@ -265,7 +265,7 @@ namespace hf {
 
 
     void FT8::run() {
-        uint64_t now = inPos->getNow(0, 1);
+        uint64_t now = inPos->getNow(1);
         
         while(isRunning()) {
             uint64_t next = inPos->getPosition(now+1, 1);
@@ -278,7 +278,7 @@ namespace hf {
                 }
                 printf("Looking for messages %d\n", now);
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
-
+                
                 int buff = now % 16;
                 int idx = 698880*FT8_NN*buff;
                 for (int cc=0; cc< 698880*FT8_NN; cc++) {
