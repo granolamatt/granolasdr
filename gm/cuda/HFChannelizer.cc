@@ -144,19 +144,6 @@ void decode(const monitor_t* mon, double tm_slot_start)
         float freq_hz = (mon->min_bin + cand->freq_offset + (float)cand->freq_sub / wf->freq_osr) / mon->symbol_period;
         float time_sec = (cand->time_offset + (float)cand->time_sub / wf->time_osr) * mon->symbol_period;
 
-#ifdef WATERFALL_USE_PHASE
-        // int resynth_len = 12000 * 16;
-        // float resynth_signal[resynth_len];
-        // for (int pos = 0; pos < resynth_len; ++pos)
-        // {
-        //     resynth_signal[pos] = 0;
-        // }
-        // monitor_resynth(mon, cand, resynth_signal);
-        // char resynth_path[80];
-        // sprintf(resynth_path, "resynth_%04f_%02.1f.wav", freq_hz, time_sec);
-        // save_wav(resynth_signal, resynth_len, 12000, resynth_path);
-#endif
-
         ftx_message_t message;
         ftx_decode_status_t status;
         if (!ftx_decode_candidate(wf, cand, kLDPC_iterations, &message, &status))
@@ -442,7 +429,6 @@ int HFChannelizer::doCopy(uint64_t now) {
                 rfft_length * sizeof(float),cudaMemcpyDeviceToHost, stream));
 
             buff_pos -= rfft_length / oversample;
-            if (startcap) {
                 // I think this will not stomp on the data
                 cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
                     &demodData_d[rfft_length / oversample],
@@ -454,6 +440,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                     &demodFT8_d[0],
                     rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));       
                 cudaStreamSynchronize(stream);
+	    if (startcap) {
 
                 // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
 
@@ -463,13 +450,13 @@ int HFChannelizer::doCopy(uint64_t now) {
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
 
                 for (int cc=0; cc< 698880; cc++) {
+                //for (int cc=0; cc< 0; cc++) {
                     float real = demodFT8[cc].real() / 100e6;
                     float imag = demodFT8[cc].imag() / 100e6;
                     float mag2 = real*real + imag*imag;
                     float db = 10.0f * log10f(1E-12f + mag2);
                     int scaled = (int)(2 * db + 240);
                     mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
-                    // printf("Put in %d db %f\n", mon.wf.mag[cc], db);
                     if (db > mon.max_mag)
                         mon.max_mag = db;
                     offset += 1;
@@ -478,7 +465,7 @@ int HFChannelizer::doCopy(uint64_t now) {
                 if (mon.wf.num_blocks % FT8_NN == 0) {
                     printf("Processing\n");
                     // Decode accumulated data (containing slightly less than a full time slot)
-                    decode(&mon, seconds);
+                    //decode(&mon, seconds);
                     monitor_reset(&mon);
                     startcap = false;
                 }
