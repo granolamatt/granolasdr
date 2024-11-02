@@ -276,9 +276,9 @@ namespace hf {
                     now = next;
                     break;
                 }
-                printf("Looking for messages %d\n", now);
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
-                
+                printf("Looking for messages %d offset %d\n", now, offset);
+                printf("Stride is %d mysize %d \n", inPos->stride[1], 698880*FT8_NN);
                 int buff = now % 16;
                 int idx = 698880*FT8_NN*buff;
                 for (int cc=0; cc< 698880*FT8_NN; cc++) {
@@ -294,8 +294,8 @@ namespace hf {
                         mon.max_mag = db;
                     offset += 1;
                 }
+                mon.wf.num_blocks += FT8_NN;
                 printf("Processing\n");
-                // Decode accumulated data (containing slightly less than a full time slot)
                 decode(&mon, 0);
                 monitor_reset(&mon);
                 now += 1;
