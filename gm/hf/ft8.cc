@@ -288,6 +288,8 @@ namespace hf {
                     float db = 10.0f * log10f(1E-12f + mag2);
                     int scaled = (int)(2 * db + 240);
                     mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
+                    if (offset == 0) 
+                       print("real %f imag %f db %f scaled %d", real, imag, db, scaled);
                     if (db > mon.max_mag)
                         mon.max_mag = db;
                     offset += 1;
@@ -296,8 +298,8 @@ namespace hf {
                 // Decode accumulated data (containing slightly less than a full time slot)
                 decode(&mon, 0);
                 monitor_reset(&mon);
+                now += 1;
             }
-            now += 1;
         }
 
     }
