@@ -124,7 +124,6 @@ void decode(const monitor_t* mon, double tm_slot_start)
     // Find top candidates by Costas sync score and localize them in time and frequency
     ftx_candidate_t candidate_list[kMax_candidates];
     int num_candidates = ftx_find_candidates(wf, kMax_candidates, candidate_list, kMin_score);
-    printf("Found %d candidates\n",num_candidates);
 
     // Hash table for decoded messages (to check for duplicates)
     int num_decoded = 0;
@@ -205,6 +204,10 @@ void decode(const monitor_t* mon, double tm_slot_start)
         }
     }
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
+    for(int cc=0; cc < callsign_hashtable_size; cc++) {
+        printf("Callsign seen %s\n",callsign_hashtable[cc].callsign);
+    }
+
     hashtable_cleanup(10);
 }
 
@@ -295,8 +298,11 @@ namespace hf {
                     offset += 1;
                 }
                 mon.wf.num_blocks += FT8_NN;
-                printf("Processing\n");
-                decode(&mon, 0);
+                auto nowsec = std::chrono::system_clock::now();
+                auto duration = nowsec.time_since_epoch();
+                double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
+                printf("Processing %f\n", seconds);
+                decode(&mon, seconds);
                 monitor_reset(&mon);
                 now += 1;
             }

@@ -173,8 +173,8 @@ int HFChannelizer::doCopy(uint64_t now) {
         buff_pos += fft_length / 2;
 
         if (buff_pos > rfft_length) {
-            auto now = std::chrono::system_clock::now();
-            auto duration = now.time_since_epoch();
+            auto nowsec = std::chrono::system_clock::now();
+            auto duration = nowsec.time_since_epoch();
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
             uint64_t trigger = (uint64_t)(seconds) % 15;
             
