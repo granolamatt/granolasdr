@@ -204,8 +204,11 @@ void decode(const monitor_t* mon, double tm_slot_start)
         }
     }
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
+    
     for(int cc=0; cc < callsign_hashtable_size; cc++) {
-        printf("Callsign seen %s\n",callsign_hashtable[cc].callsign);
+        printf("Age is %d \n", (uint8_t)(callsign_hashtable[idx_hash].hash >> 24));
+        if (callsign_hashtable[cc].callsign)
+            printf("Callsign seen %s\n",callsign_hashtable[cc].callsign);
     }
 
     hashtable_cleanup(10);
