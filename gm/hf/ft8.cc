@@ -289,7 +289,7 @@ namespace hf {
                     int scaled = (int)(2 * db + 240);
                     mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
                     if (offset == 0) 
-                       print("real %f imag %f db %f scaled %d", real, imag, db, scaled);
+                       printf("real %f imag %f db %f scaled %d", real, imag, db, scaled);
                     if (db > mon.max_mag)
                         mon.max_mag = db;
                     offset += 1;
