@@ -276,12 +276,11 @@ namespace hf {
                     now = next;
                     break;
                 }
-                printf("Looking for messages\n");
+                printf("Looking for messages %d\n", now);
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
-
+                int buff = now % 16;
+                int idx = 698880*FT8_NN*buff;
                 for (int cc=0; cc< 698880*FT8_NN; cc++) {
-                    int buff = now % 16;
-                    int idx = 698880*FT8_NN*buff;
                     float real = demodFT8[cc + idx].real() / 100e6;
                     float imag = demodFT8[cc + idx].imag() / 100e6;
                     float mag2 = real*real + imag*imag;

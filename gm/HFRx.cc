@@ -28,7 +28,7 @@ int main() {
 
     gm::hf::FT8 ft8(epochbuffer.getBuffer());
     gm::Thread nvft8(ft8);
-    nvcpy.start();
+    nvft8.start();
 
     while (true) {
         usleep(1000000);
