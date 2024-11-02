@@ -8,7 +8,6 @@
 #include "gm/cuda/HostCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
-#include "ft8_lib/common/monitor.h"
 
 namespace gm {
 namespace cuda {
@@ -30,11 +29,14 @@ private:
     cufftHandle iplan;
     cufftHandle rplan;
     double lastepoch;
+    const static int BUFFERS = 16;
 
     std::ofstream fs;
     bool startcap;
+    int num_blocks;
+    int buffer_number;
 
-    monitor_t mon;
+    gm::buffer::BufferPosition<std::complex<float>> rt8BufferPosition;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
