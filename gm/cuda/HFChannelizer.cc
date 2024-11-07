@@ -65,9 +65,9 @@ pixel_d(NULL) {
         fft_length = 32768;
         rfft_length = 698880; // half off for some reason
 
-        demodFT8 = (std::complex<float>*)calloc(sizeof(std::complex<float>), FT8_NN*BUFFERS*rfft_length);
+        demodFT8 = (std::complex<float>*)calloc(sizeof(std::complex<float>), (FT8_NN + 14)*BUFFERS*rfft_length);
         
-        rt8BufferPosition.setBuffer(demodFT8, {BUFFERS,rfft_length*FT8_NN});
+        rt8BufferPosition.setBuffer(demodFT8, {BUFFERS,rfft_length*(FT8_NN + 14)});
 
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
@@ -178,7 +178,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
             uint64_t trigger = (uint64_t)(seconds) % 15;
             
-            bool gotime = (trigger == 14 && trunc(seconds) > 0.97);
+            bool gotime = (trigger == 14 && trunc(seconds) > 0.81);
             if (gotime && ~startcap) {
                 startcap = true;
             }
@@ -196,12 +196,12 @@ int HFChannelizer::doCopy(uint64_t now) {
             if (startcap) {
                 // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
                 int buffnum = buffer_number % BUFFERS;
-                cuda_check_error(cudaMemcpyAsync(&demodFT8[num_blocks*rfft_length + buffnum*rfft_length*FT8_NN], 
+                cuda_check_error(cudaMemcpyAsync(&demodFT8[num_blocks*rfft_length + buffnum*rfft_length*(FT8_NN + 14)], 
                     &demodFT8_d[0],
                     rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));
                 num_blocks++;
                 // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-                if (num_blocks >= FT8_NN) {
+                if (num_blocks >= (FT8_NN + 14)) {
                     printf("Processing buffer %u\n", buffer_number);
                     cudaStreamSynchronize(stream);
                     buffer_number++;
