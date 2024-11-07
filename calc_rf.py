@@ -80,5 +80,17 @@ for n in bins:
     print("{"+f"{n[0]},{n[1]},{n[2]}" + "},")
 print("};")
 
+print("Now resampled")
+ratio = 698880 / 32768
+# ratio = 1
+total = 0
+for i,n in enumerate(bins):
+    bb = am_freqs[i]
+    start = total
+    total += n[2] * ratio
+    end = total
+    print(f"{{start:{bb[0]},stop:{bb[1]},binstart:{start},binstop:{end}}}" + ",")
+print("};")
+
 print(f"HF fft is {rhf_fft} epoch {rhfepoch} vs {1/baud} total {message_length/baud} vs {message_length*rhfepoch} resolution {hf_res} vs {spacing}")
 
