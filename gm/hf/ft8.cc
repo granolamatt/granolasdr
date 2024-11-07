@@ -19,14 +19,14 @@
 #include "ft8_lib/ft8/debug.h"
 
 
-const int kMin_score = 10; // Minimum sync score threshold for candidates
-const int kMax_candidates = 140;
+const int kMin_score = 5; // Minimum sync score threshold for candidates
+const int kMax_candidates = 440;
 const int kLDPC_iterations = 25;
 
 const int kMax_decoded_messages = 50;
 
-const int kFreq_osr = 2; // Frequency oversampling rate (bin subdivision)
-const int kTime_osr = 2; // Time oversampling rate (symbol subdivision)
+const int kFreq_osr = 1; // Frequency oversampling rate (bin subdivision)
+const int kTime_osr = 1; // Time oversampling rate (symbol subdivision)
 
 #define CALLSIGN_HASHTABLE_SIZE 256
 
@@ -204,12 +204,22 @@ void decode(const monitor_t* mon, double tm_slot_start)
         }
     }
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
-    
+   
+    int numfound = 0;
     for(int cc=0; cc < callsign_hashtable_size; cc++) {
-	printf("Callsign list");
+	    if (callsign_hashtable[cc].callsign[0]) {
+		    numfound = 1;
+		    break;
+	    }
+    }
+    if (numfound) {
+      printf("Callsign list");
+      for(int cc=0; cc < callsign_hashtable_size; cc++) {
         if (callsign_hashtable[cc].callsign[0])
-            printf(" %s age %d",callsign_hashtable[cc].callsign,(uint8_t)(callsign_hashtable[cc].hash >> 24));
-	printf("\n");
+            printf(" %s",callsign_hashtable[cc].callsign);
+      }
+      printf("\n");
+      fflush(stdout);
     }
 
     hashtable_cleanup(10);

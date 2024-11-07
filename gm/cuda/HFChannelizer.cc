@@ -178,7 +178,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
             uint64_t trigger = (uint64_t)(seconds) % 15;
             
-            bool gotime = (trigger == 14 && trunc(seconds) > 0.99);
+            bool gotime = (trigger == 14 && trunc(seconds) > 0.97);
             if (gotime && ~startcap) {
                 startcap = true;
             }
