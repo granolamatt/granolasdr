@@ -1,4 +1,5 @@
 build
+build_vnc
 ft8.bin
 granolasdr.code-workspace
 **/*.a

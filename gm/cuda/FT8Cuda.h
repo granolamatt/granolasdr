@@ -1,6 +1,8 @@
-#ifndef _GM_CUDA_HFCHANNELIZER_H_
-#define _GM_CUDA_HFCHANNELIZER_H_
+#ifndef _GM_CUDA_FT8CUDA_H_
+#define _GM_CUDA_FT8CUDA_H_
 
+#include <fstream>
+#include <iostream>
 #include <cuda.h>
 #include <cufft.h>
 #include "gm/cuda/HostCuda.h"
@@ -10,51 +12,54 @@
 namespace gm {
 namespace cuda {
 
-class HFChannelizer : public Thread {
+class FT8Cuda : public Thread {
 public:
-    HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP);
-    ~HFChannelizer();
+    FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP);
+    ~FT8Cuda();
     void run();
     void stop() {
         setRunning(false);
     }
     gm::buffer::BufferPosition<std::complex<float>>* getBuffer() {
-        return &hfBufferPosition;
+        return &rt8BufferPosition;
     }
     const static int oversample = 1;
         
 private:
     // bool running;
     cudaStream_t stream;
-    cufftHandle plan;
-    cufftHandle iplan;
+    cufftHandle rplan;
     double lastepoch;
-
     const static int BUFFERS = 16;
 
+    std::ofstream fs;
+    bool startcap;
     int num_blocks;
-    uint64_t buffer_number;
+    int buffer_number;
 
-    gm::buffer::BufferPosition<std::complex<float>> hfBufferPosition;
+    gm::buffer::BufferPosition<std::complex<float>> rt8BufferPosition;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
-    int16_t* inData_d; // cuda copy of rx data
-    int16_t* inData; // rx data
-    float* fftInData_d;
+    double freqsperbin;
     std::complex<float>* fftData_d;
-    gm::buffer::BufferPosition<int16_t>* inPos;
+    gm::buffer::BufferPosition<std::complex<float>>* inPos;
+    std::complex<float> *inData_d;
     int doCopy(uint64_t now);
-    std::complex<float>* channelData_d;
     std::complex<float>* demodData_d;
+    std::complex<float>* demodFT8_d;
+    std::complex<float>* demodFT8;
     std::vector<std::vector<uint32_t>> bins;
-    uint32_t fft_length;
+    uint32_t rfft_length;
     uint32_t nTune;
     uint32_t nChannels;
+    double lastsecond;
+
+    uint32_t buff_pos;
 
 
 };
 }
 }
 
-#endif // _GM_CUDA_HFCHANNELIZER_H_
+#endif // _GM_CUDA_FT8CUDA_H_

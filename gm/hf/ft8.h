@@ -8,7 +8,7 @@
 namespace gm {
 namespace hf {
 
-class FT8 : public Runnable {
+class FT8 : public Thread {
 
 public:
     FT8(gm::buffer::BufferPosition<std::complex<float>>* inP);

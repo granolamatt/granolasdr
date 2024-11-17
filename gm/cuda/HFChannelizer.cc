@@ -16,20 +16,15 @@ namespace cuda {
 
 HFChannelizer::HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP) :
 inPos(inP),
-buff_pos{0},
 inData_d(NULL),
-startcap(false),
 fftInData_d(NULL), 
 fftData_d(NULL),
-channelData_d(NULL),
 demodData_d(NULL),
-demodFT8_d(NULL),
+channelData_d(NULL),
 num_blocks(0),
-buffer_number(0),
-pixel_d(NULL) {
+buffer_number(0) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
-    // fs = std::ofstream("ft8.bin", std::ios::out | std::ios::binary | std::ios::app);
 
     try {
         //cuda_check_error(cudaHostAlloc((void**)&inData_d, inPos->getByteSize(), cudaHostAllocPortable));
@@ -63,22 +58,13 @@ pixel_d(NULL) {
                 {209712,222448,12736},
             };
         fft_length = 32768;
-        rfft_length = 698880; // half off for some reason
 
-        demodFT8 = (std::complex<float>*)calloc(sizeof(std::complex<float>), (FT8_NN + 14)*BUFFERS*rfft_length);
+        cuda_check_error(cudaMalloc((void**)&demodData_d, BUFFERS * fft_length / 2 * sizeof(std::complex<float>) + 1024));
         
-        rt8BufferPosition.setBuffer(demodFT8, {BUFFERS,rfft_length*(FT8_NN + 14)});
+        hfBufferPosition.setBuffer(demodData_d, {BUFFERS,fft_length / 2});
 
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
-
-        // Two so we can use it as a buffer also
-        cuda_check_error(cudaMalloc((void**)&demodData_d, 2*rfft_length*sizeof(std::complex<float>) + 1024));
-        printf("Total rfft length is %u\n", rfft_length);
-
-        // Two so we can use it as a buffer also
-        cuda_check_error(cudaMalloc((void**)&demodFT8_d, rfft_length*sizeof(std::complex<float>) + 1024));
-        printf("Total rfft length is %u\n", rfft_length);
 
         // Now for the sub channels
         fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
@@ -86,16 +72,6 @@ pixel_d(NULL) {
             printf("Error: exit for now\n");
         }
         fftRes = cufftSetStream(iplan, stream);
-        if (fftRes) {
-            printf("Error: exit for now\n");
-        }
-
-        // Now for the sub channels
-        fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
-        if (fftRes) {
-            printf("Error: exit for now\n");
-        }
-        fftRes = cufftSetStream(rplan, stream);
         if (fftRes) {
             printf("Error: exit for now\n");
         }
@@ -111,16 +87,14 @@ HFChannelizer::~HFChannelizer() {
     if (fftData_d) cudaFree(fftData_d);
     if (channelData_d) cudaFree(channelData_d);
     if (demodData_d) cudaFree(demodData_d);
-    if (demodFT8_d) cudaFree(demodFT8_d);
-    // if (pixel_d) cudaFree(pixel_d);
     cufftDestroy(plan);
     cufftDestroy(iplan);
-    cufftDestroy(rplan);
     cudaStreamDestroy(stream);
 }
 
 int HFChannelizer::doCopy(uint64_t now) {
     try {
+        static gm::buffer::BufferPosition<std::complex<float>>* bpos = &hfBufferPosition;
         size_t length = inShape[1];
         int in_position = (now % inShape[0]) * length;
         // first copy the data into the device
@@ -167,57 +141,18 @@ int HFChannelizer::doCopy(uint64_t now) {
         // I guess for now lets do ft8 here to make sure we have a concept
         
 
-        cuda_check_error(cudaMemcpyAsync(&demodData_d[buff_pos], 
+        cuda_check_error(cudaMemcpyAsync(&demodData_d[(buffer_number % BUFFERS) * fft_length / 2],
             &channelData_d[fft_length/4],
-            fft_length / 2 * sizeof(float),cudaMemcpyDeviceToDevice, stream));
-        buff_pos += fft_length / 2;
+            fft_length / 2 * sizeof(std::complex<float>),cudaMemcpyDeviceToDevice, stream));
 
-        if (buff_pos > rfft_length) {
-            auto nowsec = std::chrono::system_clock::now();
-            auto duration = nowsec.time_since_epoch();
-            double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
-            uint64_t trigger = (uint64_t)(seconds) % 15;
-            
-            bool gotime = (trigger == 14 && trunc(seconds) > 0.81);
-            if (gotime && ~startcap) {
-                startcap = true;
-            }
-            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
-                (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
-            }
-            buff_pos -= rfft_length / oversample;
-            // I think this will not stomp on the data
-            cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
-                &demodData_d[rfft_length / oversample],
-                buff_pos * sizeof(float),cudaMemcpyDeviceToDevice, stream));
-            if (startcap) {
-                // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
-                int buffnum = buffer_number % BUFFERS;
-                cuda_check_error(cudaMemcpyAsync(&demodFT8[num_blocks*rfft_length + buffnum*rfft_length*(FT8_NN + 14)], 
-                    &demodFT8_d[0],
-                    rfft_length * sizeof(std::complex<float>),cudaMemcpyDeviceToHost, stream));
-                num_blocks++;
-                // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-                if (num_blocks >= (FT8_NN + 14)) {
-                    printf("Processing buffer %u\n", buffer_number);
-                    cudaStreamSynchronize(stream);
-                    buffer_number++;
-
-                    rt8BufferPosition.setPosition(buffer_number, 1);
-                    // Decode accumulated data (containing slightly less than a full time slot)
-                    //decode(&mon, seconds);
-                    startcap = false;
-                    num_blocks = 0;
-                }
-
-            }
-            lastepoch = seconds;
-            
+        cudaStreamAddCallback(stream,
+        [](cudaStream_t mstream, cudaError_t status, void *data) {
+            uint64_t* pos = (uint64_t*)data;
+            bpos->setPosition(*pos, 1);
+            *pos += 1;
         }
-
+        , (void *)&buffer_number, 0);
+        
         return 1;
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error after cudaCopy: " << e.what() << std::endl;
@@ -240,7 +175,7 @@ void HFChannelizer::run() {
             int numCopied = doCopy(now);
             if (!numCopied) exit(-200);
             //outPos.setPosition(now, 1);
-	    now += numCopied;
+	        now += numCopied;
         }
     }
 }

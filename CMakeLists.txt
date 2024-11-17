@@ -42,6 +42,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/OverlapSave.cc"
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"
+    "gm/cuda/FT8Cuda.cc"
     )
 
 enable_language("CUDA")

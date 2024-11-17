@@ -10,6 +10,7 @@
 #include "gm/buffer/BufferPosition.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/cuda/HFChannelizer.h"
+#include "gm/cuda/FT8Cuda.h"
 #include "gm/hf/ft8.cc"
 
 
@@ -19,19 +20,17 @@ int main() {
     mydsp.start_card();
 
     gm::cuda::HFChannelizer epochbuffer(mydsp.getRxBufferPosition());
+    epochbuffer.start();
 
-    gm::Thread nvcpy(epochbuffer);
-    nvcpy.start();
-    // wait until at least an epoch has gone by
-    // gm::buffer::BufferPosition<int16_t>* bpos = epochbuffer.getOutputBufferPos();
-    // bpos->getPosition(1,1);
+    gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer());
+    ft8channel.start();
 
-    gm::hf::FT8 ft8(epochbuffer.getBuffer());
-    gm::Thread nvft8(ft8);
-    nvft8.start();
+    gm::hf::FT8 ft8(ft8channel.getBuffer());
+    ft8.start();
 
     while (true) {
         usleep(1000000);
+        // printf("pos is %lu \n", bpos->getNow(1));
         // uint64_t posnow = bpos->getPosition(now, 1);
 	    // uint64_t azpos = bpos->getNow();
         // now += 1;
