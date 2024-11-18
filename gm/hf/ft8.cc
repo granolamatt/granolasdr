@@ -258,7 +258,7 @@ void load_monitor(monitor_t* me)
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, 4, 1);
+    waterfall_init(&me->wf, max_blocks, num_bins, 1, 1);
     me->wf.protocol = FTX_PROTOCOL_FT8;
 
     me->symbol_period = symbol_period;
@@ -297,8 +297,8 @@ namespace hf {
                 printf("Looking for messages %d offset %d\n", now, offset);
                 //printf("Stride is %d mysize %d \n", inPos->stride[1], 698880*FT8_NN);
                 int buff = now % 16;
-                int idx = 4*698880*(FT8_NN + 14)*buff;
-                for (int cc=0; cc< 4*698880*(FT8_NN + 14); cc++) {
+                int idx = 698880*(FT8_NN + 14)*buff;
+                for (int cc=0; cc< 698880*(FT8_NN + 14); cc++) {
                     uint8_t db = demodFT8[cc + idx];
                     mon.wf.mag[offset] = db;
                     offset += 1;
