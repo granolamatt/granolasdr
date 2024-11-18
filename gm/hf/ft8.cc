@@ -258,7 +258,7 @@ void load_monitor(monitor_t* me)
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, 1, 1);
+    waterfall_init(&me->wf, max_blocks, num_bins, 4, 1);
     me->wf.protocol = FTX_PROTOCOL_FT8;
 
     me->symbol_period = symbol_period;
@@ -269,7 +269,7 @@ void load_monitor(monitor_t* me)
 namespace gm {
 namespace hf {
 
-    FT8::FT8(gm::buffer::BufferPosition<std::complex<float>>* inP) :
+    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP) :
       inPos(inP) {
         hashtable_init();
         load_monitor(&mon);
@@ -297,18 +297,10 @@ namespace hf {
                 printf("Looking for messages %d offset %d\n", now, offset);
                 //printf("Stride is %d mysize %d \n", inPos->stride[1], 698880*FT8_NN);
                 int buff = now % 16;
-                int idx = 698880*(FT8_NN + 14)*buff;
-                for (int cc=0; cc< 698880*(FT8_NN + 14); cc++) {
-                    float real = demodFT8[cc + idx].real() / 100e6;
-                    float imag = demodFT8[cc + idx].imag() / 100e6;
-                    float mag2 = real*real + imag*imag;
-                    float db = 10.0f * log10f(1E-12f + mag2);
-                    int scaled = (int)(2 * db + 240);
-                    mon.wf.mag[offset] = (scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled);
-                    //if (offset == 0) 
-                    //   printf("real %f imag %f db %f scaled %d", real, imag, db, scaled);
-                    if (db > mon.max_mag)
-                        mon.max_mag = db;
+                int idx = 4*698880*(FT8_NN + 14)*buff;
+                for (int cc=0; cc< 4*698880*(FT8_NN + 14); cc++) {
+                    uint8_t db = demodFT8[cc + idx];
+                    mon.wf.mag[offset] = db;
                     offset += 1;
                 }
                 mon.wf.num_blocks += FT8_NN + 14;
@@ -321,7 +313,6 @@ namespace hf {
                 now += 1;
             }
         }
-
     }
 }
 

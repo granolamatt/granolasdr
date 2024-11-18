@@ -11,7 +11,7 @@ namespace hf {
 class FT8 : public Thread {
 
 public:
-    FT8(gm::buffer::BufferPosition<std::complex<float>>* inP);
+    FT8(gm::buffer::BufferPosition<uint8_t>* inP);
     ~FT8();
     void run();
     void stop() {
@@ -19,8 +19,8 @@ public:
     }
 private:
     monitor_t mon;
-    gm::buffer::BufferPosition<std::complex<float>>* inPos;
-    std::complex<float>* demodFT8;
+    gm::buffer::BufferPosition<uint8_t>* inPos;
+    uint8_t* demodFT8;
 
 };
 

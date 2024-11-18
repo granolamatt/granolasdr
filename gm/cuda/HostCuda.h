@@ -23,7 +23,7 @@ public:
     ~HostCuda();
     void copyKernel(thrust::complex<float>* oData_d, thrust::complex<short>* iData_d, int data_size);
     void copyKernel(float* oData_d, short* iData_d, int data_size);
-    void magKernel(thrust::complex<float>* data_d, float* mag_d, size_t data_size);
+    void magKernel(std::complex<float>* data_d, uint8_t* mag_d, size_t data_size);
     void averageKernel(thrust::complex<float>* oData_d, float* aData_d);
     void makePixesKernel(thrust::complex<float>* oData_d, char* pixel_d);
 private:

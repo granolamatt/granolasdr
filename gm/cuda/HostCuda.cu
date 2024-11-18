@@ -73,16 +73,17 @@ __global__ void copyKernelShort(short* inData_d, float* outData_d, int size)
     __syncthreads();
 }
 
-__global__ void magKernelWork(thrust::complex<float>* data_d, float* mag_d, size_t size)
+__global__ void magKernelWork(thrust::complex<float>* data_d, uint8_t* mag_d, size_t size)
 {
     const int idx = (blockIdx.x * blockDim.x + threadIdx.x); // this thread
     const int numThreads = (blockDim.x * gridDim.x);
-    const int end = size;
 
-    for (int cnt = idx; cnt < end; cnt += numThreads)
+    for (int cnt = idx; cnt < size; cnt += numThreads)
     {
-        float mag = abs(data_d[cnt]);
-        mag_d[cnt] = mag;
+        float mag = abs(data_d[cnt]) / 50e6;
+        float db = 10.0f * log10f(1E-12f + mag);
+        int scaled = (int)(2*db + 240);
+        mag_d[cnt] = (uint8_t)((scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled));
     }
     __syncthreads();
 }
@@ -306,11 +307,11 @@ void HostCuda::averageKernel(thrust::complex<float>* oData_d, float* aData_d) {
     }
 }
 
-void HostCuda::magKernel(thrust::complex<float>* data_d, float* mag_d, size_t data_size) {
+void HostCuda::magKernel(std::complex<float>* data_d, uint8_t* mag_d, size_t data_size) {
     if (stream_set) {
-        magKernelWork <<< 32, 256, 0, stream >>>(data_d, mag_d, data_size);
+        magKernelWork <<< 32, 256, 0, stream >>>((thrust::complex<float>*)data_d, mag_d, data_size);
     } else {
-        magKernelWork <<< 32, 256 >>>(data_d, mag_d, data_size);
+        magKernelWork <<< 32, 256 >>>((thrust::complex<float>*)data_d, mag_d, data_size);
     }
 }
 

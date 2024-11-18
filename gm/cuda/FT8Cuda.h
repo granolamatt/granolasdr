@@ -20,7 +20,7 @@ public:
     void stop() {
         setRunning(false);
     }
-    gm::buffer::BufferPosition<std::complex<float>>* getBuffer() {
+    gm::buffer::BufferPosition<uint8_t>* getBuffer() {
         return &rt8BufferPosition;
     }
     const static int oversample = 1;
@@ -37,7 +37,7 @@ private:
     int num_blocks;
     int buffer_number;
 
-    gm::buffer::BufferPosition<std::complex<float>> rt8BufferPosition;
+    gm::buffer::BufferPosition<uint8_t> rt8BufferPosition;
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
@@ -48,9 +48,10 @@ private:
     int doCopy(uint64_t now);
     std::complex<float>* demodData_d;
     std::complex<float>* demodFT8_d;
-    std::complex<float>* demodFT8;
+    uint8_t* magFT8_d;
+    uint8_t* magFT8;
     std::vector<std::vector<uint32_t>> bins;
-    uint32_t rfft_length;
+    size_t rfft_length;
     uint32_t nTune;
     uint32_t nChannels;
     double lastsecond;
