@@ -235,6 +235,7 @@ static void waterfall_init(ftx_waterfall_t* me, int max_blocks, int num_bins, in
     me->freq_osr = freq_osr;
     me->block_stride = (time_osr * freq_osr * num_bins);
     me->mag = (WF_ELEM_T*)malloc(mag_size);
+    printf("Waterfall size %d\n", mag_size);
     LOG(LOG_DEBUG, "Waterfall size = %zu\n", mag_size);
 }
 
@@ -258,7 +259,7 @@ void load_monitor(monitor_t* me)
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, 1, 1);
+    waterfall_init(&me->wf, max_blocks, num_bins, 4, 1);
     me->wf.protocol = FTX_PROTOCOL_FT8;
 
     me->symbol_period = symbol_period;
@@ -295,13 +296,16 @@ namespace hf {
                 }
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
                 printf("Looking for messages %d offset %d\n", now, offset);
-                //printf("Stride is %d mysize %d \n", inPos->stride[1], 698880*FT8_NN);
-                int buff = now % 16;
-                int idx = 698880*(FT8_NN + 14)*buff;
-                for (int cc=0; cc< 698880*(FT8_NN + 14); cc++) {
-                    uint8_t db = demodFT8[cc + idx];
-                    mon.wf.mag[offset] = db;
-                    offset += 1;
+                printf("Stride is %d mysize %d \n", inPos->getShape()[0], 4*698880*(FT8_NN + 14));
+                int buff = now % inPos->getShape()[0];
+                uint64_t idx = inPos->getShape()[1]*buff;
+                printf("idx %d buff %d\n", idx, buff);
+                for (int row=0; row < (FT8_NN + 14); row++) {
+                    for (int cc=0; cc< 698880*4; cc++) {
+                        uint8_t db = demodFT8[cc + idx + 698880*4*row];
+                        mon.wf.mag[offset] = db;
+                        offset += 1;
+                    }
                 }
                 mon.wf.num_blocks += FT8_NN + 14;
                 auto nowsec = std::chrono::system_clock::now();
