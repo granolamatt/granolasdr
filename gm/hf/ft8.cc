@@ -6,6 +6,7 @@
 #include <chrono>
 
 #include "gm/hf/ft8.h"
+#include "gm/hf/ft8_capture.h"
 #include "gm/buffer/BufferPosition.h"
 
 
@@ -201,6 +202,7 @@ void decode(const monitor_t* mon, double tm_slot_start)
             float snr = cand->score * 0.5f; // TODO: compute better approximation of SNR
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
+            printf("DECODED: %s time_offset=%.3fs freq=%.1fHz\n", text, time_sec, freq_hz);
         }
     }
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
@@ -241,7 +243,6 @@ static void waterfall_init(ftx_waterfall_t* me, int max_blocks, int num_bins, in
 
 void load_monitor(monitor_t* me)
 {
-    float slot_time = FT8_SLOT_TIME;
     float symbol_period = FT8_SYMBOL_PERIOD;
     // Compute DSP parameters that depend on the sample rate
     me->block_size = 698880; // samples corresponding to one FSK symbol
@@ -252,8 +253,8 @@ void load_monitor(monitor_t* me)
     LOG(LOG_INFO, "Block size = %d\n", me->block_size);
     LOG(LOG_INFO, "Subblock size = %d\n", me->subblock_size);
 
-    // Allocate enough blocks to fit the entire FT8/FT4 slot in memory
-    const int max_blocks = (int)(slot_time / symbol_period);
+    // Allocate enough blocks to fit the capture window (FT8_CAPTURE_BLOCKS in ft8_capture.h)
+    const int max_blocks = FT8_CAPTURE_BLOCKS;
     // Keep only FFT bins in the specified frequency range (f_min/f_max)
     me->min_bin = 0;
     me->max_bin = 698880;
@@ -295,19 +296,10 @@ namespace hf {
                     break;
                 }
                 int offset = mon.wf.num_blocks * mon.wf.block_stride;
-                printf("Looking for messages %d offset %d\n", now, offset);
-                printf("Stride is %d mysize %d \n", inPos->getShape()[0], 4*698880*(FT8_NN + 14));
                 int buff = now % inPos->getShape()[0];
-                uint64_t idx = inPos->getShape()[1]*buff;
-                printf("idx %d buff %d\n", idx, buff);
-                for (int row=0; row < (FT8_NN + 14); row++) {
-                    for (int cc=0; cc< 698880*4; cc++) {
-                        uint8_t db = demodFT8[cc + idx + 698880*4*row];
-                        mon.wf.mag[offset] = db;
-                        offset += 1;
-                    }
-                }
-                mon.wf.num_blocks += FT8_NN + 14;
+                uint8_t* src = demodFT8 + inPos->getShape()[1] * buff;
+                memcpy(mon.wf.mag + offset, src, inPos->getShape()[1]);
+                mon.wf.num_blocks += FT8_CAPTURE_BLOCKS;
                 auto nowsec = std::chrono::system_clock::now();
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();

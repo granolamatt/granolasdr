@@ -27,10 +27,10 @@ find_package(pybind11 REQUIRED)
 
 set (CMAKE_BUILD_TYPE Debug)
 #set (CMAKE_BUILD_TYPE RelWithDebInfo)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${PYTHON_INCLUDE_DIRS} "/opt/cuda/include")
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${PYTHON_INCLUDE_DIRS} "/opt/cuda/include" "/opt/cuda/targets/x86_64-linux/include/cccl")
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 50 70 75)
+  set(CMAKE_CUDA_ARCHITECTURES 120)
 endif()
 
 set(LIBUSB usb pthread rt)

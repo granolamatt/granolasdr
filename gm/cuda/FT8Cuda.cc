@@ -8,6 +8,7 @@
 #include "gm/cuda/HostCuda.h"
 #include "gm/buffer/BufferPosition.h"
 #include "gm/rx888/rx888.h"
+#include "gm/hf/ft8_capture.h"
 
 #include "ft8_lib/common/monitor.h"
 
@@ -34,9 +35,9 @@ buffer_number(0) {
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 698880; // half off for some reason
 
-        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), 4*(FT8_NN + 14)*BUFFERS*rfft_length);
-        
-        rt8BufferPosition.setBuffer(magFT8, {BUFFERS,4*rfft_length*(FT8_NN + 14)});
+        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), 4*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
+
+        rt8BufferPosition.setBuffer(magFT8, {BUFFERS,4*rfft_length*FT8_CAPTURE_BLOCKS});
 
         // Two so we can use it as a buffer also
         cuda_check_error(cudaMalloc((void**)&demodData_d, 4*rfft_length*sizeof(std::complex<float>) + 1024));
@@ -87,8 +88,8 @@ int FT8Cuda::doCopy(uint64_t now) {
             uint64_t trigger = (uint64_t)(seconds) % 15;
             lastsecond = seconds;
             
-            bool gotime = (trigger == 14 && trunc(seconds) > 0.7);
-            if (gotime && ~startcap) {
+            bool gotime = (trigger == 14 && (seconds - trunc(seconds)) > 0.7);
+            if (gotime && !startcap) {
                 startcap = true;
             }
 
@@ -125,12 +126,12 @@ int FT8Cuda::doCopy(uint64_t now) {
                 // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
                 int buffnum = buffer_number % BUFFERS;
                 cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], 4*rfft_length);
-                cuda_check_error(cudaMemcpyAsync(&magFT8[4*(num_blocks*rfft_length + buffnum*rfft_length*(FT8_NN + 14))], 
+                cuda_check_error(cudaMemcpyAsync(&magFT8[4*(num_blocks*rfft_length + buffnum*rfft_length*FT8_CAPTURE_BLOCKS)],
                     &magFT8_d[0],
                     4 * rfft_length * sizeof(uint8_t),cudaMemcpyDeviceToHost, stream));
                 num_blocks++;
                 // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-                if (num_blocks >= (FT8_NN + 14)) {
+                if (num_blocks >= FT8_CAPTURE_BLOCKS) {
                     printf("Processing buffer %u\n", buffer_number);
                     cudaStreamSynchronize(stream);
                     buffer_number++;

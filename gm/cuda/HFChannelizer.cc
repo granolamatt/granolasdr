@@ -105,9 +105,9 @@ int HFChannelizer::doCopy(uint64_t now) {
         // if we are on first buffer then do the wrap
 
         if (!(now % gm::rx888::rx888::BUFFERS)) {
-            cudaMemcpyAsync(&fftInData_d, 
-                            &fftInData_d[gm::rx888::rx888::BUFFERS*length], 
-                            length*sizeof(float),cudaMemcpyDeviceToDevice, stream);
+            cuda_check_error(cudaMemcpyAsync(fftInData_d,
+                            &fftInData_d[gm::rx888::rx888::BUFFERS*length],
+                            length*sizeof(float),cudaMemcpyDeviceToDevice, stream));
         }
         
         cufftResult_t rval = cufftExecR2C(plan, &fftInData_d[in_position], (cufftComplex *) fftData_d);
