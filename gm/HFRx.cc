@@ -11,9 +11,7 @@
 #include "gm/cuda/HostCuda.h"
 #include "gm/cuda/HFChannelizer.h"
 #include "gm/cuda/FT8Cuda.h"
-// TODO: ft8.cc is included as a header — move declarations to ft8.h and add
-// ft8.cc to CMakeLists.txt as a separate translation unit.
-#include "gm/hf/ft8.cc"
+#include "gm/hf/ft8.h"
 
 
 int main() {

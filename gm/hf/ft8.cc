@@ -199,7 +199,9 @@ void decode(const monitor_t* mon, double tm_slot_start)
             }
 
             // Fake WSJT-X-like output for now
-            float snr = cand->score * 0.5f; // TODO: compute better approximation of SNR
+            // score * 0.5 converts units to dB (tone vs adjacent bin); subtract
+            // 10*log10(2500/6.25)=26 dB to get SNR in the standard 2500 Hz reference bandwidth.
+            float snr = cand->score * 0.5f - 26.0f;
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
             printf("DECODED: %s time_offset=%.3fs freq=%.1fHz\n", text, time_sec, freq_hz);

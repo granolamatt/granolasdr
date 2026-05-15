@@ -44,9 +44,16 @@ rx888::~rx888() {
 // }
 
 int rx888::handle_samples(uint32_t data_size, const int16_t *data) {
+    int16_t* buf = rxBufferPosition.getBuffer();
+    size_t write_pos = position % rx_buffer_size;
+    size_t space = rx_buffer_size - write_pos;
+    if (data_size <= space) {
+        memcpy(&buf[write_pos], data, data_size * sizeof(int16_t));
+    } else {
+        memcpy(&buf[write_pos], data, space * sizeof(int16_t));
+        memcpy(&buf[0], data + space, (data_size - space) * sizeof(int16_t));
+    }
     position += (uint64_t)data_size;
-    memcpy(&rxBufferPosition.getBuffer()[(int)(position % rx_buffer_size)], data, data_size*sizeof(int16_t));
-    //XXX handle the wrap??
     rxBufferPosition.setPosition(position);
     return 0;
 }
