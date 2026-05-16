@@ -78,11 +78,6 @@ target_link_libraries (hf_rx -lm lib_granolamatt gmcuda ${CMAKE_CURRENT_SOURCE_D
 add_executable(zmqclient gm/zmqcode/client.cc)
 target_link_libraries (zmqclient ${LIBLOC} zmq)
 
-add_executable(buffertest gm/test_bufferpos.cc)
-target_link_libraries (buffertest lib_granolamatt gmcuda ${GM_LIBS})
-
-add_executable(copytest gm/copytest.cc)
-target_link_libraries (copytest lib_granolamatt gmcuda ${GM_LIBS})
 
 #adb push cudatest /data/local/develop/
 
