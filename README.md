@@ -13,7 +13,7 @@ RX888 SDR (140 MS/s real)
        698,880-pt C2C FFT at 9 time offsets
        uint8_t waterfall magnitude → shared buffer
   └─ FT8 (CPU, ft8_lib)
-       Candidate search → Viterbi decode → callsign extraction
+       Candidate search → LDPC decode → callsign extraction
        Publishes JSON on tcp://*:5580 (ZMQ PUB)
   └─ psk_uploader.py (Python)
        Buffers decoded reports → uploads to PSKReporter every 5 min
