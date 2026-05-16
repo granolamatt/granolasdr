@@ -273,12 +273,19 @@ def main():
         b = band(r[2])
         psk_freq = r[2]
 
-        my_freqs = call_freqs.get(call, [])
+        # Only use our decoded frequencies that are on the same band as PSKReporter.
+        # Without this filter, a station active on multiple bands in the same window
+        # causes a misleadingly large delta (e.g. we heard them on 40m, PSK on 20m).
+        all_freqs = call_freqs.get(call, [])
+        same_band_freqs = [f for f in all_freqs if band(f) == b]
+        my_freqs = same_band_freqs if same_band_freqs else all_freqs
         if my_freqs:
             my_freq = round(sum(my_freqs) / len(my_freqs))
             delta = my_freq - psk_freq
             my_freq_str = f'{my_freq:10d}'
             delta_str   = f'{delta:+7d}'
+            if not same_band_freqs:
+                delta_str = f'{"~band":>7}'  # decoded on different band
         else:
             my_freq_str = f'{"?":>10}'
             delta_str   = f'{"?":>7}'
