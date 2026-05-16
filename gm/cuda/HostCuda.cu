@@ -315,6 +315,33 @@ void HostCuda::magKernel(std::complex<float>* data_d, uint8_t* mag_d, size_t dat
     }
 }
 
+__global__ void freqShiftKernelWork(thrust::complex<float>* input, thrust::complex<float>* output,
+                                    int N, float phase_step)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int numThreads = blockDim.x * gridDim.x;
+    for (int n = idx; n < N; n += numThreads) {
+        float s, c;
+        __sincosf(phase_step * n, &s, &c);
+        output[n] = input[n] * thrust::complex<float>(c, s);
+    }
+}
+
+void HostCuda::freqShift(std::complex<float>* input, std::complex<float>* output, int N, float shift_hz) {
+    const float phase_step = 2.0f * M_PI * shift_hz / 4375000.0f;
+    if (stream_set) {
+        freqShiftKernelWork <<< 32, 256, 0, stream >>>(
+            (thrust::complex<float>*)input, (thrust::complex<float>*)output, N, phase_step);
+    } else {
+        freqShiftKernelWork <<< 32, 256 >>>(
+            (thrust::complex<float>*)input, (thrust::complex<float>*)output, N, phase_step);
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "freqShift kernel error: %s\n", cudaGetErrorString(err));
+    }
+}
+
 void HostCuda::makePixesKernel(thrust::complex<float>* oData_d, char* pixel_d) {
     // if (stream_set) {
     //     averageKernelWork <<< NSMALL, NLARGE/NSMALL, 0, stream >>>(oData_d, aData_d);

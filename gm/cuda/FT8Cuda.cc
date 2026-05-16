@@ -24,6 +24,7 @@ ring_write_idx(0),
 last_trigger_second(0),
 demodData_d(NULL),
 demodFT8_d(NULL),
+demodShift_d(NULL),
 magFT8_d(NULL),
 magFT8(NULL),
 magFT8_ring(NULL),
@@ -38,28 +39,32 @@ buffer_number(0) {
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 698880; // half off for some reason
 
-        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), (size_t)FT8_TIME_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
+        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), (size_t)FT8_TIME_OSR*FT8_FREQ_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
         if (!magFT8) {
             fprintf(stderr, "FT8Cuda: calloc failed for magFT8 (%zu bytes) — out of memory\n",
-                    (size_t)FT8_TIME_OSR * FT8_CAPTURE_BLOCKS * BUFFERS * rfft_length);
+                    (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * FT8_CAPTURE_BLOCKS * BUFFERS * rfft_length);
             exit(1);
         }
-        magFT8_ring = (uint8_t*)calloc(sizeof(uint8_t), (size_t)RING_BLOCKS*FT8_TIME_OSR*rfft_length);
+        magFT8_ring = (uint8_t*)calloc(sizeof(uint8_t), (size_t)RING_BLOCKS*FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length);
         if (!magFT8_ring) {
             fprintf(stderr, "FT8Cuda: calloc failed for magFT8_ring (%zu bytes) — out of memory\n",
-                    (size_t)RING_BLOCKS * FT8_TIME_OSR * rfft_length);
+                    (size_t)RING_BLOCKS * FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length);
             exit(1);
         }
 
-        rt8BufferPosition.setBuffer(magFT8, {BUFFERS, (size_t)FT8_TIME_OSR*rfft_length*FT8_CAPTURE_BLOCKS});
+        rt8BufferPosition.setBuffer(magFT8, {BUFFERS, (size_t)FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length*FT8_CAPTURE_BLOCKS});
 
         // Two so we can use it as a buffer also
         cuda_check_error(cudaMalloc((void**)&demodData_d, 4*rfft_length*sizeof(std::complex<float>) + 1024));
         printf("Total rfft length is %u\n", rfft_length);
 
-        cuda_check_error(cudaMalloc((void**)&demodFT8_d, FT8_TIME_OSR*rfft_length*sizeof(std::complex<float>) + 1024));
-        cuda_check_error(cudaMalloc((void**)&magFT8_d, FT8_TIME_OSR*rfft_length*sizeof(uint8_t) + 1024));
-        printf("Total rfft length is %u\n", rfft_length);
+        cuda_check_error(cudaMalloc((void**)&demodFT8_d, FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length*sizeof(std::complex<float>) + 1024));
+        cuda_check_error(cudaMalloc((void**)&magFT8_d, FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length*sizeof(uint8_t) + 1024));
+        cuda_check_error(cudaMalloc((void**)&demodShift_d, rfft_length*sizeof(std::complex<float>) + 1024));
+        if (!demodShift_d) {
+            fprintf(stderr, "FT8Cuda: cudaMalloc failed for demodShift_d — out of GPU memory\n");
+            exit(1);
+        }
 
         // Now for the sub channels
         cufftResult fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
@@ -80,6 +85,7 @@ FT8Cuda::~FT8Cuda() {
     if (last_snapshot_thread.joinable()) last_snapshot_thread.join();
     if (demodData_d) cudaFree(demodData_d);
     if (demodFT8_d) cudaFree(demodFT8_d);
+    if (demodShift_d) cudaFree(demodShift_d);
     if (magFT8_d) cudaFree(magFT8_d);
     if (magFT8) free(magFT8);
     if (magFT8_ring) free(magFT8_ring);
@@ -103,13 +109,21 @@ int FT8Cuda::doCopy(uint64_t now) {
             lastsecond = seconds;
 
             for (int t = 0; t < FT8_TIME_OSR; t++) {
-                cufftResult rval = cufftExecC2C(rplan,
-                    (cufftComplex *)&demodData_d[t * rfft_length / FT8_TIME_OSR],
-                    (cufftComplex *)&demodFT8_d[t * rfft_length],
-                    CUFFT_FORWARD);
-                if (rval) {
-                    printf("Error in fft (t=%d)\n", t);
-                    return 0;
+                for (int f = 0; f < FT8_FREQ_OSR; f++) {
+                    std::complex<float>* input = &demodData_d[t * rfft_length / FT8_TIME_OSR];
+                    if (f > 0) {
+                        cuda_h.freqShift(input, demodShift_d, rfft_length,
+                                         f * 6.25f / FT8_FREQ_OSR);
+                        input = demodShift_d;
+                    }
+                    cufftResult rval = cufftExecC2C(rplan,
+                        (cufftComplex *)input,
+                        (cufftComplex *)&demodFT8_d[(t * FT8_FREQ_OSR + f) * rfft_length],
+                        CUFFT_FORWARD);
+                    if (rval) {
+                        printf("Error in fft (t=%d f=%d)\n", t, f);
+                        return 0;
+                    }
                 }
             }
             buff_pos -= rfft_length;
@@ -118,8 +132,8 @@ int FT8Cuda::doCopy(uint64_t now) {
                 buff_pos * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
 
             // Always compute magnitude and append to rolling ring buffer
-            const size_t block_bytes = (size_t)FT8_TIME_OSR * rfft_length;
-            cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*rfft_length);
+            const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
+            cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length);
             cuda_check_error(cudaMemcpyAsync(
                 &magFT8_ring[(ring_write_idx % RING_BLOCKS) * block_bytes],
                 &magFT8_d[0],

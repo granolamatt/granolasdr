@@ -29,7 +29,7 @@ private:
     cudaStream_t stream;
     cufftHandle rplan;
     double lastepoch;
-    const static int BUFFERS = 4;      // number of decode slots for ft8.cc
+    const static int BUFFERS = 2;      // number of decode slots for ft8.cc
     const static int RING_BLOCKS = 200; // rolling magnitude ring size in FT8 blocks
 
     std::ofstream fs;
@@ -49,6 +49,7 @@ private:
     int doCopy(uint64_t now);
     std::complex<float>* demodData_d;
     std::complex<float>* demodFT8_d;
+    std::complex<float>* demodShift_d;
     uint8_t* magFT8_d;
     uint8_t* magFT8;
     uint8_t* magFT8_ring;

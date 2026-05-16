@@ -353,7 +353,11 @@ static void waterfall_init(ftx_waterfall_t* me, int max_blocks, int num_bins, in
     me->freq_osr = freq_osr;
     me->block_stride = (time_osr * freq_osr * num_bins);
     me->mag = (WF_ELEM_T*)malloc(mag_size);
-    printf("Waterfall size %d\n", mag_size);
+    if (!me->mag) {
+        fprintf(stderr, "waterfall_init: malloc failed for mag (%zu bytes) — out of memory\n", mag_size);
+        exit(1);
+    }
+    printf("Waterfall size %zu\n", mag_size);
     LOG(LOG_DEBUG, "Waterfall size = %zu\n", mag_size);
 }
 
@@ -376,8 +380,12 @@ void load_monitor(monitor_t* me)
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, FT8_TIME_OSR, 1);
+    waterfall_init(&me->wf, max_blocks, num_bins, FT8_TIME_OSR, FT8_FREQ_OSR);
     me->wf.protocol = FTX_PROTOCOL_FT8;
+    size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * num_bins;
+    printf("FT8: time_osr=%d freq_osr=%d block_bytes=%zu ring=%.1fGB\n",
+           FT8_TIME_OSR, FT8_FREQ_OSR, block_bytes,
+           (double)(200 * block_bytes) / 1e9);
 
     me->symbol_period = symbol_period;
 
