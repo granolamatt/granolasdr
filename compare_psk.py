@@ -86,9 +86,15 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 
 def parse_file(path):
-    """Return (callsigns_set, first_unix_ts, last_unix_ts)."""
+    """Return (callsigns_set, first_unix_ts, last_unix_ts, call_freqs, call_snrs).
+
+    call_freqs: callsign -> list of valid freq_hz (>= 1 MHz, i.e. not fallback bins).
+    call_snrs:  callsign -> list of snr_dB values.
+    """
     calls = set()
     timestamps = []
+    call_freqs = defaultdict(list)
+    call_snrs  = defaultdict(list)
     with open(path) as f:
         for line in f:
             m = re.match(r'DECODED:\s+(.+?)\s+time_offset=', line)
@@ -97,10 +103,20 @@ def parse_file(path):
             ts_m = re.search(r'\bunix=(\d+\.?\d*)', line)
             if ts_m:
                 timestamps.append(float(ts_m.group(1)))
+            freq_m = re.search(r'\bfreq=(\d+\.?\d*)Hz', line)
+            freq_hz = float(freq_m.group(1)) if freq_m else None
+            snr_m = re.search(r'\bsnr=([+-]?\d+\.?\d*)', line)
+            snr_db = float(snr_m.group(1)) if snr_m else None
+            # Frequencies below 1 MHz are raw composite bin fallbacks — ignore them
+            valid_freq = freq_hz if (freq_hz is not None and freq_hz >= 1_000_000) else None
             for word in m.group(1).split():
                 word = word.strip('<>').strip()
                 if is_callsign(word):
                     calls.add(word)
+                    if valid_freq is not None:
+                        call_freqs[word].append(valid_freq)
+                    if snr_db is not None:
+                        call_snrs[word].append(snr_db)
     # Fall back to WSJT-X style timestamp on any line if unix= absent
     if not timestamps:
         with open(path) as f:
@@ -109,7 +125,7 @@ def parse_file(path):
                     timestamps.append(float(ts_m.group(1)))
     first = min(timestamps) if timestamps else None
     last  = max(timestamps) if timestamps else None
-    return calls, first, last
+    return calls, first, last, call_freqs, call_snrs
 
 
 def fetch_psk(grid, period, mode='FT8'):
@@ -198,7 +214,7 @@ def main():
     print(f'Your position: {my_lat:.1f}°N {my_lon:.1f}°E  (grid {args.grid})', file=sys.stderr)
 
     print(f'Parsing {args.file} ...', file=sys.stderr)
-    your_calls, first_ts, last_ts = parse_file(args.file)
+    your_calls, first_ts, last_ts, call_freqs, call_snrs = parse_file(args.file)
 
     if not your_calls:
         sys.exit('No callsigns found — check the file path and format.')
@@ -246,6 +262,7 @@ def main():
     print(f'  PSK heard, you missed (<{args.max_dist}km):  {len(psk_only_nearby):4d}  (sorted by sender distance from you)')
 
     print(f'\n── CONFIRMED IN BOTH ({len(both)}) ──────────────────────────────────')
+    print(f'  {"Call":<12}  {"Band":<5}  {"Your freq":>10}  {"PSK freq":>10}  {"Delta":>7}  {"My SNR":>6}  {"PSK SNR":>7}  dist    via')
     for call in both:
         r, dist = nearby_best(psk[call], my_lat, my_lon, args.max_dist)
         if r is None:
@@ -254,7 +271,22 @@ def main():
         else:
             dist_str = f'{dist:5.0f}km'
         b = band(r[2])
-        print(f'  {call:<12}  {b}  SNR {r[3]:>4} dB  {dist_str}  via {r[0]} ({r[1]})')
+        psk_freq = r[2]
+
+        my_freqs = call_freqs.get(call, [])
+        if my_freqs:
+            my_freq = round(sum(my_freqs) / len(my_freqs))
+            delta = my_freq - psk_freq
+            my_freq_str = f'{my_freq:10d}'
+            delta_str   = f'{delta:+7d}'
+        else:
+            my_freq_str = f'{"?":>10}'
+            delta_str   = f'{"?":>7}'
+
+        my_snrs = call_snrs.get(call, [])
+        my_snr_str = f'{sum(my_snrs)/len(my_snrs):+6.1f}' if my_snrs else f'{"?":>6}'
+
+        print(f'  {call:<12}  {b:<5}  {my_freq_str}  {psk_freq:10d}  {delta_str}  {my_snr_str}  {r[3]:>4} dB  {dist_str}  via {r[0]} ({r[1]})')
 
     print(f'\n── YOU DECODED, PSK MISSED ({len(you_only)}) ────────────────────────────')
     print(  '  (signals you received that no PSK station in your area reported)')

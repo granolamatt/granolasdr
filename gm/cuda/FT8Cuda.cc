@@ -35,17 +35,16 @@ buffer_number(0) {
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 698880; // half off for some reason
 
-        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), 4*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
+        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), FT8_TIME_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
 
-        rt8BufferPosition.setBuffer(magFT8, {BUFFERS,4*rfft_length*FT8_CAPTURE_BLOCKS});
+        rt8BufferPosition.setBuffer(magFT8, {BUFFERS, (size_t)FT8_TIME_OSR*rfft_length*FT8_CAPTURE_BLOCKS});
 
         // Two so we can use it as a buffer also
         cuda_check_error(cudaMalloc((void**)&demodData_d, 4*rfft_length*sizeof(std::complex<float>) + 1024));
         printf("Total rfft length is %u\n", rfft_length);
 
-        // Two so we can use it as a buffer also
-        cuda_check_error(cudaMalloc((void**)&demodFT8_d, 4*rfft_length*sizeof(std::complex<float>) + 1024));
-        cuda_check_error(cudaMalloc((void**)&magFT8_d, 4*rfft_length*sizeof(uint8_t) + 1024));
+        cuda_check_error(cudaMalloc((void**)&demodFT8_d, FT8_TIME_OSR*rfft_length*sizeof(std::complex<float>) + 1024));
+        cuda_check_error(cudaMalloc((void**)&magFT8_d, FT8_TIME_OSR*rfft_length*sizeof(uint8_t) + 1024));
         printf("Total rfft length is %u\n", rfft_length);
 
         // Now for the sub channels
@@ -93,29 +92,15 @@ int FT8Cuda::doCopy(uint64_t now) {
                 startcap = true;
             }
 
-            cufftResult rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[0],
-                (cufftComplex *)&demodFT8_d[0], CUFFT_FORWARD);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
-            }
-            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[rfft_length/4],
-                (cufftComplex *)&demodFT8_d[rfft_length], CUFFT_FORWARD);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
-            }
-            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[(rfft_length)/2],
-                (cufftComplex *)&demodFT8_d[2*rfft_length], CUFFT_FORWARD);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
-            }
-            rval = cufftExecC2C(rplan, (cufftComplex *)&demodData_d[(3*rfft_length)/4],
-                (cufftComplex *)&demodFT8_d[3*rfft_length], CUFFT_FORWARD);
-            if (rval) {
-                printf("Error in fft\n");
-                return 0;
+            for (int t = 0; t < FT8_TIME_OSR; t++) {
+                cufftResult rval = cufftExecC2C(rplan,
+                    (cufftComplex *)&demodData_d[t * rfft_length / FT8_TIME_OSR],
+                    (cufftComplex *)&demodFT8_d[t * rfft_length],
+                    CUFFT_FORWARD);
+                if (rval) {
+                    printf("Error in fft (t=%d)\n", t);
+                    return 0;
+                }
             }
             buff_pos -= rfft_length / oversample;
             // I think this will not stomp on the data
@@ -125,10 +110,11 @@ int FT8Cuda::doCopy(uint64_t now) {
             if (startcap) {
                 // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
                 int buffnum = buffer_number % BUFFERS;
-                cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], 4*rfft_length);
-                cuda_check_error(cudaMemcpyAsync(&magFT8[4*(num_blocks*rfft_length + buffnum*rfft_length*FT8_CAPTURE_BLOCKS)],
+                cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*rfft_length);
+                cuda_check_error(cudaMemcpyAsync(
+                    &magFT8[FT8_TIME_OSR*(num_blocks*rfft_length + buffnum*rfft_length*FT8_CAPTURE_BLOCKS)],
                     &magFT8_d[0],
-                    4 * rfft_length * sizeof(uint8_t),cudaMemcpyDeviceToHost, stream));
+                    FT8_TIME_OSR * rfft_length * sizeof(uint8_t), cudaMemcpyDeviceToHost, stream));
                 num_blocks++;
                 // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
                 if (num_blocks >= FT8_CAPTURE_BLOCKS) {

@@ -4,6 +4,10 @@
 #include <string.h>
 #include <complex>
 #include <chrono>
+#include <thread>
+#include <vector>
+#include <algorithm>
+#include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
 #include "gm/hf/ft8_capture.h"
@@ -19,6 +23,51 @@
 #define LOG_LEVEL LOG_INFO
 #include "ft8_lib/ft8/debug.h"
 
+
+// ---- Composite-to-RF frequency conversion --------------------------------- //
+// The HFChannelizer packs HF bands into a 32768-bin composite IFFT, then
+// outputs 16384 complex samples at 4.375 MS/s. The FT8 FFT (698880 points) has
+// bin_hz = 4,375,000 / 698,880 ≈ 6.25 Hz. freq_offset is a bin in that composite
+// FFT, not an RF frequency. Convert it back using the HFChannelizer bin table.
+//
+// Mapping: composite_ifft_bin = round(freq_offset * IFFT_SIZE / FT8_FFT_SIZE)
+//          Then look up composite_ifft_bin in the table below to get the
+//          wideband bin, then rf_hz = wb_bin * 140e6 / 1048576.
+//
+// Table columns: {composite_ifft_start, composite_ifft_end, wideband_bin_start}
+// Source: HFChannelizer.cc bins array (calc_rf.py)
+static const struct { int ifft_start; int ifft_end; int wb_start; } kBandMap[] = {
+    {    0,  1500, 13480},  // 160m  ~1.8-2.0 MHz
+    { 1500,  5248, 26212},  // 80m   ~3.5-4.0 MHz
+    { 5248,  6040, 39920},  // 60m   ~5.3-5.4 MHz
+    { 6040,  8292, 52424},  // 40m   ~7.0-7.3 MHz
+    { 8292,  8672, 75644},  // 30m   ~10.1 MHz
+    { 8672, 11296,104856},  // 20m   ~14.0-14.35 MHz
+    {11296, 12048,135324},  // 17m   ~18.1-18.2 MHz
+    {12048, 15424,157284},  // 15m   ~21.0-21.45 MHz
+    {15424, 16176,186420},  // 12m   ~24.9-25.0 MHz
+    {16176, 28912,209712},  // 10m   ~28.0-29.7 MHz
+};
+static const int kBandMapSize = (int)(sizeof(kBandMap) / sizeof(kBandMap[0]));
+
+static const int kIfftSize        = 32768;
+static const int kFt8FftSize      = 698880;
+static const int kWidebandFftSize = 1048576; // 2 * NLARGE
+static const float kWbSampleRate  = 140000000.0f;
+
+// Returns actual RF frequency in Hz, or the raw bin number if no band matches.
+static float composite_bin_to_rf_hz(int freq_offset) {
+    int ifft_bin = (int)roundf((float)freq_offset * kIfftSize / kFt8FftSize);
+    // Wrap negative-frequency half (bins >= kIfftSize/2 represent negative freqs)
+    if (ifft_bin < 0) ifft_bin += kIfftSize;
+    for (int i = 0; i < kBandMapSize; ++i) {
+        if (ifft_bin >= kBandMap[i].ifft_start && ifft_bin < kBandMap[i].ifft_end) {
+            int wb_bin = kBandMap[i].wb_start + (ifft_bin - kBandMap[i].ifft_start);
+            return (float)wb_bin * kWbSampleRate / kWidebandFftSize;
+        }
+    }
+    return (float)freq_offset; // fallback
+}
 
 const int kMin_score = 5; // Minimum sync score threshold for candidates
 const int kMax_candidates = 440;
@@ -119,46 +168,101 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
-void decode(const monitor_t* mon, double tm_slot_start)
+void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher)
 {
     const ftx_waterfall_t* wf = &mon->wf;
-    // Find top candidates by Costas sync score and localize them in time and frequency
-    ftx_candidate_t candidate_list[kMax_candidates];
-    int num_candidates = ftx_find_candidates(wf, kMax_candidates, candidate_list, kMin_score);
 
-    // Hash table for decoded messages (to check for duplicates)
+    // Parallel candidate search: split freq_offset range across threads.
+    // Each thread fills its own heap; results are merged and sorted.
+    auto t_find_start = std::chrono::steady_clock::now();
+
+    int nthreads = (int)std::thread::hardware_concurrency();
+    if (nthreads < 1) nthreads = 1;
+    int bins_per_thread = (wf->num_bins + nthreads - 1) / nthreads;
+
+    std::vector<std::vector<ftx_candidate_t>> per_thread_heaps(nthreads);
+    std::vector<int> per_thread_sizes(nthreads, 0);
+    {
+        std::vector<std::thread> search_workers;
+        search_workers.reserve(nthreads);
+        for (int t = 0; t < nthreads; ++t) {
+            per_thread_heaps[t].resize(kMax_candidates);
+            search_workers.emplace_back([&, t]() {
+                int freq_start = t * bins_per_thread;
+                int freq_end   = std::min(freq_start + bins_per_thread, wf->num_bins);
+                per_thread_sizes[t] = ftx_find_candidates_range(
+                    wf, kMax_candidates, per_thread_heaps[t].data(), kMin_score,
+                    freq_start, freq_end);
+            });
+        }
+        for (auto& w : search_workers) w.join();
+    }
+
+    // Merge all per-thread results into one list and sort descending by score.
+    std::vector<ftx_candidate_t> merged;
+    merged.reserve(nthreads * kMax_candidates);
+    for (int t = 0; t < nthreads; ++t)
+        for (int i = 0; i < per_thread_sizes[t]; ++i)
+            merged.push_back(per_thread_heaps[t][i]);
+    std::sort(merged.begin(), merged.end(),
+              [](const ftx_candidate_t& a, const ftx_candidate_t& b) {
+                  return a.score > b.score;
+              });
+    if ((int)merged.size() > kMax_candidates)
+        merged.resize(kMax_candidates);
+
+    ftx_candidate_t* candidate_list = merged.data();
+    int num_candidates = (int)merged.size();
+
+    auto t_find_end = std::chrono::steady_clock::now();
+    printf("find_candidates: %d candidates in %.1f ms\n", num_candidates,
+           std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count());
+
+    auto t_ldpc_start = std::chrono::steady_clock::now();
+    // Parallel LDPC decode — each candidate is independent (read-only waterfall).
+    struct CandResult {
+        ftx_message_t message;
+        ftx_decode_status_t status;
+        bool ok;
+    };
+    std::vector<CandResult> results(num_candidates);
+
+    int num_threads = std::min(num_candidates,
+                               (int)std::thread::hardware_concurrency());
+    if (num_threads < 1) num_threads = 1;
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        workers.emplace_back([&, t]() {
+            // Round-robin: thread t handles candidates t, t+num_threads, ...
+            for (int idx = t; idx < num_candidates; idx += num_threads) {
+                results[idx].ok = ftx_decode_candidate(
+                    wf, &candidate_list[idx], kLDPC_iterations,
+                    &results[idx].message, &results[idx].status);
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+    auto t_ldpc_end = std::chrono::steady_clock::now();
+    printf("ldpc_decode: %.1f ms\n",
+           std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
+
+    // Sequential: dedup and print (callsign hashtable is not thread-safe).
     int num_decoded = 0;
     ftx_message_t decoded[kMax_decoded_messages];
     ftx_message_t* decoded_hashtable[kMax_decoded_messages];
-
-    // Initialize hash table pointers
     for (int i = 0; i < kMax_decoded_messages; ++i)
-    {
         decoded_hashtable[i] = NULL;
-    }
 
-    // Go over candidates and attempt to decode messages
     for (int idx = 0; idx < num_candidates; ++idx)
     {
+        if (!results[idx].ok) continue;
+
         const ftx_candidate_t* cand = &candidate_list[idx];
-
-        float freq_hz = mon->min_bin + cand->freq_offset;
+        const ftx_message_t& message = results[idx].message;
+        float freq_hz = composite_bin_to_rf_hz(mon->min_bin + cand->freq_offset);
         float time_sec = (cand->time_offset + (float)cand->time_sub / wf->time_osr) * mon->symbol_period;
-
-        ftx_message_t message;
-        ftx_decode_status_t status;
-        if (!ftx_decode_candidate(wf, cand, kLDPC_iterations, &message, &status))
-        {
-            if (status.ldpc_errors > 0)
-            {
-                LOG(LOG_DEBUG, "LDPC decode: %d errors\n", status.ldpc_errors);
-            }
-            else if (status.crc_calculated != status.crc_extracted)
-            {
-                LOG(LOG_DEBUG, "CRC mismatch!\n");
-            }
-            continue;
-        }
 
         LOG(LOG_DEBUG, "Checking hash table for %4.1fs / %4.1fHz [%d]...\n", time_sec, freq_hz, cand->score);
         int idx_hash = message.hash % kMax_decoded_messages;
@@ -179,14 +283,12 @@ void decode(const monitor_t* mon, double tm_slot_start)
             else
             {
                 LOG(LOG_DEBUG, "Hash table clash!\n");
-                // Move on to check the next entry in hash table
                 idx_hash = (idx_hash + 1) % kMax_decoded_messages;
             }
         } while (!found_empty_slot && !found_duplicate);
 
         if (found_empty_slot)
         {
-            // Fill the empty hashtable slot
             memcpy(&decoded[idx_hash], &message, sizeof(message));
             decoded_hashtable[idx_hash] = &decoded[idx_hash];
             ++num_decoded;
@@ -198,13 +300,15 @@ void decode(const monitor_t* mon, double tm_slot_start)
                 snprintf(text, sizeof(text), "Error [%d] while unpacking!", (int)unpack_status);
             }
 
-            // Fake WSJT-X-like output for now
-            // score * 0.5 converts units to dB (tone vs adjacent bin); subtract
-            // 10*log10(2500/6.25)=26 dB to get SNR in the standard 2500 Hz reference bandwidth.
-            float snr = cand->score * 0.5f - 26.0f;
+            // Each uint8_t waterfall byte encodes 20*log10(amplitude)+offset, so
+            // byte differences are already power-dB. Subtract 10*log10(2500/6.25)=26 dB
+            // to normalise to the standard 2500 Hz reference bandwidth.
+            float snr = (float)cand->score - 26.0f;
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
-            printf("DECODED: %s time_offset=%.3fs freq=%.1fHz unix=%.0f\n", text, time_sec, freq_hz, tm_slot_start);
+            printf("DECODED: %s time_offset=%.3fs freq=%.1fHz snr=%.1f unix=%.0f\n", text, time_sec, freq_hz, snr, tm_slot_start);
+            if (unpack_status == FTX_MESSAGE_RC_OK && publisher)
+                publisher->publishDecoded(text, freq_hz, snr, tm_slot_start, time_sec);
         }
     }
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
@@ -262,7 +366,7 @@ void load_monitor(monitor_t* me)
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, 4, 1);
+    waterfall_init(&me->wf, max_blocks, num_bins, FT8_TIME_OSR, 1);
     me->wf.protocol = FTX_PROTOCOL_FT8;
 
     me->symbol_period = symbol_period;
@@ -273,21 +377,37 @@ void load_monitor(monitor_t* me)
 namespace gm {
 namespace hf {
 
-    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP) :
-      inPos(inP) {
+    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP, int zmq_port) :
+      inPos(inP),
+      zmq_ctx(1),
+      zmq_pub(zmq_ctx, ZMQ_PUB) {
         hashtable_init();
         load_monitor(&mon);
         demodFT8 = inPos->getBuffer();
+
+        std::string endpoint = "tcp://*:" + std::to_string(zmq_port);
+        zmq_pub.bind(endpoint);
+        printf("FT8 ZMQ publisher bound to %s\n", endpoint.c_str());
     }
 
     FT8::~FT8() {
-        // waterfall destroy   
+        // waterfall destroy
     }
 
+    void FT8::publishDecoded(const char* callsign, float freq_hz, float snr,
+                              double unix_time, float time_offset)
+    {
+        char buf[256];
+        int len = snprintf(buf, sizeof(buf),
+            "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
+            callsign, (double)freq_hz, (double)snr, unix_time, (double)time_offset);
+        zmq::message_t msg(buf, len);
+        zmq_pub.send(msg, zmq::send_flags::dontwait);
+    }
 
     void FT8::run() {
         uint64_t now = inPos->getNow(1);
-        
+
         while(isRunning()) {
             uint64_t next = inPos->getPosition(now+1, 1);
             while(now < next) {
@@ -306,7 +426,7 @@ namespace hf {
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
                 printf("Processing %f\n", seconds);
-                decode(&mon, seconds);
+                decode(&mon, seconds, this);
                 monitor_reset(&mon);
                 now += 1;
             }
