@@ -27,7 +27,7 @@ Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
 
 - [RX888 MkII](https://github.com/RXToolsRX888/RX888) or compatible
 - NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
-- 16 GB system RAM (virtual reservation for the waterfall buffer is ~9 GB; physical usage is ~14 GB during operation)
+- 16 GB system RAM (waterfall ring ~1.2 GB + decode slots ~0.7 GB; physical usage ~10 GB during operation)
 
 ### System dependencies
 

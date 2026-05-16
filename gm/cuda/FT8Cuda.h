@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <thread>
 #include <cuda.h>
 #include <cufft.h>
 #include "gm/cuda/HostCuda.h"
@@ -28,12 +29,14 @@ private:
     cudaStream_t stream;
     cufftHandle rplan;
     double lastepoch;
-    const static int BUFFERS = 16;
+    const static int BUFFERS = 4;      // number of decode slots for ft8.cc
+    const static int RING_BLOCKS = 200; // rolling magnitude ring size in FT8 blocks
 
     std::ofstream fs;
-    bool startcap;
-    int num_blocks;
     int buffer_number;
+    uint64_t ring_write_idx;
+    uint64_t last_trigger_second;
+    std::thread last_snapshot_thread;
 
     gm::buffer::BufferPosition<uint8_t> rt8BufferPosition;
 
@@ -48,6 +51,7 @@ private:
     std::complex<float>* demodFT8_d;
     uint8_t* magFT8_d;
     uint8_t* magFT8;
+    uint8_t* magFT8_ring;
     std::vector<std::vector<uint32_t>> bins;
     size_t rfft_length;
     uint32_t nTune;

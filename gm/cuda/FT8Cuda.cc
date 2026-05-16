@@ -1,5 +1,7 @@
 #include <unistd.h>
 #include <iostream>
+#include <thread>
+#include <cstring>
 #include <cuda.h>
 #include <complex>
 #include <chrono>
@@ -18,12 +20,13 @@ namespace cuda {
 FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP) :
 inPos(inP),
 buff_pos{0},
-startcap(false),
+ring_write_idx(0),
+last_trigger_second(0),
 demodData_d(NULL),
 demodFT8_d(NULL),
 magFT8_d(NULL),
 magFT8(NULL),
-num_blocks(0),
+magFT8_ring(NULL),
 buffer_number(0) {
     inShape = inPos->getShape();
     inData_d = (std::complex<float>*)inPos->getBuffer();
@@ -35,10 +38,16 @@ buffer_number(0) {
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 698880; // half off for some reason
 
-        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), FT8_TIME_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
+        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), (size_t)FT8_TIME_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
         if (!magFT8) {
             fprintf(stderr, "FT8Cuda: calloc failed for magFT8 (%zu bytes) — out of memory\n",
                     (size_t)FT8_TIME_OSR * FT8_CAPTURE_BLOCKS * BUFFERS * rfft_length);
+            exit(1);
+        }
+        magFT8_ring = (uint8_t*)calloc(sizeof(uint8_t), (size_t)RING_BLOCKS*FT8_TIME_OSR*rfft_length);
+        if (!magFT8_ring) {
+            fprintf(stderr, "FT8Cuda: calloc failed for magFT8_ring (%zu bytes) — out of memory\n",
+                    (size_t)RING_BLOCKS * FT8_TIME_OSR * rfft_length);
             exit(1);
         }
 
@@ -68,10 +77,12 @@ buffer_number(0) {
 }
 
 FT8Cuda::~FT8Cuda() {
+    if (last_snapshot_thread.joinable()) last_snapshot_thread.join();
     if (demodData_d) cudaFree(demodData_d);
     if (demodFT8_d) cudaFree(demodFT8_d);
     if (magFT8_d) cudaFree(magFT8_d);
     if (magFT8) free(magFT8);
+    if (magFT8_ring) free(magFT8_ring);
     cufftDestroy(rplan);
     cudaStreamDestroy(stream);
 }
@@ -80,8 +91,7 @@ int FT8Cuda::doCopy(uint64_t now) {
     try {
         size_t length = inShape[1];
 
-
-        cudaMemcpyAsync(&demodData_d[buff_pos], &inData_d[length * (now % BUFFERS)], 
+        cudaMemcpyAsync(&demodData_d[buff_pos], &inData_d[length * (now % inShape[0])],
                         length * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream);
         buff_pos += length;
 
@@ -91,11 +101,6 @@ int FT8Cuda::doCopy(uint64_t now) {
             double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
             uint64_t trigger = (uint64_t)(seconds) % 15;
             lastsecond = seconds;
-            
-            bool gotime = (trigger == 14 && (seconds - trunc(seconds)) > 0.7);
-            if (gotime && !startcap) {
-                startcap = true;
-            }
 
             for (int t = 0; t < FT8_TIME_OSR; t++) {
                 cufftResult rval = cufftExecC2C(rplan,
@@ -108,35 +113,53 @@ int FT8Cuda::doCopy(uint64_t now) {
                 }
             }
             buff_pos -= rfft_length;
-            // I think this will not stomp on the data
             cuda_check_error(cudaMemcpyAsync(&demodData_d[0],
                 &demodData_d[rfft_length],
-                buff_pos * sizeof(std::complex<float>),cudaMemcpyDeviceToDevice, stream));
-            if (startcap) {
-                // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
-                int buffnum = buffer_number % BUFFERS;
-                cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*rfft_length);
-                cuda_check_error(cudaMemcpyAsync(
-                    &magFT8[FT8_TIME_OSR*(num_blocks*rfft_length + buffnum*rfft_length*FT8_CAPTURE_BLOCKS)],
-                    &magFT8_d[0],
-                    FT8_TIME_OSR * rfft_length * sizeof(uint8_t), cudaMemcpyDeviceToHost, stream));
-                num_blocks++;
-                // fs.write(reinterpret_cast<const char*>(demodFT8), rfft_length * sizeof(std::complex<float>));
-                if (num_blocks >= FT8_CAPTURE_BLOCKS) {
-                    printf("Processing buffer %u\n", buffer_number);
-                    cudaStreamSynchronize(stream);
-                    buffer_number++;
+                buff_pos * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
 
-                    rt8BufferPosition.setPosition(buffer_number, 1);
-                    // Decode accumulated data (containing slightly less than a full time slot)
-                    //decode(&mon, seconds);
-                    startcap = false;
-                    num_blocks = 0;
-                }
+            // Always compute magnitude and append to rolling ring buffer
+            const size_t block_bytes = (size_t)FT8_TIME_OSR * rfft_length;
+            cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*rfft_length);
+            cuda_check_error(cudaMemcpyAsync(
+                &magFT8_ring[(ring_write_idx % RING_BLOCKS) * block_bytes],
+                &magFT8_d[0],
+                block_bytes * sizeof(uint8_t), cudaMemcpyDeviceToHost, stream));
+            ring_write_idx++;
 
+            // On trigger: snapshot the last FT8_CAPTURE_BLOCKS blocks into a decode slot.
+            // Background thread does the ring→slot copy so doCopy never blocks.
+            uint64_t trigger_second = (uint64_t)(seconds);
+            bool gotime = (trigger == 14 &&
+                           (seconds - trunc(seconds)) > 0.7 &&
+                           trigger_second != last_trigger_second &&
+                           ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS);
+            if (gotime) {
+                last_trigger_second = trigger_second;
+                printf("Processing buffer %u\n", buffer_number);
+                cudaStreamSynchronize(stream);
+
+                int decode_slot = buffer_number % BUFFERS;
+                uint64_t snap_start = ring_write_idx - FT8_CAPTURE_BLOCKS;
+                int next_buf = buffer_number + 1;
+
+                if (last_snapshot_thread.joinable())
+                    last_snapshot_thread.join();
+
+                last_snapshot_thread = std::thread([this, decode_slot, snap_start, next_buf, block_bytes]() {
+                    uint8_t* dst = magFT8 + (size_t)decode_slot * FT8_CAPTURE_BLOCKS * block_bytes;
+                    for (int b = 0; b < FT8_CAPTURE_BLOCKS; b++) {
+                        size_t src_slot = (snap_start + b) % RING_BLOCKS;
+                        std::memcpy(dst + (size_t)b * block_bytes,
+                                    magFT8_ring + src_slot * block_bytes,
+                                    block_bytes);
+                    }
+                    rt8BufferPosition.setPosition(next_buf, 1);
+                });
+
+                buffer_number++;
             }
+
             lastepoch = seconds;
-            
         }
 
         return 1;
