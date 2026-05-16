@@ -21,8 +21,6 @@ public:
     gm::buffer::BufferPosition<std::complex<float>>* getBuffer() {
         return &hfBufferPosition;
     }
-    const static int oversample = 1;
-        
 private:
     // bool running;
     cudaStream_t stream;

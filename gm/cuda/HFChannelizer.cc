@@ -10,6 +10,7 @@
 #include "gm/rx888/rx888.h"
 
 #include "ft8_lib/common/monitor.h"
+#include "gm/hf/hf_bands.h"
 
 namespace gm {
 namespace cuda {
@@ -45,18 +46,9 @@ buffer_number(0) {
             printf("Error: exit for now\n");
         }
         cuda_h = gm::cuda::device::HostCuda(stream);
-        // From calc_rf.py
-        bins = {{13480,14980,1500},
-                {26212,29960,3748},
-                {39920,40712,792},
-                {52424,54676,2252},
-                {75644,76024,380},
-                {104856,107480,2624},
-                {135324,136076,752},
-                {157284,160660,3376},
-                {186420,187172,752},
-                {209712,222448,12736},
-            };
+        bins.resize(kNumHFBands);
+        for (int i = 0; i < kNumHFBands; ++i)
+            bins[i] = {kHFBands[i].wb_start, kHFBands[i].wb_end, kHFBands[i].bw};
         fft_length = 32768;
 
         cuda_check_error(cudaMalloc((void**)&demodData_d, BUFFERS * fft_length / 2 * sizeof(std::complex<float>) + 1024));

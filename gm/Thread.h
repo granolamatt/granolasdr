@@ -13,7 +13,7 @@ struct SynchroObjects {
     std::condition_variable cv;
 };
 
-static std::unordered_map<const void*, SynchroObjects> _synchro_objects;
+extern std::unordered_map<const void*, SynchroObjects> _synchro_objects;
 
 
 // synchronized(container, [&]{

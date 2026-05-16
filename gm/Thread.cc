@@ -3,6 +3,7 @@
 #include "Thread.h"
 
 std::mutex SynchroObjects::synchro_mutex; //Static initialization is needed
+std::unordered_map<const void*, SynchroObjects> _synchro_objects;
 
 namespace gm {
     

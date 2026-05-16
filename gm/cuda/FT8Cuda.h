@@ -23,8 +23,6 @@ public:
     gm::buffer::BufferPosition<uint8_t>* getBuffer() {
         return &rt8BufferPosition;
     }
-    const static int oversample = 1;
-        
 private:
     // bool running;
     cudaStream_t stream;

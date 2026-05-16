@@ -26,7 +26,8 @@ Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
 ### Hardware
 
 - [RX888 MkII](https://github.com/RXToolsRX888/RX888) or compatible
-- NVIDIA GPU (tested on RTX/Ampere; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
+- NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
+- 16 GB system RAM (virtual reservation for the waterfall buffer is ~9 GB; physical usage is ~14 GB during operation)
 
 ### System dependencies
 
@@ -106,7 +107,7 @@ This starts the RX888 capture, CUDA processing pipeline, and FT8 decoder. Decode
 DECODED: W1AW K1ABC FN42 time_offset=0.450s freq=14074150.3Hz snr=-8.0 unix=1716000015
 ```
 
-A ZMQ PUB socket opens on `tcp://*:5580` and publishes each decode as JSON:
+A ZMQ PUB socket opens on `tcp://*:5580` (all interfaces) and publishes each decode as JSON. If the host is publicly reachable, firewall port 5580 — no authentication is required to subscribe.
 
 ```json
 {"call":"K1ABC","freq":14074150,"snr":-8.0,"unix":1716000015,"offset":0.45}

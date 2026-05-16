@@ -36,6 +36,11 @@ buffer_number(0) {
         rfft_length = 698880; // half off for some reason
 
         magFT8 = (uint8_t*)calloc(sizeof(uint8_t), FT8_TIME_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
+        if (!magFT8) {
+            fprintf(stderr, "FT8Cuda: calloc failed for magFT8 (%zu bytes) — out of memory\n",
+                    (size_t)FT8_TIME_OSR * FT8_CAPTURE_BLOCKS * BUFFERS * rfft_length);
+            exit(1);
+        }
 
         rt8BufferPosition.setBuffer(magFT8, {BUFFERS, (size_t)FT8_TIME_OSR*rfft_length*FT8_CAPTURE_BLOCKS});
 
@@ -102,10 +107,10 @@ int FT8Cuda::doCopy(uint64_t now) {
                     return 0;
                 }
             }
-            buff_pos -= rfft_length / oversample;
+            buff_pos -= rfft_length;
             // I think this will not stomp on the data
-            cuda_check_error(cudaMemcpyAsync(&demodData_d[0], 
-                &demodData_d[rfft_length / oversample],
+            cuda_check_error(cudaMemcpyAsync(&demodData_d[0],
+                &demodData_d[rfft_length],
                 buff_pos * sizeof(std::complex<float>),cudaMemcpyDeviceToDevice, stream));
             if (startcap) {
                 // printf("Do the bb fft %u delta %f\n", buff_pos, seconds - lastepoch);
