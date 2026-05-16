@@ -62,7 +62,12 @@ The build installs `libsddc.so`. If it lands somewhere other than a standard lib
 
 ### ft8_lib
 
-A prebuilt `ft8_lib/libft8.a` is included in this repository. If you need to rebuild it:
+The `ft8_lib/` directory contains a modified copy of [kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) with granolasdr-specific changes:
+- `ftx_find_candidates_range()` for parallel frequency-sliced candidate search
+- `int32_t` offsets in `ftx_candidate_t` for wider waterfalls
+- `monitor.c` stripped to `monitor_reset()` (GPU handles FFT/windowing)
+
+A prebuilt `ft8_lib/libft8.a` is included. To rebuild from source:
 
 ```bash
 cd ft8_lib
@@ -126,6 +131,12 @@ Uploads are batched and sent every 5 minutes as required by PSKReporter.
 Verify your reports appeared: https://pskreporter.info/analyze.html
 
 ## Python tools
+
+Install dependencies:
+
+```bash
+pip3 install -r requirements.txt
+```
 
 ### `psk_uploader.py`
 
