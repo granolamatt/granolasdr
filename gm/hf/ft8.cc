@@ -13,7 +13,7 @@
 #include "gm/hf/ft8_capture.h"
 #include "gm/hf/hf_bands.h"
 #include "gm/buffer/BufferPosition.h"
-
+#include "gm/cuda/FT8Cuda.h"
 
 #include "ft8_lib/ft8/decode.h"
 #include "ft8_lib/ft8/encode.h"
@@ -67,6 +67,9 @@ static float composite_bin_to_rf_hz(int freq_offset) {
     }
     return (float)freq_offset; // fallback
 }
+
+// Define VALIDATE_GPU_CANDS to print per-epoch GPU vs CPU candidate comparison.
+// #define VALIDATE_GPU_CANDS
 
 const int kMin_score = 5; // Minimum sync score threshold for candidates
 const int kMax_candidates = 2000;
@@ -164,7 +167,8 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
-void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher)
+void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
+            const gm::cuda::GpuScanResult* gpu = nullptr)
 {
     const ftx_waterfall_t* wf = &mon->wf;
 
@@ -320,6 +324,33 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher)
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
+
+#ifdef VALIDATE_GPU_CANDS
+    if (gpu && gpu->count > 0) {
+        // For each GPU candidate with score >= kMin_score, check whether the CPU list
+        // contains a candidate within ±2 bins and the same (time_sub, freq_sub, time_offset).
+        // Mismatch = GPU found it but CPU did not (or vice versa).
+        int gpu_only = 0, cpu_only = 0, both = 0;
+        for (uint32_t gi = 0; gi < gpu->count; ++gi) {
+            bool found = false;
+            for (int ci = 0; ci < num_candidates; ++ci) {
+                if (candidate_list[ci].time_offset == (int)gpu->to[gi] &&
+                    candidate_list[ci].time_sub    == (int)gpu->ts[gi] &&
+                    candidate_list[ci].freq_sub    == (int)gpu->fs[gi] &&
+                    abs(candidate_list[ci].freq_offset - (int)gpu->fo[gi]) <= 2) {
+                    found = true; break;
+                }
+            }
+            if (found) ++both; else ++gpu_only;
+        }
+        cpu_only = num_candidates - both;
+        printf("GPU_VALIDATE: gpu=%u cpu=%d both=%d gpu_only=%d cpu_only=%d\n",
+               gpu->count, num_candidates, both, gpu_only, cpu_only);
+    } else if (gpu) {
+        printf("GPU_VALIDATE: gpu=0 (no candidates above threshold)\n");
+    }
+#endif
+
     fflush(stdout);
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
    
@@ -395,8 +426,11 @@ void load_monitor(monitor_t* me)
 namespace gm {
 namespace hf {
 
-    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP, int zmq_port) :
+    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP,
+             gm::cuda::FT8Cuda* ft8cuda_in,
+             int zmq_port) :
       inPos(inP),
+      ft8cuda(ft8cuda_in),
       zmq_ctx(1),
       zmq_pub(zmq_ctx, ZMQ_PUB) {
         init_band_map();
@@ -447,7 +481,12 @@ namespace hf {
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
                 printf("Processing %f\n", seconds);
-                decode(&mon, seconds, this);
+                const gm::cuda::GpuScanResult* gpu_res = nullptr;
+#ifdef VALIDATE_GPU_CANDS
+                if (ft8cuda)
+                    gpu_res = &ft8cuda->getGpuScanResult(buff);
+#endif
+                decode(&mon, seconds, this, gpu_res);
                 monitor_reset(&mon);
                 now += 1;
             }

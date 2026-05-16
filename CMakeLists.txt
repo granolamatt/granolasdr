@@ -39,6 +39,7 @@ set(LIBLOC "-L/opt/cuda/lib64")
 
 set(GM_CUDA_SOURCES
     "gm/cuda/HostCuda.cu"
+    "gm/cuda/FT8ScanCuda.cu"
     "gm/cuda/OverlapSave.cc"
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"
