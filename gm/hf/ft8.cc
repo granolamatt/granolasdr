@@ -204,7 +204,7 @@ void decode(const monitor_t* mon, double tm_slot_start)
             float snr = cand->score * 0.5f - 26.0f;
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
-            printf("DECODED: %s time_offset=%.3fs freq=%.1fHz\n", text, time_sec, freq_hz);
+            printf("DECODED: %s time_offset=%.3fs freq=%.1fHz unix=%.0f\n", text, time_sec, freq_hz, tm_slot_start);
         }
     }
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
