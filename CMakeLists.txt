@@ -56,20 +56,16 @@ target_link_libraries (gmcuda ${LIBLOC} cufft)
 
 set(GM_SOURCES
     "gm/Thread.cc"
-    "gm/bladerf/bladerf.cc"
     "gm/rx888/rx888.cc"
-    "gm/zmqcode/zmqserver.cc" 
+    "gm/zmqcode/zmqserver.cc"
     "gm/zmqcode/zmqworker.cc"
     "gm/hf/ft8.cc"
     "gm/zmqcode/ZMQPub.cc")
 
-set(GM_LIBS ${LIBLOC} ${LIBLOG} bladeRF sddc ${LIBUSB} zmq)
+set(GM_LIBS ${LIBLOC} ${LIBLOG} sddc ${LIBUSB} zmq)
 
 add_library(lib_granolamatt ${GM_SOURCES})
 target_link_libraries (lib_granolamatt ${GM_LIBS})
-
-add_executable(blade_capture "gm/main.cc")
-target_link_libraries (blade_capture lib_granolamatt ${GM_LIBS})
 
 add_executable(rx888_capture "gm/rx888_test.cc")
 target_link_libraries (rx888_capture lib_granolamatt ${GM_LIBS})
