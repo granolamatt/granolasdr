@@ -17,7 +17,7 @@
 #include "gm/cuda/FT8Cuda.h"
 
 #include "ft8_lib/ft8/decode.h"
-#include "ft8_lib/ft8/encode.h"
+#include "ft8_lib/ft8/constants.h"
 #include "ft8_lib/ft8/message.h"
 #include "ft8_lib/common/common.h"
 #include "ft8_lib/common/monitor.h"
@@ -175,68 +175,42 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
     std::vector<ftx_candidate_t> cand_storage;
     ftx_candidate_t* candidate_list = nullptr;
     int num_candidates = 0;
-    bool used_gpu = false;
 
     if (gpu && gpu->count > 0) {
-        // GPU scan already found candidates — sort by score and use directly.
-        used_gpu = true;
         uint32_t ngpu = gpu->count;
-        std::vector<uint32_t> sidx(ngpu);
-        std::iota(sidx.begin(), sidx.end(), 0u);
-        std::sort(sidx.begin(), sidx.end(), [&](uint32_t a, uint32_t b){
-            return gpu->score[a] > gpu->score[b];
-        });
         cand_storage.resize(ngpu);
         for (uint32_t i = 0; i < ngpu; ++i) {
-            uint32_t gi = sidx[i];
-            cand_storage[i].freq_offset = gpu->fo[gi];
-            cand_storage[i].time_offset = gpu->to[gi];
-            cand_storage[i].time_sub    = gpu->ts[gi];
-            cand_storage[i].freq_sub    = gpu->fs[gi];
-            cand_storage[i].score       = gpu->score[gi];
+            cand_storage[i].freq_offset = gpu->fo[i];
+            cand_storage[i].time_offset = gpu->to[i];
+            cand_storage[i].time_sub    = gpu->ts[i];
+            cand_storage[i].freq_sub    = gpu->fs[i];
+            cand_storage[i].score       = gpu->score[i];
         }
         candidate_list = cand_storage.data();
         num_candidates = (int)ngpu;
-    } else {
-        // CPU fallback: parallel scan split across threads.
-        int nthreads = (int)std::thread::hardware_concurrency();
-        if (nthreads < 1) nthreads = 1;
-        int bins_per_thread = (wf->num_bins + nthreads - 1) / nthreads;
-        std::vector<std::vector<ftx_candidate_t>> per_thread_heaps(nthreads);
-        std::vector<int> per_thread_sizes(nthreads, 0);
-        {
-            std::vector<std::thread> search_workers;
-            search_workers.reserve(nthreads);
-            for (int t = 0; t < nthreads; ++t) {
-                per_thread_heaps[t].resize(kMax_candidates);
-                search_workers.emplace_back([&, t]() {
-                    int freq_start = t * bins_per_thread;
-                    int freq_end   = std::min(freq_start + bins_per_thread, wf->num_bins);
-                    per_thread_sizes[t] = ftx_find_candidates_range(
-                        wf, kMax_candidates, per_thread_heaps[t].data(), kMin_score,
-                        freq_start, freq_end);
-                });
-            }
-            for (auto& w : search_workers) w.join();
-        }
-        cand_storage.reserve(nthreads * kMax_candidates);
-        for (int t = 0; t < nthreads; ++t)
-            for (int i = 0; i < per_thread_sizes[t]; ++i)
-                cand_storage.push_back(per_thread_heaps[t][i]);
-        std::sort(cand_storage.begin(), cand_storage.end(),
-                  [](const ftx_candidate_t& a, const ftx_candidate_t& b) {
-                      return a.score > b.score;
-                  });
-        if ((int)cand_storage.size() > kMax_candidates)
-            cand_storage.resize(kMax_candidates);
-        candidate_list = cand_storage.data();
-        num_candidates = (int)cand_storage.size();
     }
 
     auto t_find_end = std::chrono::steady_clock::now();
 
+#ifdef VALIDATE_SOFT_SYMBOLS
+    // Compare GPU LLRs against CPU reference. Requires wf->mag populated (pre-T7 build).
+    if (gpu && !gpu->log174.empty() && wf->mag != NULL) {
+        float max_delta = 0.0f;
+        float cpu_llr[FTX_LDPC_N];
+        for (int idx = 0; idx < num_candidates; ++idx) {
+            ftx_get_ft8_llr(wf, &candidate_list[idx], cpu_llr);
+            const float* gpu_llr = gpu->log174.data() + (size_t)idx * FTX_LDPC_N;
+            for (int i = 0; i < FTX_LDPC_N; ++i) {
+                float d = fabsf(cpu_llr[i] - gpu_llr[i]);
+                if (d > max_delta) max_delta = d;
+            }
+        }
+        printf("VALIDATE_SOFT_SYMBOLS: max_delta=%.6f over %d candidates\n",
+               max_delta, num_candidates);
+    }
+#endif
+
     auto t_ldpc_start = std::chrono::steady_clock::now();
-    // Parallel LDPC decode — each candidate is independent (read-only waterfall).
     struct CandResult {
         ftx_message_t message;
         ftx_decode_status_t status;
@@ -251,11 +225,11 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
     std::vector<std::thread> workers;
     workers.reserve(num_threads);
     for (int t = 0; t < num_threads; ++t) {
-        workers.emplace_back([&, t]() {
-            // Round-robin: thread t handles candidates t, t+num_threads, ...
+        workers.emplace_back([&, t, gpu]() {
             for (int idx = t; idx < num_candidates; idx += num_threads) {
-                results[idx].ok = ftx_decode_candidate(
-                    wf, &candidate_list[idx], kLDPC_iterations,
+                results[idx].ok = ftx_decode_from_llr(
+                    gpu->log174.data() + (size_t)idx * FTX_LDPC_N,
+                    kLDPC_iterations,
                     &results[idx].message, &results[idx].status);
             }
         });
@@ -338,9 +312,8 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates (%s) |%s | find=%.1fms ldpc=%.1fms\n",
+    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms ldpc=%.1fms\n",
            num_decoded, num_candidates,
-           used_gpu ? "gpu" : "cpu",
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
@@ -368,53 +341,34 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
     hashtable_cleanup(10);
 }
 
-static void waterfall_init(ftx_waterfall_t* me, int max_blocks, int num_bins, int time_osr, int freq_osr)
-{
-    size_t mag_size = max_blocks * time_osr * freq_osr * num_bins * sizeof(me->mag[0]);
-    me->max_blocks = max_blocks;
-    me->num_blocks = 0;
-    me->num_bins = num_bins;
-    me->time_osr = time_osr;
-    me->freq_osr = freq_osr;
-    me->block_stride = (time_osr * freq_osr * num_bins);
-    me->mag = (WF_ELEM_T*)malloc(mag_size);
-    if (!me->mag) {
-        fprintf(stderr, "waterfall_init: malloc failed for mag (%zu bytes) — out of memory\n", mag_size);
-        exit(1);
-    }
-    printf("Waterfall size %zu\n", mag_size);
-    LOG(LOG_DEBUG, "Waterfall size = %zu\n", mag_size);
-}
-
 void load_monitor(monitor_t* me)
 {
     float symbol_period = FT8_SYMBOL_PERIOD;
-    // Compute DSP parameters that depend on the sample rate
-    me->block_size = 698880; // samples corresponding to one FSK symbol
+    me->block_size    = 698880;
     me->subblock_size = 698880;
-    me->nfft = 698880;
-    me->fft_norm = 698880;
+    me->nfft          = 698880;
+    me->fft_norm      = 698880;
 
-    LOG(LOG_INFO, "Block size = %d\n", me->block_size);
-    LOG(LOG_INFO, "Subblock size = %d\n", me->subblock_size);
-
-    // Allocate enough blocks to fit the capture window (FT8_CAPTURE_BLOCKS in ft8_capture.h)
-    const int max_blocks = FT8_CAPTURE_BLOCKS;
-    // Keep only FFT bins in the specified frequency range (f_min/f_max)
     me->min_bin = 0;
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, FT8_TIME_OSR, FT8_FREQ_OSR);
-    me->wf.protocol = FTX_PROTOCOL_FT8;
-    size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * num_bins;
-    printf("FT8: time_osr=%d freq_osr=%d block_bytes=%zu ring=%.1fGB\n",
-           FT8_TIME_OSR, FT8_FREQ_OSR, block_bytes,
-           (double)(200 * block_bytes) / 1e9);
+    // Phase 4: skip waterfall mag alloc — GPU computes LLRs from ring buffer.
+    // wf.mag = NULL; metadata set directly so time_osr/freq_osr/num_bins are available.
+    me->wf.max_blocks   = FT8_CAPTURE_BLOCKS;
+    me->wf.num_blocks   = 0;
+    me->wf.num_bins     = num_bins;
+    me->wf.time_osr     = FT8_TIME_OSR;
+    me->wf.freq_osr     = FT8_FREQ_OSR;
+    me->wf.block_stride = FT8_TIME_OSR * FT8_FREQ_OSR * num_bins;
+    me->wf.mag          = NULL;
+    me->wf.protocol     = FTX_PROTOCOL_FT8;
 
     me->symbol_period = symbol_period;
+    me->max_mag       = -120.0f;
 
-    me->max_mag = -120.0f;
+    printf("FT8: time_osr=%d freq_osr=%d num_bins=%d (GPU LLR mode)\n",
+           FT8_TIME_OSR, FT8_FREQ_OSR, num_bins);
 }
 
 namespace gm {
@@ -430,7 +384,6 @@ namespace hf {
         init_band_map();
         hashtable_init();
         load_monitor(&mon);
-        demodFT8 = inPos->getBuffer();
 
         std::string endpoint = "tcp://*:" + std::to_string(zmq_port);
         zmq_pub.bind(endpoint);
@@ -466,11 +419,7 @@ namespace hf {
                     now = next;
                     break;
                 }
-                int offset = mon.wf.num_blocks * mon.wf.block_stride;
                 int buff = now % inPos->getShape()[0];
-                uint8_t* src = demodFT8 + inPos->getShape()[1] * buff;
-                memcpy(mon.wf.mag + offset, src, inPos->getShape()[1]);
-                mon.wf.num_blocks += FT8_CAPTURE_BLOCKS;
                 auto nowsec = std::chrono::system_clock::now();
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();

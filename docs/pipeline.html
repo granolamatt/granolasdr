@@ -388,9 +388,9 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <div class="split-col">
     <div class="stage scan">
       <div class="stage-header">
-        GPU Sync Scan
+        GPU Costas Scan + Soft Symbols
         <span class="thread-badge" style="background:#2a0d0d;border:1px solid #ff6b6b44;color:#ff9999">scan_stream</span>
-        <span class="file-tag">gm/cuda/FT8ScanCuda.cu</span>
+        <span class="file-tag">FT8ScanCuda.cu · FT8SoftCuda.cu</span>
       </div>
       <div class="stage-body wide">
         <div class="step"><span class="step-num">1</span>
@@ -419,9 +419,16 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
           </span>
         </div>
         <div class="step"><span class="step-num">5</span>
-          <span class="step-text">cudaEventRecord(<span class="hl4">scan_done</span>, scan_stream)</span>
+          <span class="step-text"><span class="hl4">ft8_soft_symbols_kernel:</span> 1 thread per (cand × data_sym)<br>
+          <span class="step-detail">58 data symbols × 8 magnitude bins → 3 LLRs/sym via Gray-coded 8-FSK<br>
+          output: log174_d (n × 174 floats = 348 MB device at cap)</span>
+          </span>
         </div>
-        <div class="note future" style="margin-top:6px;border-color:#3fb950;color:#56d364"><b>ACTIVE:</b> GPU candidates are the primary decode path — CPU scan is no longer used</div>
+        <div class="step"><span class="step-num">6</span>
+          <span class="step-text">cudaEventRecord(<span class="hl4">scan_done</span>, scan_stream)<br>
+          <span class="step-detail">fires after both kernels complete</span></span>
+        </div>
+        <div class="note future" style="margin-top:6px;border-color:#3fb950;color:#56d364"><b>ACTIVE:</b> GPU computes all LLRs — no waterfall D2H, no CPU scan needed</div>
       </div>
     </div>
   </div>
@@ -429,37 +436,31 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <div class="split-col">
     <div class="stage d2h">
       <div class="stage-header">
-        D2H Snapshot (background thread)
-        <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">transfer_stream</span>
+        Background Thread (FT8Cuda)
+        <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">bg thread</span>
         <span class="file-tag">gm/cuda/FT8Cuda.cc</span>
       </div>
       <div class="stage-body wide">
         <div class="step"><span class="step-num">1</span>
-          <span class="step-text">transfer_stream waits for <span class="hl2">ring_ready</span> event</span>
+          <span class="step-text">cudaEventSynchronize(<span class="hl2">scan_done</span>)<br>
+          <span class="step-detail">waits for Costas scan + soft symbols kernels</span>
+          </span>
         </div>
         <div class="step"><span class="step-num">2</span>
-          <span class="step-text">1–2 <span class="hl2">cudaMemcpyAsync D2H</span> transfers<br>
-          <span class="step-detail">106 × 11.2 MB = <span class="hl2">1.18 GB</span> of pinned magFT8[]<br>
-          destination = pinned cudaHostAlloc decode slot<br>
-          pure DMA, no CUDA context lock held</span>
+          <span class="step-text"><span class="hl2">D2H candidates:</span> fo[], to[], ts[], fs[], score[]<br>
+          <span class="step-detail">~22K × 20 bytes ≈ <span class="hl2">0.4 MB</span></span>
           </span>
         </div>
         <div class="step"><span class="step-num">3</span>
-          <span class="step-text">cudaStreamSynchronize(transfer_stream)<br>
-          <span class="step-detail">waits ~100 ms for PCIe DMA</span>
+          <span class="step-text"><span class="hl2">D2H log174:</span> n × 174 × 4 bytes<br>
+          <span class="step-detail">≈ <span class="hl2">15.3 MB</span> typical (22K cands) · 348 MB max (500K cap)<br>
+          destination = 348 MB pinned cudaHostAlloc</span>
           </span>
         </div>
         <div class="step"><span class="step-num">4</span>
-          <span class="step-text">cudaEventSynchronize(<span class="hl2">scan_done</span>)<br>
-          <span class="step-detail">waits for GPU scan kernel to finish</span>
-          </span>
+          <span class="step-text">memcpy log174 → GpuScanResult.log174 vector</span>
         </div>
         <div class="step"><span class="step-num">5</span>
-          <span class="step-text">Download ~22K GPU candidates D2H<br>
-          <span class="step-detail">fo[], to[], ts[], fs[], score[] arrays</span>
-          </span>
-        </div>
-        <div class="step"><span class="step-num">6</span>
           <span class="step-text">setPosition() → <span class="hl2">ft8.cc wakes</span></span>
         </div>
       </div>
@@ -480,7 +481,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 
 <div class="arrow-row" style="height:28px">
   <div class="arrow-line" style="height:20px"></div><div class="arrow-head"></div>
-  <div class="arrow-label">GpuScanResult (~22K cands) + uint8_t waterfall snapshot (4.7 GB pinned)</div>
+  <div class="arrow-label">GpuScanResult (~22K cands) + log174 (174 floats/cand · ~15 MB typical)</div>
 </div>
 
 <!-- ===== ft8.cc DECODE ===== -->
@@ -493,36 +494,29 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <div class="stage-body">
     <div>
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text"><span class="hl5">GPU path (primary):</span> when GpuScanResult.count &gt; 0<br>
-        <span class="step-detail">sort all ~22K GPU candidates by score descending<br>
-        build ftx_candidate_t list directly — find= ≈ 0 ms</span>
+        <span class="step-text"><span class="hl5">GPU path (direct):</span> iterate gpu-&gt;count candidates<br>
+        <span class="step-detail">no sort, no CPU scan — build ftx_candidate_t from fo/to/ts/fs arrays<br>
+        wf.mag = NULL (waterfall not allocated)</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl5">CPU fallback:</span> when no GPU results<br>
-        <span class="step-detail">multi-threaded ftx_find_candidates_range() splits freq range across CPU cores<br>
-        cap at 2,000 candidates — find= ≈ 1,600 ms</span>
+        <span class="step-text"><span class="hl5">Parallel LDPC decode:</span> N CPU threads, round-robin<br>
+        <span class="step-detail">ftx_decode_from_llr() — uses GPU log174 directly<br>
+        normalize LLRs, 25-iter belief propagation, (174,91) code, 14-bit CRC</span>
         </span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl5">Parallel LDPC decode:</span> N CPU threads, round-robin<br>
-        <span class="step-detail">ftx_decode_candidate() — extracts LLRs from wf.mag at candidate position<br>
-        25-iteration belief propagation, (174,91) code, 14-bit CRC</span>
+        <span class="step-text"><span class="hl5">Message unpack:</span> ftx_message_decode()<br>
+        <span class="step-detail">77 bits → callsign1 (28b) + callsign2 (28b) + grid/report (15b)</span>
         </span>
       </div>
     </div>
     <div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl5">Message unpack:</span> ftx_message_decode()<br>
-        <span class="step-detail">77 bits → callsign1 (28b) + callsign2 (28b) + grid/report (15b)<br>
-        callsign hash table for compressed callsigns</span>
-        </span>
-      </div>
-      <div class="step"><span class="step-num">5</span>
         <span class="step-text">Sequential dedup by 22-bit hash, RF frequency conversion, ZMQ publish</span>
       </div>
-      <div class="step"><span class="step-num">6</span>
-        <span class="step-text">⏱ GPU path: <span class="hl5">find=~0 ms · ldpc=~200 ms</span> (22K cands)<br>
+      <div class="step"><span class="step-num">5</span>
+        <span class="step-text">⏱ <span class="hl5">find=~0 ms · ldpc=~200 ms</span> (22K cands)<br>
         <span class="step-detail">EPOCH: N decoded / 22K candidates (gpu) | find=0.8ms ldpc=198ms</span>
         </span>
       </div>
@@ -600,18 +594,25 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <td style="padding:4px 8px;color:#3fb950">✓ non-blocking to main</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:4px 8px;color:#70d6e8">D2H snapshot (1.18 GB pinned)</td>
-      <td style="padding:4px 8px;color:#6e7681">transfer_stream</td>
+      <td style="padding:4px 8px;color:#ff9999">GPU soft symbols kernel</td>
+      <td style="padding:4px 8px;color:#6e7681">scan_stream</td>
       <td style="padding:4px 8px">once per epoch</td>
-      <td style="padding:4px 8px;color:#70d6e8">~100 ms PCIe DMA</td>
-      <td style="padding:4px 8px;color:#3fb950">✓ non-blocking to main</td>
+      <td style="padding:4px 8px;color:#ff9999">~20–50 ms GPU</td>
+      <td style="padding:4px 8px;color:#3fb950">✓ sequential after Costas scan</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:4px 8px;color:#d2a8ff">GPU candidates → sort (ft8.cc)</td>
+      <td style="padding:4px 8px;color:#70d6e8">log174 D2H (~15 MB typical)</td>
+      <td style="padding:4px 8px;color:#6e7681">bg thread</td>
+      <td style="padding:4px 8px">once per epoch</td>
+      <td style="padding:4px 8px;color:#70d6e8">&lt;5 ms PCIe DMA</td>
+      <td style="padding:4px 8px;color:#3fb950">✓ 77× less data than Phase 3</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 8px;color:#d2a8ff">ftx_decode_from_llr (ft8.cc)</td>
       <td style="padding:4px 8px;color:#6e7681">ft8.cc thread</td>
       <td style="padding:4px 8px">once per epoch</td>
-      <td style="padding:4px 8px;color:#56d364">~1 ms</td>
-      <td style="padding:4px 8px;color:#3fb950">✓ replaced CPU scan</td>
+      <td style="padding:4px 8px;color:#56d364">~0 ms overhead</td>
+      <td style="padding:4px 8px;color:#3fb950">✓ GPU LLRs, no wf read</td>
     </tr>
     <tr>
       <td style="padding:4px 8px;color:#ffa198">CPU LDPC decode (ft8_lib)</td>

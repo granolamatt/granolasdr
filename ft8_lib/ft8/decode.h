@@ -95,6 +95,13 @@ int ftx_find_candidates_range(const ftx_waterfall_t* wf, int num_candidates,
 /// @return True if the decoding was successful, false otherwise (check status for details)
 bool ftx_decode_candidate(const ftx_waterfall_t* power, const ftx_candidate_t* cand, int max_iterations, ftx_message_t* message, ftx_decode_status_t* status);
 
+/// Decode from pre-computed LLR array (GPU path). Normalizes then runs bp_decode + CRC.
+/// @param[in] log174_in FTX_LDPC_N un-normalized LLRs (will be copied and normalized internally)
+bool ftx_decode_from_llr(const float* log174_in, int max_iterations, ftx_message_t* message, ftx_decode_status_t* status);
+
+/// Extract raw FT8 LLRs from waterfall for a candidate (used by VALIDATE_SOFT_SYMBOLS).
+void ftx_get_ft8_llr(const ftx_waterfall_t* wf, const ftx_candidate_t* cand, float* log174);
+
 #ifdef __cplusplus
 }
 #endif

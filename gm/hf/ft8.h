@@ -30,7 +30,6 @@ public:
 private:
     monitor_t mon;
     gm::buffer::BufferPosition<uint8_t>* inPos;
-    uint8_t* demodFT8;
     gm::cuda::FT8Cuda* ft8cuda;
 
     zmq::context_t zmq_ctx;
