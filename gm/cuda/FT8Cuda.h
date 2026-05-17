@@ -9,6 +9,7 @@
 #include <cufft.h>
 #include "gm/cuda/HostCuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
+#include "gm/cuda/FT8SoftCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
 
@@ -17,12 +18,13 @@ namespace cuda {
 
 // Per-epoch GPU candidate scan results, indexed by decode slot (0..BUFFERS-1).
 struct GpuScanResult {
-    uint32_t         count;
+    uint32_t              count;
     std::vector<int32_t>  fo;
     std::vector<uint8_t>  to;
     std::vector<uint8_t>  ts;
     std::vector<uint8_t>  fs;
     std::vector<int16_t>  score;
+    std::vector<float>    log174; // FTX_LDPC_N floats per candidate, CPU-side
 };
 
 class FT8Cuda : public Thread {
@@ -70,10 +72,14 @@ private:
     std::complex<float>* demodFT8_d;
     std::complex<float>* demodShift_d;
     uint8_t* magFT8_d;
-    uint8_t* magFT8;
+    uint8_t* magFT8;        // 1-byte dummy pinned alloc (keeps rt8BufferPosition pointer valid)
 
     // GPU-resident mag ring (RING_BLOCKS slots × block_bytes each).
     uint8_t* magFT8_ring_d;
+
+    // Soft symbol LLR buffers (Phase 4).
+    float* log174_d;   // device: FT8_GPU_CAND_MAX * kFtxLdpcN floats
+    float* log174;     // pinned host staging: same size
 
     // GPU candidate output buffers (device).
     int32_t*  gpu_cand_fo_d;

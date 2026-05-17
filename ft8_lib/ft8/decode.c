@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 // #define LOG_LEVEL LOG_DEBUG
 // #include "debug.h"
@@ -323,6 +324,14 @@ static void ftx_normalize_logl(float* log174)
     float inv_n = 1.0f / FTX_LDPC_N;
     float variance = (sum2 - (sum * sum * inv_n)) * inv_n;
 
+    // Zero-variance candidate (all bins same energy) → all-zero LLRs → bp_decode
+    // fails cleanly with max LDPC errors. Avoids division by zero / NaN propagation.
+    if (variance < 1e-6f)
+    {
+        memset(log174, 0, FTX_LDPC_N * sizeof(float));
+        return;
+    }
+
     // Normalize log174 distribution and scale it with experimentally found coefficient
     float norm_factor = sqrtf(24.0f / variance);
     for (int i = 0; i < FTX_LDPC_N; ++i)
@@ -392,6 +401,46 @@ bool ftx_decode_candidate(const ftx_waterfall_t* wf, const ftx_candidate_t* cand
 
     // LOG(LOG_DEBUG, "Decoded message (CRC %04x), trying to unpack...\n", status->crc_extracted);
     return true;
+}
+
+// Decode from pre-computed LLRs (GPU-provided). Calls normalize then bp_decode.
+// Must be in this translation unit — ftx_normalize_logl is static.
+bool ftx_decode_from_llr(const float* log174_in, int max_iterations,
+                          ftx_message_t* message, ftx_decode_status_t* status)
+{
+    float log174[FTX_LDPC_N];
+    memcpy(log174, log174_in, FTX_LDPC_N * sizeof(float));
+
+    ftx_normalize_logl(log174);
+
+    uint8_t plain174[FTX_LDPC_N];
+    bp_decode(log174, max_iterations, plain174, &status->ldpc_errors);
+
+    if (status->ldpc_errors > 0)
+        return false;
+
+    uint8_t a91[FTX_LDPC_K_BYTES];
+    pack_bits(plain174, FTX_LDPC_K, a91);
+
+    status->crc_extracted = ftx_extract_crc(a91);
+    a91[9]  &= 0xF8;
+    a91[10] &= 0x00;
+    status->crc_calculated = ftx_compute_crc(a91, 96 - 14);
+
+    if (status->crc_extracted != status->crc_calculated)
+        return false;
+
+    message->hash = status->crc_calculated;
+    for (int i = 0; i < 10; ++i)
+        message->payload[i] = a91[i];
+
+    return true;
+}
+
+// Public wrapper for ft8_extract_likelihood — used by VALIDATE_SOFT_SYMBOLS.
+void ftx_get_ft8_llr(const ftx_waterfall_t* wf, const ftx_candidate_t* cand, float* log174)
+{
+    ft8_extract_likelihood(wf, cand, log174);
 }
 
 static float max2(float a, float b)
