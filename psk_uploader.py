@@ -173,12 +173,16 @@ def main():
             if include_tmpl:
                 last_template_time = time.time()
 
-            upload(rx_call, rx_grid, rx_rig, pending, seq, session_id, include_tmpl,
-                   PSK_HOST, psk_port)
-            seq += len(pending)   # seq = cumulative report count, not packet count
-            packets_sent += 1
-            pending.clear()
-            last_upload = time.time()
+            try:
+                upload(rx_call, rx_grid, rx_rig, pending, seq, session_id, include_tmpl,
+                       PSK_HOST, psk_port)
+                seq += len(pending)   # seq = cumulative report count, not packet count
+                packets_sent += 1
+                pending.clear()
+                last_upload = time.time()
+            except OSError as e:
+                print(f"[psk] upload failed ({e}), retrying in 30s ({len(pending)} reports buffered)")
+                last_upload = time.time() - UPLOAD_INTERVAL_SEC + 30
 
 
 if __name__ == "__main__":
