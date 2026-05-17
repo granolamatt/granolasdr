@@ -1,5 +1,7 @@
 # granolasdr
 
+**[Documentation](https://granolamatt.github.io/granolasdr)**
+
 A wideband HF FT8 decoder for the RX888 SDR. Simultaneously monitors all major HF amateur bands (160m–10m) for FT8 signals using CUDA-accelerated DSP, and uploads decoded stations to [PSKReporter](https://pskreporter.info).
 
 ## How it works
