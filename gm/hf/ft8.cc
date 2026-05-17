@@ -69,9 +69,6 @@ static float composite_bin_to_rf_hz(int freq_offset) {
     return (float)freq_offset; // fallback
 }
 
-// Define VALIDATE_GPU_CANDS to print per-epoch GPU vs CPU candidate comparison.
-#define VALIDATE_GPU_CANDS
-
 const int kMin_score = 5; // Minimum sync score threshold for candidates
 const int kMax_candidates = 2000;
 const int kLDPC_iterations = 25;
@@ -173,47 +170,68 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
 {
     const ftx_waterfall_t* wf = &mon->wf;
 
-    // Parallel candidate search: split freq_offset range across threads.
-    // Each thread fills its own heap; results are merged and sorted.
     auto t_find_start = std::chrono::steady_clock::now();
 
-    int nthreads = (int)std::thread::hardware_concurrency();
-    if (nthreads < 1) nthreads = 1;
-    int bins_per_thread = (wf->num_bins + nthreads - 1) / nthreads;
+    std::vector<ftx_candidate_t> cand_storage;
+    ftx_candidate_t* candidate_list = nullptr;
+    int num_candidates = 0;
+    bool used_gpu = false;
 
-    std::vector<std::vector<ftx_candidate_t>> per_thread_heaps(nthreads);
-    std::vector<int> per_thread_sizes(nthreads, 0);
-    {
-        std::vector<std::thread> search_workers;
-        search_workers.reserve(nthreads);
-        for (int t = 0; t < nthreads; ++t) {
-            per_thread_heaps[t].resize(kMax_candidates);
-            search_workers.emplace_back([&, t]() {
-                int freq_start = t * bins_per_thread;
-                int freq_end   = std::min(freq_start + bins_per_thread, wf->num_bins);
-                per_thread_sizes[t] = ftx_find_candidates_range(
-                    wf, kMax_candidates, per_thread_heaps[t].data(), kMin_score,
-                    freq_start, freq_end);
-            });
+    if (gpu && gpu->count > 0) {
+        // GPU scan already found candidates — sort by score and use directly.
+        used_gpu = true;
+        uint32_t ngpu = gpu->count;
+        std::vector<uint32_t> sidx(ngpu);
+        std::iota(sidx.begin(), sidx.end(), 0u);
+        std::sort(sidx.begin(), sidx.end(), [&](uint32_t a, uint32_t b){
+            return gpu->score[a] > gpu->score[b];
+        });
+        cand_storage.resize(ngpu);
+        for (uint32_t i = 0; i < ngpu; ++i) {
+            uint32_t gi = sidx[i];
+            cand_storage[i].freq_offset = gpu->fo[gi];
+            cand_storage[i].time_offset = gpu->to[gi];
+            cand_storage[i].time_sub    = gpu->ts[gi];
+            cand_storage[i].freq_sub    = gpu->fs[gi];
+            cand_storage[i].score       = gpu->score[gi];
         }
-        for (auto& w : search_workers) w.join();
+        candidate_list = cand_storage.data();
+        num_candidates = (int)ngpu;
+    } else {
+        // CPU fallback: parallel scan split across threads.
+        int nthreads = (int)std::thread::hardware_concurrency();
+        if (nthreads < 1) nthreads = 1;
+        int bins_per_thread = (wf->num_bins + nthreads - 1) / nthreads;
+        std::vector<std::vector<ftx_candidate_t>> per_thread_heaps(nthreads);
+        std::vector<int> per_thread_sizes(nthreads, 0);
+        {
+            std::vector<std::thread> search_workers;
+            search_workers.reserve(nthreads);
+            for (int t = 0; t < nthreads; ++t) {
+                per_thread_heaps[t].resize(kMax_candidates);
+                search_workers.emplace_back([&, t]() {
+                    int freq_start = t * bins_per_thread;
+                    int freq_end   = std::min(freq_start + bins_per_thread, wf->num_bins);
+                    per_thread_sizes[t] = ftx_find_candidates_range(
+                        wf, kMax_candidates, per_thread_heaps[t].data(), kMin_score,
+                        freq_start, freq_end);
+                });
+            }
+            for (auto& w : search_workers) w.join();
+        }
+        cand_storage.reserve(nthreads * kMax_candidates);
+        for (int t = 0; t < nthreads; ++t)
+            for (int i = 0; i < per_thread_sizes[t]; ++i)
+                cand_storage.push_back(per_thread_heaps[t][i]);
+        std::sort(cand_storage.begin(), cand_storage.end(),
+                  [](const ftx_candidate_t& a, const ftx_candidate_t& b) {
+                      return a.score > b.score;
+                  });
+        if ((int)cand_storage.size() > kMax_candidates)
+            cand_storage.resize(kMax_candidates);
+        candidate_list = cand_storage.data();
+        num_candidates = (int)cand_storage.size();
     }
-
-    // Merge all per-thread results into one list and sort descending by score.
-    std::vector<ftx_candidate_t> merged;
-    merged.reserve(nthreads * kMax_candidates);
-    for (int t = 0; t < nthreads; ++t)
-        for (int i = 0; i < per_thread_sizes[t]; ++i)
-            merged.push_back(per_thread_heaps[t][i]);
-    std::sort(merged.begin(), merged.end(),
-              [](const ftx_candidate_t& a, const ftx_candidate_t& b) {
-                  return a.score > b.score;
-              });
-    if ((int)merged.size() > kMax_candidates)
-        merged.resize(kMax_candidates);
-
-    ftx_candidate_t* candidate_list = merged.data();
-    int num_candidates = (int)merged.size();
 
     auto t_find_end = std::chrono::steady_clock::now();
 
@@ -320,124 +338,12 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates |%s | find=%.1fms ldpc=%.1fms\n",
+    printf("EPOCH: %d decoded / %d candidates (%s) |%s | find=%.1fms ldpc=%.1fms\n",
            num_decoded, num_candidates,
+           used_gpu ? "gpu" : "cpu",
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
-
-#ifdef VALIDATE_GPU_CANDS
-    if (gpu && gpu->count > 0) {
-        // Candidate-list comparison (scan score check).
-        int gpu_only = 0, cpu_only = 0, both = 0;
-        for (uint32_t gi = 0; gi < gpu->count; ++gi) {
-            bool found = false;
-            for (int ci = 0; ci < num_candidates; ++ci) {
-                if (candidate_list[ci].time_offset == (int)gpu->to[gi] &&
-                    candidate_list[ci].time_sub    == (int)gpu->ts[gi] &&
-                    candidate_list[ci].freq_sub    == (int)gpu->fs[gi] &&
-                    abs(candidate_list[ci].freq_offset - (int)gpu->fo[gi]) <= 2) {
-                    found = true; break;
-                }
-            }
-            if (found) ++both; else ++gpu_only;
-        }
-        cpu_only = num_candidates - both;
-        printf("GPU_VALIDATE: gpu=%u cpu=%d both=%d gpu_only=%d cpu_only=%d\n",
-               gpu->count, num_candidates, both, gpu_only, cpu_only);
-
-        // LDPC decode on top GPU candidates — do we get the same messages?
-        // Sort GPU candidates by score descending, take top kMax_candidates.
-        uint32_t ngpu = std::min(gpu->count, (uint32_t)FT8_GPU_CAND_MAX);
-        std::vector<uint32_t> idx(ngpu);
-        std::iota(idx.begin(), idx.end(), 0u);
-        std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b){
-            return gpu->score[a] > gpu->score[b];
-        });
-        if ((int)ngpu > kMax_candidates) ngpu = kMax_candidates;
-
-        // Build ftx_candidate_t list from GPU results.
-        std::vector<ftx_candidate_t> gpu_cands(ngpu);
-        for (uint32_t i = 0; i < ngpu; ++i) {
-            uint32_t gi = idx[i];
-            gpu_cands[i].freq_offset = gpu->fo[gi];
-            gpu_cands[i].time_offset = gpu->to[gi];
-            gpu_cands[i].time_sub    = gpu->ts[gi];
-            gpu_cands[i].freq_sub    = gpu->fs[gi];
-            gpu_cands[i].score       = gpu->score[gi];
-        }
-
-        // Parallel LDPC on GPU candidates.
-        std::vector<CandResult> gpu_results_v(ngpu);
-        {
-            int nw = std::min((int)ngpu, (int)std::thread::hardware_concurrency());
-            if (nw < 1) nw = 1;
-            std::vector<std::thread> wk;
-            wk.reserve(nw);
-            for (int t = 0; t < nw; ++t) {
-                wk.emplace_back([&, t](){
-                    for (uint32_t i = t; i < ngpu; i += nw)
-                        gpu_results_v[i].ok = ftx_decode_candidate(
-                            wf, &gpu_cands[i], kLDPC_iterations,
-                            &gpu_results_v[i].message, &gpu_results_v[i].status);
-                });
-            }
-            for (auto& w : wk) w.join();
-        }
-
-        // Collect unique GPU-decoded messages.
-        std::vector<std::string> gpu_decoded_msgs, cpu_decoded_msgs;
-        for (uint32_t i = 0; i < ngpu; ++i) {
-            if (!gpu_results_v[i].ok) continue;
-            char text[FTX_MAX_MESSAGE_LENGTH];
-            if (ftx_message_decode(&gpu_results_v[i].message, &hash_if, text) == FTX_MESSAGE_RC_OK)
-                gpu_decoded_msgs.push_back(text);
-        }
-        // Collect CPU-decoded messages from the decoded[] table built above.
-        for (int i = 0; i < kMax_decoded_messages; ++i) {
-            if (!decoded_hashtable[i]) continue;
-            char text[FTX_MAX_MESSAGE_LENGTH];
-            if (ftx_message_decode(decoded_hashtable[i], &hash_if, text) == FTX_MESSAGE_RC_OK)
-                cpu_decoded_msgs.push_back(text);
-        }
-        // Deduplicate both lists.
-        auto dedup = [](std::vector<std::string>& v){
-            std::sort(v.begin(), v.end());
-            v.erase(std::unique(v.begin(), v.end()), v.end());
-        };
-        dedup(gpu_decoded_msgs);
-        dedup(cpu_decoded_msgs);
-
-        int matched = 0, gpu_extra = 0, cpu_missed = 0;
-        for (const auto& m : gpu_decoded_msgs) {
-            if (std::find(cpu_decoded_msgs.begin(), cpu_decoded_msgs.end(), m) != cpu_decoded_msgs.end())
-                ++matched;
-            else
-                ++gpu_extra;
-        }
-        for (const auto& m : cpu_decoded_msgs) {
-            if (std::find(gpu_decoded_msgs.begin(), gpu_decoded_msgs.end(), m) == gpu_decoded_msgs.end())
-                ++cpu_missed;
-        }
-        printf("GPU_DECODE_VALIDATE: cpu_decoded=%d gpu_decoded=%d matched=%d gpu_extra=%d cpu_missed=%d\n",
-               (int)cpu_decoded_msgs.size(), (int)gpu_decoded_msgs.size(),
-               matched, gpu_extra, cpu_missed);
-        if (cpu_missed > 0) {
-            printf("GPU_DECODE_VALIDATE: CPU-only messages (GPU missed):\n");
-            for (const auto& m : cpu_decoded_msgs)
-                if (std::find(gpu_decoded_msgs.begin(), gpu_decoded_msgs.end(), m) == gpu_decoded_msgs.end())
-                    printf("  CPU-ONLY: %s\n", m.c_str());
-        }
-        if (gpu_extra > 0) {
-            printf("GPU_DECODE_VALIDATE: GPU bonus messages (not in CPU output):\n");
-            for (const auto& m : gpu_decoded_msgs)
-                if (std::find(cpu_decoded_msgs.begin(), cpu_decoded_msgs.end(), m) == cpu_decoded_msgs.end())
-                    printf("  GPU-EXTRA: %s\n", m.c_str());
-        }
-    } else if (gpu) {
-        printf("GPU_VALIDATE: gpu=0 (no candidates above threshold)\n");
-    }
-#endif
 
     fflush(stdout);
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
@@ -569,11 +475,8 @@ namespace hf {
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
                 printf("Processing %f\n", seconds);
-                const gm::cuda::GpuScanResult* gpu_res = nullptr;
-#ifdef VALIDATE_GPU_CANDS
-                if (ft8cuda)
-                    gpu_res = &ft8cuda->getGpuScanResult(buff);
-#endif
+                const gm::cuda::GpuScanResult* gpu_res =
+                    ft8cuda ? &ft8cuda->getGpuScanResult(buff) : nullptr;
                 decode(&mon, seconds, this, gpu_res);
                 monitor_reset(&mon);
                 now += 1;
