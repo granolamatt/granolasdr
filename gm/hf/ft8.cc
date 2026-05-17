@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <numeric>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
@@ -69,7 +70,7 @@ static float composite_bin_to_rf_hz(int freq_offset) {
 }
 
 // Define VALIDATE_GPU_CANDS to print per-epoch GPU vs CPU candidate comparison.
-// #define VALIDATE_GPU_CANDS
+#define VALIDATE_GPU_CANDS
 
 const int kMin_score = 5; // Minimum sync score threshold for candidates
 const int kMax_candidates = 2000;
@@ -327,9 +328,7 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
 
 #ifdef VALIDATE_GPU_CANDS
     if (gpu && gpu->count > 0) {
-        // For each GPU candidate with score >= kMin_score, check whether the CPU list
-        // contains a candidate within ±2 bins and the same (time_sub, freq_sub, time_offset).
-        // Mismatch = GPU found it but CPU did not (or vice versa).
+        // Candidate-list comparison (scan score check).
         int gpu_only = 0, cpu_only = 0, both = 0;
         for (uint32_t gi = 0; gi < gpu->count; ++gi) {
             bool found = false;
@@ -346,6 +345,95 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         cpu_only = num_candidates - both;
         printf("GPU_VALIDATE: gpu=%u cpu=%d both=%d gpu_only=%d cpu_only=%d\n",
                gpu->count, num_candidates, both, gpu_only, cpu_only);
+
+        // LDPC decode on top GPU candidates — do we get the same messages?
+        // Sort GPU candidates by score descending, take top kMax_candidates.
+        uint32_t ngpu = std::min(gpu->count, (uint32_t)FT8_GPU_CAND_MAX);
+        std::vector<uint32_t> idx(ngpu);
+        std::iota(idx.begin(), idx.end(), 0u);
+        std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b){
+            return gpu->score[a] > gpu->score[b];
+        });
+        if ((int)ngpu > kMax_candidates) ngpu = kMax_candidates;
+
+        // Build ftx_candidate_t list from GPU results.
+        std::vector<ftx_candidate_t> gpu_cands(ngpu);
+        for (uint32_t i = 0; i < ngpu; ++i) {
+            uint32_t gi = idx[i];
+            gpu_cands[i].freq_offset = gpu->fo[gi];
+            gpu_cands[i].time_offset = gpu->to[gi];
+            gpu_cands[i].time_sub    = gpu->ts[gi];
+            gpu_cands[i].freq_sub    = gpu->fs[gi];
+            gpu_cands[i].score       = gpu->score[gi];
+        }
+
+        // Parallel LDPC on GPU candidates.
+        std::vector<CandResult> gpu_results_v(ngpu);
+        {
+            int nw = std::min((int)ngpu, (int)std::thread::hardware_concurrency());
+            if (nw < 1) nw = 1;
+            std::vector<std::thread> wk;
+            wk.reserve(nw);
+            for (int t = 0; t < nw; ++t) {
+                wk.emplace_back([&, t](){
+                    for (uint32_t i = t; i < ngpu; i += nw)
+                        gpu_results_v[i].ok = ftx_decode_candidate(
+                            wf, &gpu_cands[i], kLDPC_iterations,
+                            &gpu_results_v[i].message, &gpu_results_v[i].status);
+                });
+            }
+            for (auto& w : wk) w.join();
+        }
+
+        // Collect unique GPU-decoded messages.
+        std::vector<std::string> gpu_decoded_msgs, cpu_decoded_msgs;
+        for (uint32_t i = 0; i < ngpu; ++i) {
+            if (!gpu_results_v[i].ok) continue;
+            char text[FTX_MAX_MESSAGE_LENGTH];
+            if (ftx_message_decode(&gpu_results_v[i].message, &hash_if, text) == FTX_MESSAGE_RC_OK)
+                gpu_decoded_msgs.push_back(text);
+        }
+        // Collect CPU-decoded messages from the decoded[] table built above.
+        for (int i = 0; i < kMax_decoded_messages; ++i) {
+            if (!decoded_hashtable[i]) continue;
+            char text[FTX_MAX_MESSAGE_LENGTH];
+            if (ftx_message_decode(decoded_hashtable[i], &hash_if, text) == FTX_MESSAGE_RC_OK)
+                cpu_decoded_msgs.push_back(text);
+        }
+        // Deduplicate both lists.
+        auto dedup = [](std::vector<std::string>& v){
+            std::sort(v.begin(), v.end());
+            v.erase(std::unique(v.begin(), v.end()), v.end());
+        };
+        dedup(gpu_decoded_msgs);
+        dedup(cpu_decoded_msgs);
+
+        int matched = 0, gpu_extra = 0, cpu_missed = 0;
+        for (const auto& m : gpu_decoded_msgs) {
+            if (std::find(cpu_decoded_msgs.begin(), cpu_decoded_msgs.end(), m) != cpu_decoded_msgs.end())
+                ++matched;
+            else
+                ++gpu_extra;
+        }
+        for (const auto& m : cpu_decoded_msgs) {
+            if (std::find(gpu_decoded_msgs.begin(), gpu_decoded_msgs.end(), m) == gpu_decoded_msgs.end())
+                ++cpu_missed;
+        }
+        printf("GPU_DECODE_VALIDATE: cpu_decoded=%d gpu_decoded=%d matched=%d gpu_extra=%d cpu_missed=%d\n",
+               (int)cpu_decoded_msgs.size(), (int)gpu_decoded_msgs.size(),
+               matched, gpu_extra, cpu_missed);
+        if (cpu_missed > 0) {
+            printf("GPU_DECODE_VALIDATE: CPU-only messages (GPU missed):\n");
+            for (const auto& m : cpu_decoded_msgs)
+                if (std::find(gpu_decoded_msgs.begin(), gpu_decoded_msgs.end(), m) == gpu_decoded_msgs.end())
+                    printf("  CPU-ONLY: %s\n", m.c_str());
+        }
+        if (gpu_extra > 0) {
+            printf("GPU_DECODE_VALIDATE: GPU bonus messages (not in CPU output):\n");
+            for (const auto& m : gpu_decoded_msgs)
+                if (std::find(cpu_decoded_msgs.begin(), cpu_decoded_msgs.end(), m) == cpu_decoded_msgs.end())
+                    printf("  GPU-EXTRA: %s\n", m.c_str());
+        }
     } else if (gpu) {
         printf("GPU_VALIDATE: gpu=0 (no candidates above threshold)\n");
     }
@@ -468,7 +556,7 @@ namespace hf {
             while(now < next) {
                 uint64_t length = next - now;
                 if (length > 4) {
-                    std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
+                    std::cout << "Error Falling Behind in FT8, Dropping Data" << std::endl;
                     now = next;
                     break;
                 }

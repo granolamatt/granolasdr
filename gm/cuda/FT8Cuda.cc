@@ -29,7 +29,6 @@ demodFT8_d(NULL),
 demodShift_d(NULL),
 magFT8_d(NULL),
 magFT8(NULL),
-magFT8_ring(NULL),
 magFT8_ring_d(NULL),
 gpu_cand_fo_d(NULL),
 gpu_cand_to_d(NULL),
@@ -45,24 +44,19 @@ buffer_number(0) {
         cuda_check_error(cudaSetDevice(0));
         cuda_check_error(cudaStreamCreate(&stream));
         cuda_check_error(cudaStreamCreate(&scan_stream));
-        cuda_check_error(cudaEventCreateWithFlags(&scan_done, cudaEventDisableTiming));
+        cuda_check_error(cudaStreamCreate(&transfer_stream));
+        cuda_check_error(cudaEventCreateWithFlags(&scan_done,   cudaEventDisableTiming));
+        cuda_check_error(cudaEventCreateWithFlags(&ring_ready,  cudaEventDisableTiming));
 
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 698880; // half off for some reason
 
-        magFT8 = (uint8_t*)calloc(sizeof(uint8_t), (size_t)FT8_TIME_OSR*FT8_FREQ_OSR*FT8_CAPTURE_BLOCKS*BUFFERS*rfft_length);
-        if (!magFT8) {
-            fprintf(stderr, "FT8Cuda: calloc failed for magFT8 (%zu bytes) — out of memory\n",
-                    (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * FT8_CAPTURE_BLOCKS * BUFFERS * rfft_length);
-            exit(1);
-        }
-        magFT8_ring = (uint8_t*)calloc(sizeof(uint8_t), (size_t)RING_BLOCKS*FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length);
-        if (!magFT8_ring) {
-            fprintf(stderr, "FT8Cuda: calloc failed for magFT8_ring (%zu bytes) — out of memory\n",
-                    (size_t)RING_BLOCKS * FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length);
-            exit(1);
-        }
-
+        // Pinned (page-locked) so D2H DMA transfers avoid staging copies and
+        // don't hold the CUDA context lock while the background thread waits.
+        const size_t decode_buf_bytes =
+            (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * FT8_CAPTURE_BLOCKS * BUFFERS * rfft_length;
+        cuda_check_error(cudaHostAlloc((void**)&magFT8, decode_buf_bytes, cudaHostAllocDefault));
+        memset(magFT8, 0, decode_buf_bytes);
         rt8BufferPosition.setBuffer(magFT8, {BUFFERS, (size_t)FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length*FT8_CAPTURE_BLOCKS});
 
         // Two so we can use it as a buffer also
@@ -77,9 +71,9 @@ buffer_number(0) {
             exit(1);
         }
 
-        // Device-side mag ring: FT8_CAPTURE_BLOCKS slots so the GPU scan never needs to upload.
+        // Device-side mag ring: RING_BLOCKS slots, wraps independently of FT8_CAPTURE_BLOCKS.
         const size_t dev_ring_bytes =
-            (size_t)FT8_CAPTURE_BLOCKS * FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
+            (size_t)RING_BLOCKS * FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
         cuda_check_error(cudaMalloc((void**)&magFT8_ring_d, dev_ring_bytes));
         cuda_check_error(cudaMemset(magFT8_ring_d, 0, dev_ring_bytes));
         printf("GPU mag ring: %.1f MB\n", (double)dev_ring_bytes / 1e6);
@@ -120,12 +114,13 @@ FT8Cuda::~FT8Cuda() {
     if (gpu_cand_fs_d) cudaFree(gpu_cand_fs_d);
     if (gpu_cand_score_d) cudaFree(gpu_cand_score_d);
     if (gpu_cand_count_d) cudaFree(gpu_cand_count_d);
-    if (magFT8) free(magFT8);
-    if (magFT8_ring) free(magFT8_ring);
+    if (magFT8) cudaFreeHost(magFT8);
     cufftDestroy(rplan);
     cudaEventDestroy(scan_done);
+    cudaEventDestroy(ring_ready);
     cudaStreamDestroy(stream);
     cudaStreamDestroy(scan_stream);
+    cudaStreamDestroy(transfer_stream);
 }
 
 int FT8Cuda::doCopy(uint64_t now) {
@@ -166,17 +161,11 @@ int FT8Cuda::doCopy(uint64_t now) {
                 &demodData_d[rfft_length],
                 buff_pos * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
 
-            // Compute magnitude and append to both host ring and device ring.
+            // Compute magnitude and append to device ring.
             const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
             cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length);
-            // Host ring (existing — feeds CPU decode path).
             cuda_check_error(cudaMemcpyAsync(
-                &magFT8_ring[(ring_write_idx % RING_BLOCKS) * block_bytes],
-                &magFT8_d[0],
-                block_bytes * sizeof(uint8_t), cudaMemcpyDeviceToHost, stream));
-            // Device ring (new — feeds GPU scan path, wraps at FT8_CAPTURE_BLOCKS).
-            cuda_check_error(cudaMemcpyAsync(
-                &magFT8_ring_d[(ring_write_idx % FT8_CAPTURE_BLOCKS) * block_bytes],
+                &magFT8_ring_d[(ring_write_idx % RING_BLOCKS) * block_bytes],
                 &magFT8_d[0],
                 block_bytes * sizeof(uint8_t), cudaMemcpyDeviceToDevice, stream));
             ring_write_idx++;
@@ -191,17 +180,23 @@ int FT8Cuda::doCopy(uint64_t now) {
             if (gotime) {
                 last_trigger_second = trigger_second;
                 printf("Processing buffer %u\n", buffer_number);
-                cudaStreamSynchronize(stream);
 
                 int decode_slot = buffer_number % BUFFERS;
                 uint64_t snap_start = ring_write_idx - FT8_CAPTURE_BLOCKS;
                 int next_buf = buffer_number + 1;
-                int dev_snap_start = (int)(snap_start % FT8_CAPTURE_BLOCKS);
+                int dev_snap_start = (int)(snap_start % RING_BLOCKS);
+
+                // Commit all device ring writes up to this point.
+                cudaEventRecord(ring_ready, stream);
+
+                // scan_stream and transfer_stream both wait for ring writes before proceeding.
+                cudaStreamWaitEvent(scan_stream,    ring_ready, 0);
+                cudaStreamWaitEvent(transfer_stream, ring_ready, 0);
 
                 // Launch GPU sync scan on scan_stream (non-blocking for doCopy hot path).
                 ft8_gpu_scan(
                     magFT8_ring_d,
-                    dev_snap_start, FT8_CAPTURE_BLOCKS,
+                    dev_snap_start, RING_BLOCKS,
                     gpu_cand_fo_d, gpu_cand_to_d, gpu_cand_ts_d, gpu_cand_fs_d,
                     gpu_cand_score_d, gpu_cand_count_d, FT8_GPU_CAND_MAX,
                     (int)rfft_length, FT8_CAPTURE_BLOCKS,
@@ -213,14 +208,28 @@ int FT8Cuda::doCopy(uint64_t now) {
                     last_snapshot_thread.join();
 
                 last_snapshot_thread = std::thread([this, decode_slot, snap_start, next_buf, block_bytes]() {
-                    // CPU: copy host ring snapshot to decode slot for ft8.cc.
+                    // D2H: device ring snapshot → decode slot on transfer_stream.
+                    // transfer_stream already has a ring_ready wait queued; magFT8 is
+                    // pinned so this is pure DMA (no staging, no context-lock stall).
                     uint8_t* dst = magFT8 + (size_t)decode_slot * FT8_CAPTURE_BLOCKS * block_bytes;
-                    for (int b = 0; b < FT8_CAPTURE_BLOCKS; b++) {
-                        size_t src_slot = (snap_start + b) % RING_BLOCKS;
-                        std::memcpy(dst + (size_t)b * block_bytes,
-                                    magFT8_ring + src_slot * block_bytes,
-                                    block_bytes);
+                    size_t first_slot = snap_start % RING_BLOCKS;
+                    if (first_slot + FT8_CAPTURE_BLOCKS <= (size_t)RING_BLOCKS) {
+                        cudaMemcpyAsync(dst,
+                                        magFT8_ring_d + first_slot * block_bytes,
+                                        (size_t)FT8_CAPTURE_BLOCKS * block_bytes,
+                                        cudaMemcpyDeviceToHost, transfer_stream);
+                    } else {
+                        size_t first_n = RING_BLOCKS - first_slot;
+                        cudaMemcpyAsync(dst,
+                                        magFT8_ring_d + first_slot * block_bytes,
+                                        first_n * block_bytes,
+                                        cudaMemcpyDeviceToHost, transfer_stream);
+                        cudaMemcpyAsync(dst + first_n * block_bytes,
+                                        magFT8_ring_d,
+                                        (size_t)(FT8_CAPTURE_BLOCKS - first_n) * block_bytes,
+                                        cudaMemcpyDeviceToHost, transfer_stream);
                     }
+                    cudaStreamSynchronize(transfer_stream);
 
                     // Wait for GPU scan, then download results.
                     cudaEventSynchronize(scan_done);
@@ -242,7 +251,7 @@ int FT8Cuda::doCopy(uint64_t now) {
                         cudaMemcpy(res.score.data(), gpu_cand_score_d, n * sizeof(int16_t), cudaMemcpyDeviceToHost);
                     }
 
-                    // Signal ft8.cc: both CPU snapshot and GPU results are ready.
+                    // Signal ft8.cc: D2H snapshot and GPU results are both ready.
                     rt8BufferPosition.setPosition(next_buf, 1);
                 });
 
@@ -267,7 +276,7 @@ void FT8Cuda::run() {
         while(now < next) {
             uint64_t length = next - now;
             if (length > 4) {
-                std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
+                std::cout << "Error Falling Behind in FT8Cuda Copy, Dropping Data" << std::endl;
                 now = next;
                 break;
             }

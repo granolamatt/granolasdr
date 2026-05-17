@@ -42,8 +42,10 @@ public:
     }
 private:
     cudaStream_t stream;
-    cudaStream_t scan_stream;   // separate stream so hot path is non-blocking
-    cudaEvent_t  scan_done;     // signalled after scan kernel completes
+    cudaStream_t scan_stream;     // GPU sync score kernel
+    cudaStream_t transfer_stream; // D2H mag snapshot (device ring → CPU decode slot)
+    cudaEvent_t  ring_ready;      // fired when device ring D2D writes are committed
+    cudaEvent_t  scan_done;       // fired when GPU scan kernel completes
     cufftHandle rplan;
     double lastepoch;
     const static int BUFFERS = 2;      // number of decode slots for ft8.cc
@@ -69,9 +71,8 @@ private:
     std::complex<float>* demodShift_d;
     uint8_t* magFT8_d;
     uint8_t* magFT8;
-    uint8_t* magFT8_ring;           // host ring (existing, feeds CPU decode)
 
-    // GPU-resident mag ring (FT8_CAPTURE_BLOCKS slots × block_bytes each).
+    // GPU-resident mag ring (RING_BLOCKS slots × block_bytes each).
     uint8_t* magFT8_ring_d;
 
     // GPU candidate output buffers (device).
