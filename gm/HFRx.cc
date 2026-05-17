@@ -25,7 +25,7 @@ int main() {
     gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer());
     ft8channel.start();
 
-    gm::hf::FT8 ft8(ft8channel.getBuffer());
+    gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel);
     ft8.start();
 
     while (true) {

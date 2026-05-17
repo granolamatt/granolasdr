@@ -7,13 +7,14 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <numeric>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
 #include "gm/hf/ft8_capture.h"
 #include "gm/hf/hf_bands.h"
 #include "gm/buffer/BufferPosition.h"
-
+#include "gm/cuda/FT8Cuda.h"
 
 #include "ft8_lib/ft8/decode.h"
 #include "ft8_lib/ft8/encode.h"
@@ -164,51 +165,73 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
-void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher)
+void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
+            const gm::cuda::GpuScanResult* gpu = nullptr)
 {
     const ftx_waterfall_t* wf = &mon->wf;
 
-    // Parallel candidate search: split freq_offset range across threads.
-    // Each thread fills its own heap; results are merged and sorted.
     auto t_find_start = std::chrono::steady_clock::now();
 
-    int nthreads = (int)std::thread::hardware_concurrency();
-    if (nthreads < 1) nthreads = 1;
-    int bins_per_thread = (wf->num_bins + nthreads - 1) / nthreads;
+    std::vector<ftx_candidate_t> cand_storage;
+    ftx_candidate_t* candidate_list = nullptr;
+    int num_candidates = 0;
+    bool used_gpu = false;
 
-    std::vector<std::vector<ftx_candidate_t>> per_thread_heaps(nthreads);
-    std::vector<int> per_thread_sizes(nthreads, 0);
-    {
-        std::vector<std::thread> search_workers;
-        search_workers.reserve(nthreads);
-        for (int t = 0; t < nthreads; ++t) {
-            per_thread_heaps[t].resize(kMax_candidates);
-            search_workers.emplace_back([&, t]() {
-                int freq_start = t * bins_per_thread;
-                int freq_end   = std::min(freq_start + bins_per_thread, wf->num_bins);
-                per_thread_sizes[t] = ftx_find_candidates_range(
-                    wf, kMax_candidates, per_thread_heaps[t].data(), kMin_score,
-                    freq_start, freq_end);
-            });
+    if (gpu && gpu->count > 0) {
+        // GPU scan already found candidates — sort by score and use directly.
+        used_gpu = true;
+        uint32_t ngpu = gpu->count;
+        std::vector<uint32_t> sidx(ngpu);
+        std::iota(sidx.begin(), sidx.end(), 0u);
+        std::sort(sidx.begin(), sidx.end(), [&](uint32_t a, uint32_t b){
+            return gpu->score[a] > gpu->score[b];
+        });
+        cand_storage.resize(ngpu);
+        for (uint32_t i = 0; i < ngpu; ++i) {
+            uint32_t gi = sidx[i];
+            cand_storage[i].freq_offset = gpu->fo[gi];
+            cand_storage[i].time_offset = gpu->to[gi];
+            cand_storage[i].time_sub    = gpu->ts[gi];
+            cand_storage[i].freq_sub    = gpu->fs[gi];
+            cand_storage[i].score       = gpu->score[gi];
         }
-        for (auto& w : search_workers) w.join();
+        candidate_list = cand_storage.data();
+        num_candidates = (int)ngpu;
+    } else {
+        // CPU fallback: parallel scan split across threads.
+        int nthreads = (int)std::thread::hardware_concurrency();
+        if (nthreads < 1) nthreads = 1;
+        int bins_per_thread = (wf->num_bins + nthreads - 1) / nthreads;
+        std::vector<std::vector<ftx_candidate_t>> per_thread_heaps(nthreads);
+        std::vector<int> per_thread_sizes(nthreads, 0);
+        {
+            std::vector<std::thread> search_workers;
+            search_workers.reserve(nthreads);
+            for (int t = 0; t < nthreads; ++t) {
+                per_thread_heaps[t].resize(kMax_candidates);
+                search_workers.emplace_back([&, t]() {
+                    int freq_start = t * bins_per_thread;
+                    int freq_end   = std::min(freq_start + bins_per_thread, wf->num_bins);
+                    per_thread_sizes[t] = ftx_find_candidates_range(
+                        wf, kMax_candidates, per_thread_heaps[t].data(), kMin_score,
+                        freq_start, freq_end);
+                });
+            }
+            for (auto& w : search_workers) w.join();
+        }
+        cand_storage.reserve(nthreads * kMax_candidates);
+        for (int t = 0; t < nthreads; ++t)
+            for (int i = 0; i < per_thread_sizes[t]; ++i)
+                cand_storage.push_back(per_thread_heaps[t][i]);
+        std::sort(cand_storage.begin(), cand_storage.end(),
+                  [](const ftx_candidate_t& a, const ftx_candidate_t& b) {
+                      return a.score > b.score;
+                  });
+        if ((int)cand_storage.size() > kMax_candidates)
+            cand_storage.resize(kMax_candidates);
+        candidate_list = cand_storage.data();
+        num_candidates = (int)cand_storage.size();
     }
-
-    // Merge all per-thread results into one list and sort descending by score.
-    std::vector<ftx_candidate_t> merged;
-    merged.reserve(nthreads * kMax_candidates);
-    for (int t = 0; t < nthreads; ++t)
-        for (int i = 0; i < per_thread_sizes[t]; ++i)
-            merged.push_back(per_thread_heaps[t][i]);
-    std::sort(merged.begin(), merged.end(),
-              [](const ftx_candidate_t& a, const ftx_candidate_t& b) {
-                  return a.score > b.score;
-              });
-    if ((int)merged.size() > kMax_candidates)
-        merged.resize(kMax_candidates);
-
-    ftx_candidate_t* candidate_list = merged.data();
-    int num_candidates = (int)merged.size();
 
     auto t_find_end = std::chrono::steady_clock::now();
 
@@ -315,11 +338,13 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher)
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates |%s | find=%.1fms ldpc=%.1fms\n",
+    printf("EPOCH: %d decoded / %d candidates (%s) |%s | find=%.1fms ldpc=%.1fms\n",
            num_decoded, num_candidates,
+           used_gpu ? "gpu" : "cpu",
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
+
     fflush(stdout);
     LOG(LOG_INFO, "Decoded %d messages, callsign hashtable size %d\n", num_decoded, callsign_hashtable_size);
    
@@ -353,7 +378,11 @@ static void waterfall_init(ftx_waterfall_t* me, int max_blocks, int num_bins, in
     me->freq_osr = freq_osr;
     me->block_stride = (time_osr * freq_osr * num_bins);
     me->mag = (WF_ELEM_T*)malloc(mag_size);
-    printf("Waterfall size %d\n", mag_size);
+    if (!me->mag) {
+        fprintf(stderr, "waterfall_init: malloc failed for mag (%zu bytes) — out of memory\n", mag_size);
+        exit(1);
+    }
+    printf("Waterfall size %zu\n", mag_size);
     LOG(LOG_DEBUG, "Waterfall size = %zu\n", mag_size);
 }
 
@@ -376,8 +405,12 @@ void load_monitor(monitor_t* me)
     me->max_bin = 698880;
     const int num_bins = me->max_bin - me->min_bin;
 
-    waterfall_init(&me->wf, max_blocks, num_bins, FT8_TIME_OSR, 1);
+    waterfall_init(&me->wf, max_blocks, num_bins, FT8_TIME_OSR, FT8_FREQ_OSR);
     me->wf.protocol = FTX_PROTOCOL_FT8;
+    size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * num_bins;
+    printf("FT8: time_osr=%d freq_osr=%d block_bytes=%zu ring=%.1fGB\n",
+           FT8_TIME_OSR, FT8_FREQ_OSR, block_bytes,
+           (double)(200 * block_bytes) / 1e9);
 
     me->symbol_period = symbol_period;
 
@@ -387,8 +420,11 @@ void load_monitor(monitor_t* me)
 namespace gm {
 namespace hf {
 
-    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP, int zmq_port) :
+    FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP,
+             gm::cuda::FT8Cuda* ft8cuda_in,
+             int zmq_port) :
       inPos(inP),
+      ft8cuda(ft8cuda_in),
       zmq_ctx(1),
       zmq_pub(zmq_ctx, ZMQ_PUB) {
         init_band_map();
@@ -426,7 +462,7 @@ namespace hf {
             while(now < next) {
                 uint64_t length = next - now;
                 if (length > 4) {
-                    std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
+                    std::cout << "Error Falling Behind in FT8, Dropping Data" << std::endl;
                     now = next;
                     break;
                 }
@@ -439,7 +475,9 @@ namespace hf {
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
                 printf("Processing %f\n", seconds);
-                decode(&mon, seconds, this);
+                const gm::cuda::GpuScanResult* gpu_res =
+                    ft8cuda ? &ft8cuda->getGpuScanResult(buff) : nullptr;
+                decode(&mon, seconds, this, gpu_res);
                 monitor_reset(&mon);
                 now += 1;
             }

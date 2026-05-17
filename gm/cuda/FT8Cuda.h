@@ -4,14 +4,26 @@
 #include <fstream>
 #include <iostream>
 #include <thread>
+#include <vector>
 #include <cuda.h>
 #include <cufft.h>
 #include "gm/cuda/HostCuda.h"
+#include "gm/cuda/FT8ScanCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
 
 namespace gm {
 namespace cuda {
+
+// Per-epoch GPU candidate scan results, indexed by decode slot (0..BUFFERS-1).
+struct GpuScanResult {
+    uint32_t         count;
+    std::vector<int32_t>  fo;
+    std::vector<uint8_t>  to;
+    std::vector<uint8_t>  ts;
+    std::vector<uint8_t>  fs;
+    std::vector<int16_t>  score;
+};
 
 class FT8Cuda : public Thread {
 public:
@@ -24,13 +36,20 @@ public:
     gm::buffer::BufferPosition<uint8_t>* getBuffer() {
         return &rt8BufferPosition;
     }
+    // Returns the GPU scan result for the given decode slot (0..BUFFERS-1).
+    const GpuScanResult& getGpuScanResult(int slot) const {
+        return gpu_results[slot];
+    }
 private:
-    // bool running;
     cudaStream_t stream;
+    cudaStream_t scan_stream;     // GPU sync score kernel
+    cudaStream_t transfer_stream; // D2H mag snapshot (device ring → CPU decode slot)
+    cudaEvent_t  ring_ready;      // fired when device ring D2D writes are committed
+    cudaEvent_t  scan_done;       // fired when GPU scan kernel completes
     cufftHandle rplan;
     double lastepoch;
-    const static int BUFFERS = 4;      // number of decode slots for ft8.cc
-    const static int RING_BLOCKS = 200; // rolling magnitude ring size in FT8 blocks
+    const static int BUFFERS = 2;      // number of decode slots for ft8.cc
+    const static int RING_BLOCKS = 200; // host rolling ring size in FT8 blocks
 
     std::ofstream fs;
     int buffer_number;
@@ -49,9 +68,24 @@ private:
     int doCopy(uint64_t now);
     std::complex<float>* demodData_d;
     std::complex<float>* demodFT8_d;
+    std::complex<float>* demodShift_d;
     uint8_t* magFT8_d;
     uint8_t* magFT8;
-    uint8_t* magFT8_ring;
+
+    // GPU-resident mag ring (RING_BLOCKS slots × block_bytes each).
+    uint8_t* magFT8_ring_d;
+
+    // GPU candidate output buffers (device).
+    int32_t*  gpu_cand_fo_d;
+    uint8_t*  gpu_cand_to_d;
+    uint8_t*  gpu_cand_ts_d;
+    uint8_t*  gpu_cand_fs_d;
+    int16_t*  gpu_cand_score_d;
+    uint32_t* gpu_cand_count_d;
+
+    // Host-side results per decode slot.
+    GpuScanResult gpu_results[BUFFERS];
+
     std::vector<std::vector<uint32_t>> bins;
     size_t rfft_length;
     uint32_t nTune;
@@ -59,8 +93,6 @@ private:
     double lastsecond;
 
     uint32_t buff_pos;
-
-
 };
 }
 }

@@ -10,7 +10,7 @@ RX888 SDR (140 MS/s real)
        Wideband R2C FFT (1M pts) → selects 10 HF bands → composite IFFT
        Output: 16,384 complex samples/slot at 4.375 MS/s
   └─ FT8Cuda (CUDA)
-       698,880-pt C2C FFT at 9 time offsets
+       698,880-pt C2C FFT at 4 time × 4 freq offsets (16 FFTs/block)
        uint8_t waterfall magnitude → shared buffer
   └─ FT8 (CPU, ft8_lib)
        Candidate search → LDPC decode → callsign extraction
@@ -27,7 +27,7 @@ Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
 
 - [RX888 MkII](https://github.com/RXToolsRX888/RX888) or compatible
 - NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
-- 16 GB system RAM (waterfall ring ~1.2 GB + decode slots ~0.7 GB; physical usage ~10 GB during operation)
+- 16 GB system RAM (waterfall ring ~2.2 GB + decode slots ~2.2 GB; physical usage ~10 GB during operation)
 
 ### System dependencies
 
@@ -174,7 +174,7 @@ Output shows:
 gm/
   cuda/
     HFChannelizer.cc   — CUDA polyphase channelizer; maps wideband bins to 10 HF bands
-    FT8Cuda.cc         — CUDA FT8 waterfall; runs oversampled C2C FFT
+    FT8Cuda.cc         — CUDA FT8 waterfall; 4×4 time/freq oversampled C2C FFT
     HostCuda.cu        — CUDA kernels (magnitude, copy)
   hf/
     ft8.cc             — FT8 decoder thread; frequency mapping; ZMQ publisher
