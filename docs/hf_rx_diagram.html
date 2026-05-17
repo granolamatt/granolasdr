@@ -376,13 +376,15 @@
         <ul class="steps">
           <li>Accumulate input slots into GPU sliding window</li>
           <li>When window &gt; 2 × rfft_length samples:</li>
-          <li style="padding-left:28px">9× oversampled <strong>C2C FFT</strong>: 698,880 pts each,<br>offsets at <em>t</em> × rfft_length/9 (time supersampling)</li>
+          <li style="padding-left:28px"><strong>16 C2C FFTs</strong>: 698,880 pts each — 4 time offsets × 4 freq shifts<br>time offset <em>t</em>: start at <em>t</em> × rfft_length/4<br>freq shift <em>f</em>: <code>freqShift</code> by <em>f</em> × 1.5625 Hz before FFT</li>
           <li style="padding-left:28px"><strong>magKernel</strong>: complex → dB-scaled uint8_t</li>
-          <li style="padding-left:28px">Async copy to rolling ring slot (host RAM)</li>
+          <li style="padding-left:28px">D2D async copy → GPU device ring slot (magFT8_ring_d)</li>
           <li style="padding-left:28px">Slide window back by rfft_length</li>
-          <li>Every 15 s (trigger == second 14 of cycle):</li>
-          <li style="padding-left:28px"><code>cudaStreamSynchronize</code></li>
-          <li style="padding-left:28px">Background thread: copy last 106 ring blocks → decode slot, signal decoder</li>
+          <li>Every 15 s (trigger at second 14.7 of cycle):</li>
+          <li style="padding-left:28px"><code>cudaEventRecord(ring_ready, stream)</code></li>
+          <li style="padding-left:28px"><strong>scan_stream</strong>: waits ring_ready, launches FT8ScanCuda kernel</li>
+          <li style="padding-left:28px"><strong>transfer_stream</strong>: waits ring_ready, D2H ring snapshot → pinned host</li>
+          <li style="padding-left:28px">Background thread: waits for both, signals ft8.cc</li>
         </ul>
       </div>
       <div class="col">
@@ -391,45 +393,99 @@
           <div class="param"><span class="param-name">FFT size</span><span class="param-val hl">698,880 pts C2C</span></div>
           <div class="param"><span class="param-name">Bin resolution</span><span class="param-val">≈ 6.25 Hz/bin</span></div>
           <div class="param"><span class="param-name">Block duration</span><span class="param-val">≈ 159.7 ms (1 FT8 symbol)</span></div>
-          <div class="param"><span class="param-name">Time OSR</span><span class="param-val hl">9× oversampling</span></div>
+          <div class="param"><span class="param-name">Time OSR</span><span class="param-val hl">4 (offsets 0–3)</span></div>
+          <div class="param"><span class="param-name">Freq OSR</span><span class="param-val hl">4 (shifts 0–3)</span></div>
+          <div class="param"><span class="param-name">FFTs per block</span><span class="param-val">4 × 4 = 16</span></div>
           <div class="param"><span class="param-name">Capture window</span><span class="param-val hl">106 blocks = 16.93 s</span></div>
           <div class="param"><span class="param-name">Timing tolerance</span><span class="param-val">±2.2 s</span></div>
-          <div class="param"><span class="param-name">Ring size</span><span class="param-val">200 blocks ≈ 1.2 GB</span></div>
-          <div class="param"><span class="param-name">Decode slots</span><span class="param-val">4 × 106 blocks ≈ 2.5 GB</span></div>
+          <div class="param"><span class="param-name">GPU ring</span><span class="param-val">200 blocks × 11.2 MB = 2.24 GB GPU</span></div>
+          <div class="param"><span class="param-name">Host decode slots</span><span class="param-val">4 × 106 × 11.2 MB ≈ 4.7 GB pinned</span></div>
+          <div class="param"><span class="param-name">CUDA streams</span><span class="param-val">stream · scan_stream · transfer_stream</span></div>
         </div>
-        <p class="note">Rolling ring avoids every-other-epoch: trigger snapshots 16.93 s of history every 15 s. On-time signal lands at block ≈ 14 (time_offset 14 of 29 in ft8_lib search).</p>
+        <p class="note">Rolling GPU ring avoids every-other-epoch: trigger snapshots 16.93 s of history every 15 s. On-time signal lands at block ≈ 14. Three-stream architecture keeps main FFT path non-blocking during scan and D2H.</p>
       </div>
     </div>
   </div>
 
   <div class="arrow-wrap">
     <div class="arrow-line"></div>
-    <div class="arrow-label"><strong>uint8_t waterfall</strong> · 4 decode slots × 106 blocks × 9 sub-times × 698,880 bins · host RAM</div>
+    <div class="arrow-label"><strong>GPU device ring</strong> (magFT8_ring_d) · 200 slots × 16 sub-FFTs × 698,880 bins · 2.24 GB GPU</div>
     <div class="arrow-line2"></div>
   </div>
 
-  <!-- ══ STAGE 4: FT8 CPU decoder ═══════════════════════════════════════ -->
+  <!-- ══ STAGE 4: FT8ScanCuda ════════════════════════════════════════════ -->
+  <div class="stage cuda" style="border-left-color:#ff7b72">
+    <div class="stage-header" style="background:#1a0a0a;border-bottom-color:#30363d">
+      <span class="badge" style="background:#3d0a0a;color:#ff7b72;border-color:#ff7b72">CUDA KERNEL</span>
+      <span class="stage-title">FT8ScanCuda — GPU Costas Sync Scan</span>
+      <span class="stage-subtitle">gm/cuda/FT8ScanCuda.cu · scan_stream</span>
+    </div>
+    <div class="stage-body">
+      <div class="col">
+        <div class="col-label">Processing steps</div>
+        <ul class="steps">
+          <li>Launched at trigger on <strong>scan_stream</strong> (waits for ring_ready event)</li>
+          <li>Each thread handles one (fo, to, ts, fs) combination:</li>
+          <li style="padding-left:28px"><strong>fo</strong>: frequency bin 0–698,879</li>
+          <li style="padding-left:28px"><strong>to</strong>: time offset 0–29 (blocks within capture window)</li>
+          <li style="padding-left:28px"><strong>ts</strong>: time sub-sample 0–3</li>
+          <li style="padding-left:28px"><strong>fs</strong>: freq sub-sample 0–3</li>
+          <li>Cooperative smem load: 21 windows × 264 bytes per block (5,544 bytes)</li>
+          <li>Compute Costas score from shared memory — no global reads in compute phase</li>
+          <li>Costas pattern <code>{3,1,4,0,6,5,2}</code> checked at 3 sync groups:<br>blocks [to+0..6], [to+36..42], [to+72..78]</li>
+          <li>Score = avg(cur − neighbor) across freq and time neighbors</li>
+          <li>score ≥ 5 → <code>atomicAdd</code> to candidate list</li>
+          <li><code>cudaEventRecord(scan_done, scan_stream)</code></li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="col-label">Parameters</div>
+        <div class="params">
+          <div class="param"><span class="param-name">Grid</span><span class="param-val">(2730, 480) blocks</span></div>
+          <div class="param"><span class="param-name">Block size</span><span class="param-val">256 threads</span></div>
+          <div class="param"><span class="param-name">Shared memory</span><span class="param-val">21 × 264 = 5,544 B/block</span></div>
+          <div class="param"><span class="param-name">Total threads</span><span class="param-val">~335 million</span></div>
+          <div class="param"><span class="param-name">Min score</span><span class="param-val">5</span></div>
+          <div class="param"><span class="param-name">Max candidates</span><span class="param-val hl">500,000 (safety cap)</span></div>
+          <div class="param"><span class="param-name">Typical output</span><span class="param-val hl">~22,000 candidates/epoch</span></div>
+          <div class="param"><span class="param-name">Kernel duration</span><span class="param-val">~100–200 ms GPU</span></div>
+        </div>
+        <p class="note">Grid layout: <code>sub = blockIdx.y / 30</code> (slow axis) so adjacent blocks share the same sub-offset — ~86% L2 ring-slot overlap between co-scheduled blocks. Smem tiling eliminates all global reads from the compute phase.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-wrap">
+    <div class="arrow-line"></div>
+    <div class="arrow-label"><strong>GpuScanResult</strong> · ~22K candidates (fo, to, ts, fs, score) · host RAM · + <strong>uint8_t waterfall</strong> snapshot 4.7 GB pinned</div>
+    <div class="arrow-line2"></div>
+  </div>
+
+  <!-- ══ STAGE 5: FT8 CPU decoder ═══════════════════════════════════════ -->
   <div class="stage cpu">
     <div class="stage-header">
       <span class="badge badge-cpu">CPU THREAD</span>
-      <span class="stage-title">FT8 Decoder</span>
+      <span class="stage-title">FT8 Decoder — GPU-primary path</span>
       <span class="stage-subtitle">gm/hf/ft8.cc · ft8_lib/</span>
     </div>
     <div class="stage-body">
       <div class="col">
         <div class="col-label">Processing steps</div>
         <ul class="steps">
-          <li><code>memcpy</code> decode slot → <code>monitor_t</code> waterfall</li>
-          <li><strong>Parallel candidate search</strong> — N CPU threads, each searches a frequency slice:</li>
-          <li style="padding-left:28px">Costas sync score across time_offset 0–29 and all freq bins</li>
-          <li style="padding-left:28px"><code>ftx_find_candidates_range()</code> (custom range variant)</li>
-          <li>Merge per-thread heaps, sort by score, cap at 2,000</li>
-          <li><strong>Parallel LDPC decode</strong> — N threads, round-robin over candidates:</li>
+          <li>Receive GpuScanResult + pinned waterfall snapshot from FT8Cuda bg thread</li>
+          <li><strong>GPU path</strong> (primary — when gpu-&gt;count &gt; 0):</li>
+          <li style="padding-left:28px">Sort all ~22K GPU candidates by score descending</li>
+          <li style="padding-left:28px">Build <code>ftx_candidate_t</code> list directly from GPU results</li>
+          <li style="padding-left:28px">No CPU scan — <code>find=~0 ms</code></li>
+          <li><strong>CPU fallback</strong> (when no GPU results):</li>
+          <li style="padding-left:28px">Multi-threaded <code>ftx_find_candidates_range()</code> across all freq bins</li>
+          <li style="padding-left:28px">Cap at 2,000 candidates</li>
+          <li><strong>Parallel LDPC decode</strong> — N CPU threads, round-robin over all candidates:</li>
           <li style="padding-left:28px">25 iterations, soft-decision</li>
-          <li style="padding-left:28px"><code>ftx_decode_candidate()</code></li>
+          <li style="padding-left:28px"><code>ftx_decode_candidate()</code> — reads waterfall for LLRs</li>
           <li>Sequential dedup by 22-bit message hash</li>
           <li>Unpack callsign/grid/report via <code>ftx_message_decode()</code></li>
-          <li>Print <code>DECODED:</code> line, compute RF frequency</li>
+          <li>Print <code>DECODED:</code> line + <code>EPOCH:</code> summary, compute RF frequency</li>
           <li>Publish JSON to ZMQ PUB socket</li>
           <li>Age callsign hashtable, reset waterfall</li>
         </ul>
@@ -437,18 +493,19 @@
       <div class="col">
         <div class="col-label">Parameters</div>
         <div class="params">
-          <div class="param"><span class="param-name">Min sync score</span><span class="param-val">5</span></div>
-          <div class="param"><span class="param-name">Max candidates</span><span class="param-val hl">2,000</span></div>
+          <div class="param"><span class="param-name">Candidates (GPU)</span><span class="param-val hl">~22,000 (all GPU output)</span></div>
+          <div class="param"><span class="param-name">Candidates (CPU fallback)</span><span class="param-val">2,000 cap</span></div>
           <div class="param"><span class="param-name">LDPC iterations</span><span class="param-val">25</span></div>
           <div class="param"><span class="param-name">Max decoded</span><span class="param-val">200 / epoch</span></div>
-          <div class="param"><span class="param-name">Time search</span><span class="param-val">0–29 blocks (4.8 s)</span></div>
-          <div class="param"><span class="param-name">ZMQ endpoint</span><span class="param-val hl">tcp://*:5580</span></div>
+          <div class="param"><span class="param-name">find= time (GPU path)</span><span class="param-val hl">~0 ms</span></div>
+          <div class="param"><span class="param-name">find= time (CPU fallback)</span><span class="param-val">~1,600 ms</span></div>
+          <div class="param"><span class="param-name">ldpc= time (GPU path)</span><span class="param-val hl">~200 ms (22K cands)</span></div>
+          <div class="param"><span class="param-name">ZMQ endpoint</span><span class="param-val">tcp://*:5580</span></div>
         </div>
         <p class="note">RF frequency reconstructed via <code>kBandMap[]</code> (built from <code>kHFBands[]</code>): composite IFFT bin → wideband bin → RF Hz. SNR ≈ candidate score − 26 dB (normalised to 2500 Hz BW).</p>
-        <div class="col-label" style="margin-top:12px">Output format</div>
-        <pre style="font-size:11px;color:#79c0ff;background:#0d1117;padding:8px;border-radius:6px;margin-top:6px;overflow-x:auto">{"call":"K1ABC","freq":14074150,
- "snr":-8.0,"unix":1716000015,
- "offset":0.45}</pre>
+        <div class="col-label" style="margin-top:12px">EPOCH output</div>
+        <pre style="font-size:11px;color:#79c0ff;background:#0d1117;padding:8px;border-radius:6px;margin-top:6px;overflow-x:auto">EPOCH: 42 decoded / 22184 candidates (gpu)
+ | 20m:18 40m:12 ... | find=0.8ms ldpc=198ms</pre>
       </div>
     </div>
   </div>
@@ -632,33 +689,36 @@
     <div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Buffers</div>
       <div style="font-size:12px;line-height:2;">
-        <div><code>int16_t</code> ring: <span style="color:#e6edf3">~200 MB</span></div>
+        <div><code>int16_t</code> ring: <span style="color:#e6edf3">~200 MB host</span></div>
         <div><code>complex&lt;float&gt;</code> ring: <span style="color:#e6edf3">~100 MB GPU</span></div>
-        <div>Magnitude ring: <span style="color:#79c0ff">~1.2 GB host</span></div>
-        <div>Decode slots: <span style="color:#79c0ff">~2.5 GB host</span></div>
-        <div>Waterfall (ft8.cc): <span style="color:#79c0ff">~0.6 GB</span></div>
+        <div>GPU mag ring (magFT8_ring_d): <span style="color:#ff7b72">2.24 GB GPU</span></div>
+        <div>Host decode slots (pinned): <span style="color:#79c0ff">~4.7 GB host</span></div>
+        <div>Waterfall (ft8.cc): <span style="color:#79c0ff">~0.6 GB host</span></div>
+        <div>GPU scan candidates: <span style="color:#e6edf3">&lt;10 MB GPU</span></div>
       </div>
     </div>
 
     <div>
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Threads</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Threads / Streams</div>
       <div style="font-size:12px;line-height:2;">
-        <div><span style="color:#e3b341">●</span> rx888 capture</div>
-        <div><span style="color:#3fb950">●</span> HFChannelizer (CUDA)</div>
-        <div><span style="color:#3fb950">●</span> FT8Cuda (CUDA)</div>
-        <div><span style="color:#3fb950">●</span> snapshot bg thread</div>
+        <div><span style="color:#e3b341">●</span> rx888 capture (HW)</div>
+        <div><span style="color:#3fb950">●</span> HFChannelizer — stream (hi priority)</div>
+        <div><span style="color:#3fb950">●</span> FT8Cuda — main stream</div>
+        <div><span style="color:#ff7b72">●</span> FT8ScanCuda — scan_stream</div>
+        <div><span style="color:#58a6ff">●</span> D2H snapshot — transfer_stream</div>
         <div><span style="color:#58a6ff">●</span> FT8 decoder (CPU)</div>
       </div>
     </div>
 
     <div>
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Epoch Timing</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Epoch Timing (GPU path)</div>
       <div style="font-size:12px;line-height:2;">
         <div>FT8 cycle: <span style="color:#e6edf3">15 s</span></div>
         <div>Signal duration: <span style="color:#e6edf3">12.64 s</span></div>
         <div>Blocks per cycle: <span style="color:#e6edf3">93.9</span></div>
-        <div>Trigger: <span style="color:#79c0ff">second 14 of cycle</span></div>
-        <div>Decode every: <span style="color:#3fb950">15 s (every epoch)</span></div>
+        <div>Trigger: <span style="color:#79c0ff">second 14.7 of cycle</span></div>
+        <div>find= time: <span style="color:#3fb950">~0 ms (GPU candidates)</span></div>
+        <div>ldpc= time: <span style="color:#3fb950">~200 ms (22K cands)</span></div>
       </div>
     </div>
 
