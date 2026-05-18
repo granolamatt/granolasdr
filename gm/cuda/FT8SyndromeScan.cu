@@ -70,11 +70,11 @@ static __constant__ uint8_t kFTX_LDPC_Mn_d[174][3] = {
 
 // One thread per (time_sub, freq_sub, time_offset, freq_offset).
 //
-// Grid layout mirrors ft8SyncScanKernel:
-//   blockIdx.x * blockDim.x + threadIdx.x = freq_offset (fo)
-//   blockIdx.y = sub * 30 + time_off
+// Grid layout:
+//   blockIdx.x * blockDim.x + threadIdx.x = freq_offset within [bin_start, bin_start+scan_bins)
+//   blockIdx.y = sub * time_off_range + time_off
 //                sub      = time_sub * freq_osr + freq_sub  (slow axis)
-//                time_off = 0..29                            (fast axis)
+//                time_off = 0..time_off_range-1              (fast axis)
 //
 // Shared memory layout: (NUM_DATA_SLOTS + NUM_SYNC_SLOTS) × WINDOW bytes.
 //   slot_idx  0..28 → data group 1: time_off+7  .. time_off+35
@@ -94,23 +94,25 @@ __global__ void ft8SyndromeScanKernel(
     uint8_t*  __restrict__ cand_fs,
     uint32_t* __restrict__ cand_count,
     uint32_t max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr,
-    int max_syn_errors, int min_sync_matches)
+    int total_bins, int scan_bins, int bin_start,
+    int num_blocks, int time_osr, int freq_osr,
+    int max_syn_errors, int min_sync_matches,
+    int time_off_range)
 {
     const int BLOCK_SZ    = blockDim.x;
     const int WINDOW      = BLOCK_SZ + 8;
     const int TOTAL_SLOTS = NUM_DATA_SLOTS + NUM_SYNC_SLOTS;  // 79
-    const int fo_base     = blockIdx.x * BLOCK_SZ;
+    const int fo_base     = bin_start + blockIdx.x * BLOCK_SZ;  // absolute bin
     const int fo          = fo_base + (int)threadIdx.x;
 
     int combo    = blockIdx.y;
-    int sub      = combo / 30;
-    int time_off = combo % 30;
+    int sub      = combo / time_off_range;
+    int time_off = combo % time_off_range;
     int time_sub = sub / freq_osr;
     int freq_sub = sub % freq_osr;
 
-    const int block_stride = time_osr * freq_osr * num_bins;
-    const int sub_offset   = sub * num_bins;
+    const int block_stride = time_osr * freq_osr * total_bins;
+    const int sub_offset   = sub * total_bins;
 
     extern __shared__ uint8_t smem[];  // TOTAL_SLOTS * WINDOW bytes
 
@@ -131,15 +133,15 @@ __global__ void ft8SyndromeScanKernel(
         if (block_abs < num_blocks) {
             int ring_slot = (snap_start + block_abs) % ring_size;
             int global_fo = fo_base + fo_off;
-            if (global_fo < num_bins)
+            if (global_fo < total_bins)
                 val = mag[(size_t)ring_slot * block_stride + sub_offset + global_fo];
         }
         smem[i] = val;
     }
     __syncthreads();
 
-    // Threads beyond the valid bin range helped load smem; exit now.
-    if (fo > num_bins - 8) return;
+    // Threads beyond the scan window helped load smem; exit now.
+    if (fo >= bin_start + scan_bins - 7) return;
 
     // --- Syndrome check (data tones) ---
     // Accumulate LDPC parity into 3 packed uint32_t registers (83 check bits total).
@@ -209,20 +211,26 @@ void ft8_syndrome_scan(
     uint8_t*  cand_fs_d,
     uint32_t* cand_count_d,
     uint32_t  max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr,
+    int total_bins, int scan_bins, int bin_start,
+    int num_blocks, int time_osr, int freq_osr,
     int max_syn_errors, int min_sync_matches,
     cudaStream_t stream)
 {
-    cudaMemsetAsync(cand_count_d, 0, sizeof(uint32_t), stream);
+    // FT8 message spans 79 symbols (NUM_DATA_SLOTS + NUM_SYNC_SLOTS).
+    // Search all starting positions where the full message fits in the window.
+    const int FT8_SYMBOLS = NUM_DATA_SLOTS + NUM_SYNC_SLOTS;  // 79
+    const int time_off_range = (num_blocks > FT8_SYMBOLS) ? (num_blocks - FT8_SYMBOLS + 1) : 1;
 
     const int BLOCK_SZ   = 256;
-    const int smem_bytes = (NUM_DATA_SLOTS + NUM_SYNC_SLOTS) * (BLOCK_SZ + 8);  // 79 * 264 = 20856 bytes
-    int grid_x = (num_bins + BLOCK_SZ - 1) / BLOCK_SZ;
-    int grid_y = 30 * time_osr * freq_osr;
+    const int smem_bytes = FT8_SYMBOLS * (BLOCK_SZ + 8);  // 79 * 264 = 20856 bytes
+    int grid_x = (scan_bins + BLOCK_SZ - 1) / BLOCK_SZ;
+    int grid_y = time_off_range * time_osr * freq_osr;
     dim3 grid(grid_x, grid_y);
 
     ft8SyndromeScanKernel<<<grid, BLOCK_SZ, smem_bytes, stream>>>(
         mag_d, snap_start, ring_size,
         cand_fo_d, cand_to_d, cand_ts_d, cand_fs_d, cand_count_d, max_cands,
-        num_bins, num_blocks, time_osr, freq_osr, max_syn_errors, min_sync_matches);
+        total_bins, scan_bins, bin_start,
+        num_blocks, time_osr, freq_osr, max_syn_errors, min_sync_matches,
+        time_off_range);
 }

@@ -8,8 +8,8 @@
 #include <algorithm>
 
 #include "gm/cuda/FT8Cuda.h"
+#include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
-#include "gm/cuda/FT8SyndromeScan.h"
 #include "gm/cuda/HostCuda.h"
 #include "ft8_lib/ft8/constants.h"
 #include "gm/buffer/BufferPosition.h"
@@ -32,13 +32,14 @@ demodShift_d(NULL),
 magFT8_d(NULL),
 magFT8(NULL),
 magFT8_ring_d(NULL),
-syn_cand_fo_d(NULL),
-syn_cand_to_d(NULL),
-syn_cand_ts_d(NULL),
-syn_cand_fs_d(NULL),
-syn_cand_count_d(NULL),
-syn_log174_d(NULL),
-syn_log174(NULL),
+log174_d(NULL),
+log174(NULL),
+gpu_cand_fo_d(NULL),
+gpu_cand_to_d(NULL),
+gpu_cand_ts_d(NULL),
+gpu_cand_fs_d(NULL),
+gpu_cand_score_d(NULL),
+gpu_cand_count_d(NULL),
 buffer_number(0) {
     inShape = inPos->getShape();
     inData_d = (std::complex<float>*)inPos->getBuffer();
@@ -79,17 +80,20 @@ buffer_number(0) {
         cuda_check_error(cudaMemset(magFT8_ring_d, 0, dev_ring_bytes));
         printf("GPU mag ring: %.1f MB\n", (double)dev_ring_bytes / 1e6);
 
-        // Candidate output buffers + LLR buffers for syndrome scan.
-        const size_t syn_log174_bytes = (size_t)FT8_GPU_SYNDROME_MAX * FTX_LDPC_N * sizeof(float);
-        cuda_check_error(cudaMalloc((void**)&syn_log174_d, syn_log174_bytes));
-        cuda_check_error(cudaHostAlloc((void**)&syn_log174, syn_log174_bytes, cudaHostAllocDefault));
-        printf("syn_log174 alloc: %.1f MB device + %.1f MB pinned\n",
-               (double)syn_log174_bytes / 1.0e6, (double)syn_log174_bytes / 1.0e6);
-        cuda_check_error(cudaMalloc((void**)&syn_cand_fo_d,    FT8_GPU_SYNDROME_MAX * sizeof(int32_t)));
-        cuda_check_error(cudaMalloc((void**)&syn_cand_to_d,    FT8_GPU_SYNDROME_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&syn_cand_ts_d,    FT8_GPU_SYNDROME_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&syn_cand_fs_d,    FT8_GPU_SYNDROME_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&syn_cand_count_d, sizeof(uint32_t)));
+        // Soft symbol LLR output: FT8_GPU_CAND_MAX × 174 floats each on device and pinned host.
+        const size_t log174_bytes = (size_t)FT8_GPU_CAND_MAX * FTX_LDPC_N * sizeof(float);
+        cuda_check_error(cudaMalloc((void**)&log174_d, log174_bytes));
+        cuda_check_error(cudaHostAlloc((void**)&log174, log174_bytes, cudaHostAllocDefault));
+        printf("log174 alloc: %.0f MB device + %.0f MB pinned\n",
+               (double)log174_bytes / 1.0e6, (double)log174_bytes / 1.0e6);
+
+        // Candidate output buffers for GPU scan.
+        cuda_check_error(cudaMalloc((void**)&gpu_cand_fo_d,    FT8_GPU_CAND_MAX * sizeof(int32_t)));
+        cuda_check_error(cudaMalloc((void**)&gpu_cand_to_d,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
+        cuda_check_error(cudaMalloc((void**)&gpu_cand_ts_d,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
+        cuda_check_error(cudaMalloc((void**)&gpu_cand_fs_d,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
+        cuda_check_error(cudaMalloc((void**)&gpu_cand_score_d, FT8_GPU_CAND_MAX * sizeof(int16_t)));
+        cuda_check_error(cudaMalloc((void**)&gpu_cand_count_d, sizeof(uint32_t)));
 
         // Now for the sub channels
         cufftResult fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
@@ -113,13 +117,14 @@ FT8Cuda::~FT8Cuda() {
     if (demodShift_d) cudaFree(demodShift_d);
     if (magFT8_d) cudaFree(magFT8_d);
     if (magFT8_ring_d) cudaFree(magFT8_ring_d);
-    if (syn_cand_fo_d) cudaFree(syn_cand_fo_d);
-    if (syn_cand_to_d) cudaFree(syn_cand_to_d);
-    if (syn_cand_ts_d) cudaFree(syn_cand_ts_d);
-    if (syn_cand_fs_d) cudaFree(syn_cand_fs_d);
-    if (syn_cand_count_d) cudaFree(syn_cand_count_d);
-    if (syn_log174_d) cudaFree(syn_log174_d);
-    if (syn_log174) cudaFreeHost(syn_log174);
+    if (log174_d) cudaFree(log174_d);
+    if (log174) cudaFreeHost(log174);
+    if (gpu_cand_fo_d) cudaFree(gpu_cand_fo_d);
+    if (gpu_cand_to_d) cudaFree(gpu_cand_to_d);
+    if (gpu_cand_ts_d) cudaFree(gpu_cand_ts_d);
+    if (gpu_cand_fs_d) cudaFree(gpu_cand_fs_d);
+    if (gpu_cand_score_d) cudaFree(gpu_cand_score_d);
+    if (gpu_cand_count_d) cudaFree(gpu_cand_count_d);
     if (magFT8) cudaFreeHost(magFT8);
     cufftDestroy(rplan);
     cudaEventDestroy(scan_done);
@@ -199,58 +204,57 @@ int FT8Cuda::doCopy(uint64_t now) {
                 cudaStreamWaitEvent(scan_stream,    ring_ready, 0);
                 cudaStreamWaitEvent(transfer_stream, ring_ready, 0);
 
-                // Syndrome scan + soft symbols.
-                ft8_syndrome_scan(
+                // Launch GPU sync scan on scan_stream (non-blocking for doCopy hot path).
+                ft8_gpu_scan(
                     magFT8_ring_d,
                     dev_snap_start, RING_BLOCKS,
-                    syn_cand_fo_d, syn_cand_to_d, syn_cand_ts_d, syn_cand_fs_d,
-                    syn_cand_count_d, FT8_GPU_SYNDROME_MAX,
+                    gpu_cand_fo_d, gpu_cand_to_d, gpu_cand_ts_d, gpu_cand_fs_d,
+                    gpu_cand_score_d, gpu_cand_count_d, FT8_GPU_CAND_MAX,
                     (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                    FT8_TIME_OSR, FT8_FREQ_OSR,
-                    FT8_SYN_MAX_ERRORS, FT8_SYN_MIN_SYNC,
+                    FT8_TIME_OSR, FT8_FREQ_OSR, /*min_score=*/5,
                     scan_stream);
 
+                // Soft symbols kernel runs after Costas scan on the same stream.
+                // scan_done fires after both kernels complete.
                 ft8_soft_symbols(
                     magFT8_ring_d,
                     dev_snap_start, RING_BLOCKS,
-                    syn_cand_fo_d, syn_cand_to_d, syn_cand_ts_d, syn_cand_fs_d,
-                    syn_cand_count_d, syn_log174_d,
+                    gpu_cand_fo_d, gpu_cand_to_d, gpu_cand_ts_d, gpu_cand_fs_d,
+                    gpu_cand_count_d, log174_d,
                     (int)rfft_length, FT8_CAPTURE_BLOCKS,
                     FT8_TIME_OSR, FT8_FREQ_OSR,
-                    FT8_GPU_SYNDROME_MAX,
                     scan_stream);
-
-                // scan_done fires after both kernels complete.
                 cudaEventRecord(scan_done, scan_stream);
 
                 if (last_snapshot_thread.joinable())
                     last_snapshot_thread.join();
 
                 last_snapshot_thread = std::thread([this, decode_slot, next_buf]() {
+                    // Wait for Costas scan + soft symbols kernel.
                     cudaEventSynchronize(scan_done);
 
-                    uint32_t ns = 0;
-                    cudaMemcpy(&ns, syn_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-                    ns = std::min(ns, (uint32_t)FT8_GPU_SYNDROME_MAX);
+                    uint32_t n = 0;
+                    cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+                    n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
 
-                    GpuScanResult& syn_res = syn_results[decode_slot];
-                    syn_res.count = ns;
-                    printf("[SYN] epoch cands: %u\n", ns);
-                    if (ns > 0) {
-                        syn_res.fo.resize(ns);
-                        syn_res.to.resize(ns);
-                        syn_res.ts.resize(ns);
-                        syn_res.fs.resize(ns);
-                        syn_res.score.assign(ns, 0);
-                        syn_res.log174.resize((size_t)ns * FTX_LDPC_N);
-                        cudaMemcpy(syn_res.fo.data(), syn_cand_fo_d, ns * sizeof(int32_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(syn_res.to.data(), syn_cand_to_d, ns * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(syn_res.ts.data(), syn_cand_ts_d, ns * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(syn_res.fs.data(), syn_cand_fs_d, ns * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(syn_log174, syn_log174_d, (size_t)ns * FTX_LDPC_N * sizeof(float), cudaMemcpyDeviceToHost);
-                        memcpy(syn_res.log174.data(), syn_log174, (size_t)ns * FTX_LDPC_N * sizeof(float));
+                    GpuScanResult& res = gpu_results[decode_slot];
+                    res.count = n;
+                    if (n > 0) {
+                        res.fo.resize(n);
+                        res.to.resize(n);
+                        res.ts.resize(n);
+                        res.fs.resize(n);
+                        res.score.resize(n);
+                        res.log174.resize((size_t)n * FTX_LDPC_N);
+                        cudaMemcpy(res.fo.data(),    gpu_cand_fo_d,    n * sizeof(int32_t), cudaMemcpyDeviceToHost);
+                        cudaMemcpy(res.to.data(),    gpu_cand_to_d,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+                        cudaMemcpy(res.ts.data(),    gpu_cand_ts_d,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+                        cudaMemcpy(res.fs.data(),    gpu_cand_fs_d,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+                        cudaMemcpy(res.score.data(), gpu_cand_score_d, n * sizeof(int16_t), cudaMemcpyDeviceToHost);
+                        cudaMemcpy(log174, log174_d, (size_t)n * FTX_LDPC_N * sizeof(float), cudaMemcpyDeviceToHost);
+                        memcpy(res.log174.data(), log174, (size_t)n * FTX_LDPC_N * sizeof(float));
                     } else {
-                        syn_res.log174.clear();
+                        res.log174.clear();
                     }
 
                     // Signal ft8.cc: GPU scan + soft LLRs are ready.
