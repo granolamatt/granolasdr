@@ -166,7 +166,7 @@ ftx_callsign_hash_interface_t hash_if = {
 };
 
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
-            const gm::cuda::GpuScanResult* gpu = nullptr)
+            const gm::cuda::GpuScanResult* gpu = nullptr, const char* tag = "COS")
 {
     const ftx_waterfall_t* wf = &mon->wf;
 
@@ -312,8 +312,8 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms ldpc=%.1fms\n",
-           num_decoded, num_candidates,
+    printf("[%s] EPOCH: %d decoded / %d candidates |%s | find=%.1fms ldpc=%.1fms\n",
+           tag, num_decoded, num_candidates,
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
@@ -424,9 +424,9 @@ namespace hf {
                 auto duration = nowsec.time_since_epoch();
                 double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
                 printf("Processing %f\n", seconds);
-                const gm::cuda::GpuScanResult* gpu_res =
-                    ft8cuda ? &ft8cuda->getGpuScanResult(buff) : nullptr;
-                decode(&mon, seconds, this, gpu_res);
+                const gm::cuda::GpuScanResult* syn_res =
+                    ft8cuda ? &ft8cuda->getSynScanResult(buff) : nullptr;
+                decode(&mon, seconds, this, syn_res, "SYN");
                 monitor_reset(&mon);
                 now += 1;
             }

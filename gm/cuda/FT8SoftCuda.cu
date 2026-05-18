@@ -28,13 +28,14 @@ __global__ void ft8_soft_symbols_kernel(
     const uint8_t* __restrict__ cand_fs,
     const uint32_t* __restrict__ cand_count_d,
     float* __restrict__ log174_d,
-    int num_bins, int num_blocks, int time_osr, int freq_osr)
+    int num_bins, int num_blocks, int time_osr, int freq_osr,
+    uint32_t max_cands)
 {
     int flat     = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     int cand_idx = flat / FT8_ND_SOFT;
     int k        = flat % FT8_ND_SOFT;
 
-    int n = (int)min(*cand_count_d, (uint32_t)FT8_GPU_CAND_MAX);
+    int n = (int)min(*cand_count_d, max_cands);
     if (cand_idx >= n) return;
 
     int time_off = (int)cand_to[cand_idx];
@@ -84,14 +85,15 @@ void ft8_soft_symbols(
     const uint32_t* cand_count_d,
     float* log174_d,
     int num_bins, int num_blocks, int time_osr, int freq_osr,
+    uint32_t max_cands,
     cudaStream_t stream)
 {
     const int BLOCK_SZ = 256;
-    const int total    = (int)FT8_GPU_CAND_MAX * FT8_ND_SOFT;
+    const int total    = (int)max_cands * FT8_ND_SOFT;
     int grid           = (total + BLOCK_SZ - 1) / BLOCK_SZ;
 
     ft8_soft_symbols_kernel<<<grid, BLOCK_SZ, 0, stream>>>(
         mag_d, snap_start, ring_size,
         cand_fo_d, cand_to_d, cand_ts_d, cand_fs_d, cand_count_d,
-        log174_d, num_bins, num_blocks, time_osr, freq_osr);
+        log174_d, num_bins, num_blocks, time_osr, freq_osr, max_cands);
 }
