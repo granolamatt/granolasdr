@@ -13,9 +13,11 @@ RX888 SDR (140 MS/s real)
        Output: 16,384 complex samples/slot at 4.375 MS/s
   └─ FT8Cuda (CUDA)
        698,880-pt C2C FFT at 4 time × 4 freq offsets (16 FFTs/block)
-       uint8_t waterfall magnitude → shared buffer
+       uint8_t magnitude → 200-block GPU ring buffer (2.2 GB VRAM)
+       Costas sync scan → candidate list (fo, to, ts, fs)
+       Soft symbol kernel → float32 LLRs for each candidate (~70 MB D2H)
   └─ FT8 (CPU, ft8_lib)
-       Candidate search → LDPC decode → callsign extraction
+       LDPC BP decode → callsign extraction (no CPU candidate search)
        Publishes JSON on tcp://*:5580 (ZMQ PUB)
   └─ psk_uploader.py (Python)
        Buffers decoded reports → uploads to PSKReporter every 5 min
@@ -29,7 +31,8 @@ Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
 
 - [RX888 MkII](https://github.com/RXToolsRX888/RX888) or compatible
 - NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
-- 16 GB system RAM (waterfall ring ~2.2 GB + decode slots ~2.2 GB; physical usage ~10 GB during operation)
+- NVIDIA GPU with ≥ 8 GB VRAM (GPU ring buffer ~2.2 GB + LLR buffers ~140 MB)
+- 16 GB system RAM recommended (~70 MB pinned for LLR staging; rest for OS/driver overhead)
 
 ### System dependencies
 
@@ -175,15 +178,17 @@ Output shows:
 ```
 gm/
   cuda/
-    HFChannelizer.cc   — CUDA polyphase channelizer; maps wideband bins to 10 HF bands
-    FT8Cuda.cc         — CUDA FT8 waterfall; 4×4 time/freq oversampled C2C FFT
-    HostCuda.cu        — CUDA kernels (magnitude, copy)
+    HFChannelizer.cc      — CUDA polyphase channelizer; maps wideband bins to 10 HF bands
+    FT8Cuda.cc            — 4×4 oversampled FFT, GPU mag ring, scan dispatch, D2H
+    FT8ScanCuda.cu        — GPU Costas sync scan; outputs candidate list
+    FT8SoftCuda.cu        — GPU soft symbol kernel; outputs float32 LLRs per candidate
+    HostCuda.cu           — CUDA kernels (magnitude, frequency shift)
   hf/
-    ft8.cc             — FT8 decoder thread; frequency mapping; ZMQ publisher
-    ft8_capture.h      — FT8_TIME_OSR and capture constants
-  rx888/               — RX888 USB driver interface
-  zmqcode/             — ZMQ server/pub utilities
-ft8_lib/               — FT8 codec (prebuilt libft8.a)
+    ft8.cc                — FT8 decoder thread; LDPC decode; frequency mapping; ZMQ publisher
+    ft8_capture.h         — FT8_TIME_OSR, FT8_FREQ_OSR, capture window constants
+  rx888/                  — RX888 USB driver interface
+  zmqcode/                — ZMQ server/pub utilities
+ft8_lib/                  — FT8 codec (prebuilt libft8.a)
 psk_uploader.py        — PSKReporter IPFIX uploader
 compare_psk.py         — Decoder vs PSKReporter comparison tool
 check_uploads.py       — Verify PSKReporter accepted your uploads
