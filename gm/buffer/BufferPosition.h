@@ -105,7 +105,7 @@ public:
         }
         if (waitCount == 0) {
             if (lastWait >= 100) {
-                printf("Falling behind\n");
+                fprintf(stderr, "Falling behind\n");
             }
             lastWait++;
         } else {

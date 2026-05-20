@@ -261,7 +261,7 @@ void HFChannelizer::run() {
         while(now < next) {
             uint64_t length = next - now;
             if (length > 4) {
-                std::cout << "Error Falling Behind in Channelizer, Dropping Data" << std::endl;
+                std::cerr << "Error Falling Behind in Channelizer, Dropping Data" << std::endl;
                 now = next;
                 break;
             }

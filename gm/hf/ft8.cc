@@ -415,7 +415,7 @@ namespace hf {
             while(now < next) {
                 uint64_t length = next - now;
                 if (length > 4) {
-                    std::cout << "Error Falling Behind in FT8, Dropping Data" << std::endl;
+                    std::cerr << "Error Falling Behind in FT8, Dropping Data" << std::endl;
                     now = next;
                     break;
                 }

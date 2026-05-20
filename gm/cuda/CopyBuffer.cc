@@ -63,7 +63,7 @@ void CopyBuffer<T>::run() {
         while(now < next) {
             long length = next - now;
             if (length > outSize || length > inSize) {
-                std::cout << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
+                std::cerr << "Error Falling Behind in Cuda Copy, Dropping Data" << std::endl;
                 now = next;
                 outPos.setPosition(now);
                 break;
