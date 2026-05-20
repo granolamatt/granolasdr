@@ -41,15 +41,23 @@ public:
             for (int cnt = 1; cnt < axis; cnt++) {
                 nPosition *= shape[shape.size()-1-cnt];
             }
-            if (nPosition != buffPosition) {
-                buffPosition = nPosition;
-                running=true;
-                notifyAll(*this);
+            auto& sync = getSynchro(*this);
+            {
+                std::lock_guard<std::mutex> lk(sync.mutex);
+                if (nPosition != buffPosition) {
+                    buffPosition = nPosition;
+                    running = true;
+                }
             }
+            sync.cv.notify_all();
         } else {
-            buffPosition = position;
-            running=true;
-            notifyAll(*this);
+            auto& sync = getSynchro(*this);
+            {
+                std::lock_guard<std::mutex> lk(sync.mutex);
+                buffPosition = position;
+                running = true;
+            }
+            sync.cv.notify_all();
         }
     }
     void release() {
@@ -87,10 +95,13 @@ public:
 
         }
         int waitCount = 0;
-        while (buffPosition < desired) {
-            // printf("Waiting on %ld\n", buffPosition);
-            wait(*this);
-            waitCount++;
+        auto& sync = getSynchro(*this);
+        {
+            std::unique_lock<std::mutex> lk(sync.mutex);
+            while (buffPosition < desired) {
+                sync.cv.wait(lk);
+                waitCount++;
+            }
         }
         if (waitCount == 0) {
             if (lastWait >= 100) {
