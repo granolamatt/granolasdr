@@ -45,6 +45,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"
     "gm/cuda/FT8Cuda.cc"
+    "ft8_lib/fft/kiss_fft.c"
     )
 
 enable_language("CUDA")
@@ -79,6 +80,9 @@ target_link_libraries (hf_rx -lm lib_granolamatt gmcuda ${CMAKE_CURRENT_SOURCE_D
 
 add_executable(zmqclient gm/zmqcode/client.cc)
 target_link_libraries (zmqclient ${LIBLOC} zmq)
+
+add_executable(decode_corpus decode_corpus.cc ft8_lib/fft/kiss_fft.c)
+target_link_libraries (decode_corpus ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
 
 
 #adb push cudatest /data/local/develop/

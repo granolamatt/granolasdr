@@ -173,6 +173,55 @@ Output shows:
 - Signals you decoded that PSKReporter missed
 - Signals PSKReporter heard nearby that you missed (sorted by sender distance — nearest first)
 
+### `compare_corpus.py` — JTDX / WSJT-X comparison
+
+The `--jtdx` flag enables corpus capture: every 15-second FT8 period, a 16-bit PCM WAV of
+the 20m band is saved to `ft8_corpus/`. This lets you run JTDX or WSJT-X on the same audio
+granolasdr processed and compare which signals each decoder found.
+
+**WAV file details**
+
+| Parameter | Value |
+|-----------|-------|
+| Band | 20m FT8 (14.074 MHz dial) |
+| Sample rate | ~12,019 Hz (= 4,375,000 × 1920 / 698,880) |
+| Format | 16-bit signed PCM, mono |
+| Duration | 106 symbol-blocks ≈ 17 s per file |
+| Filename | `ft8_corpus/20m_YYYYMMDD_HHMMSS.wav` |
+
+**Workflow**
+
+```bash
+# 1. Run with corpus capture
+./build/hf_rx --jtdx 2>&1 | tee granola_decodes.txt
+
+# 2. Subscribe to ZMQ and capture JSON decodes
+python3 -c "
+import zmq, sys
+ctx = zmq.Context()
+s = ctx.socket(zmq.SUB)
+s.connect('tcp://localhost:5580')
+s.setsockopt(zmq.SUBSCRIBE, b'')
+while True:
+    print(s.recv_string(), flush=True)
+" > granola_log.jsonl &
+
+# 3. Decode the corpus WAV files with WSJT-X or JTDX
+#    (run jt9 or wsjtx --decode on each file, redirect to ALL.TXT)
+for f in ft8_corpus/*.wav; do
+    jt9 --ft8 -d 3 "$f" >> ALL.TXT
+done
+
+# 4. Compare
+python3 compare_corpus.py granola_log.jsonl ALL.TXT --date 20240518
+```
+
+`compare_corpus.py` groups decodes by 15-second FT8 epoch and call sign, then reports:
+- **BOTH** — call decoded by both (shown with `--show-both`)
+- **GRANOLA-ONLY** — call only granolasdr decoded
+- **REF-ONLY** — call only the reference decoder found
+- Summary: recall percentage (what fraction of reference's signals granolasdr caught)
+
 ## Project structure
 
 ```
@@ -191,6 +240,7 @@ gm/
 ft8_lib/                  — FT8 codec (prebuilt libft8.a)
 psk_uploader.py        — PSKReporter IPFIX uploader
 compare_psk.py         — Decoder vs PSKReporter comparison tool
+compare_corpus.py      — Granolasdr vs JTDX/WSJT-X decode comparison
 check_uploads.py       — Verify PSKReporter accepted your uploads
 calc_rf.py             — Derive kBandMap from HFChannelizer bin table
 ```

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <cstring>
 #include <complex>
 #include <cmath>
 #include <iostream>
@@ -14,7 +15,11 @@
 #include "gm/hf/ft8.h"
 
 
-int main() {
+int main(int argc, char* argv[]) {
+
+    bool enable_corpus = false;
+    for (int i = 1; i < argc; ++i)
+        if (strcmp(argv[i], "--jtdx") == 0) enable_corpus = true;
 
     gm::rx888::rx888 mydsp;
     mydsp.start_card();
@@ -22,7 +27,7 @@ int main() {
     gm::cuda::HFChannelizer epochbuffer(mydsp.getRxBufferPosition());
     epochbuffer.start();
 
-    gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer());
+    gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer(), enable_corpus);
     ft8channel.start();
 
     gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel);

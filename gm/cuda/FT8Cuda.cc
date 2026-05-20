@@ -6,6 +6,9 @@
 #include <complex>
 #include <chrono>
 #include <algorithm>
+#include <cmath>
+#include <ctime>
+#include <sys/stat.h>
 
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
@@ -15,13 +18,16 @@
 #include "gm/buffer/BufferPosition.h"
 #include "gm/rx888/rx888.h"
 #include "gm/hf/ft8_capture.h"
+#include "gm/hf/hf_bands.h"
 
 #include "ft8_lib/common/monitor.h"
+#include "ft8_lib/common/wave.h"
+#include "ft8_lib/fft/kiss_fft.h"
 
 namespace gm {
 namespace cuda {
 
-FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP) :
+FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus) :
 inPos(inP),
 buff_pos{0},
 ring_write_idx(0),
@@ -40,7 +46,13 @@ gpu_cand_ts_d(NULL),
 gpu_cand_fs_d(NULL),
 gpu_cand_score_d(NULL),
 gpu_cand_count_d(NULL),
-buffer_number(0) {
+buffer_number(0),
+enable_corpus(corpus),
+audio_ft8_bin(0),
+audio_ft8_bin_10m(0),
+audio_sample_rate(0),
+audioBins_host(NULL),
+audioBins_host_10m(NULL) {
     inShape = inPos->getShape();
     inData_d = (std::complex<float>*)inPos->getBuffer();
 
@@ -54,6 +66,50 @@ buffer_number(0) {
 
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 698880; // half off for some reason
+
+        // Compute FT8 FFT bins for 20m (14.074 MHz) and 10m (28.074 MHz) dials.
+        // Chain: wb_bin = round(freq * 1048576 / 140e6)
+        //        ifft_bin = (sum of bw[0..band-1]) + (wb_bin - wb_start_band)
+        //        ft8_bin  = round(ifft_bin * rfft_length / 32768)
+        {
+            const int kWbFftSize = 1048576;
+            const int kIfftSize  = 32768;
+
+            // 20m: kHFBands index 5
+            {
+                int wb_bin = (int)roundf(14074000.0f * kWbFftSize / 140000000.0f);
+                int ifft_start = 0;
+                for (int i = 0; i < 5; ++i) ifft_start += (int)kHFBands[i].bw;
+                int ifft_bin  = ifft_start + (wb_bin - (int)kHFBands[5].wb_start);
+                audio_ft8_bin = (int)roundf((float)ifft_bin * rfft_length / kIfftSize);
+                audio_sample_rate = (int)roundf(4375000.0f * FT8_AUDIO_BINS / rfft_length);
+                printf("20m audio: wb_bin=%d ifft_bin=%d ft8_bin=%d audio_rate=%d Hz\n",
+                       wb_bin, ifft_bin, audio_ft8_bin, audio_sample_rate);
+            }
+
+            // 10m: kHFBands index 9
+            {
+                int wb_bin = (int)roundf(28074000.0f * kWbFftSize / 140000000.0f);
+                int ifft_start = 0;
+                for (int i = 0; i < 9; ++i) ifft_start += (int)kHFBands[i].bw;
+                int ifft_bin  = ifft_start + (wb_bin - (int)kHFBands[9].wb_start);
+                audio_ft8_bin_10m = (int)roundf((float)ifft_bin * rfft_length / kIfftSize);
+                printf("10m audio: wb_bin=%d ifft_bin=%d ft8_bin=%d\n",
+                       wb_bin, ifft_bin, audio_ft8_bin_10m);
+            }
+        }
+
+        // Pinned audio rings for corpus capture (enabled with --jtdx): one each for 20m and 10m.
+        if (enable_corpus) {
+            const size_t audio_ring_bytes =
+                (size_t)AUDIO_RING_SLOTS * FT8_AUDIO_BINS * sizeof(std::complex<float>);
+            cuda_check_error(cudaHostAlloc((void**)&audioBins_host,
+                                           audio_ring_bytes, cudaHostAllocDefault));
+            cuda_check_error(cudaHostAlloc((void**)&audioBins_host_10m,
+                                           audio_ring_bytes, cudaHostAllocDefault));
+            printf("Corpus audio rings: %.1f MB pinned (20m + 10m)\n",
+                   (double)audio_ring_bytes * 2 / 1e6);
+        }
 
         // 1-byte dummy keeps magFT8 non-null so rt8BufferPosition pointer stays valid.
         // The waterfall D2H is gone (Phase 4); this pointer is never written after init.
@@ -126,6 +182,8 @@ FT8Cuda::~FT8Cuda() {
     if (gpu_cand_score_d) cudaFree(gpu_cand_score_d);
     if (gpu_cand_count_d) cudaFree(gpu_cand_count_d);
     if (magFT8) cudaFreeHost(magFT8);
+    if (audioBins_host) cudaFreeHost(audioBins_host);
+    if (audioBins_host_10m) cudaFreeHost(audioBins_host_10m);
     cufftDestroy(rplan);
     cudaEventDestroy(scan_done);
     cudaEventDestroy(ring_ready);
@@ -179,6 +237,22 @@ int FT8Cuda::doCopy(uint64_t now) {
                 &magFT8_ring_d[(ring_write_idx % RING_BLOCKS) * block_bytes],
                 &magFT8_d[0],
                 block_bytes * sizeof(uint8_t), cudaMemcpyDeviceToDevice, stream));
+
+            // Corpus: async D2H of 1920 complex bins at 20m and 10m dial frequencies (sub=0 FFT).
+            if (enable_corpus) {
+                uint64_t audio_slot = ring_write_idx % (uint64_t)AUDIO_RING_SLOTS;
+                cuda_check_error(cudaMemcpyAsync(
+                    &audioBins_host[audio_slot * FT8_AUDIO_BINS],
+                    &demodFT8_d[audio_ft8_bin],
+                    FT8_AUDIO_BINS * sizeof(std::complex<float>),
+                    cudaMemcpyDeviceToHost, stream));
+                cuda_check_error(cudaMemcpyAsync(
+                    &audioBins_host_10m[audio_slot * FT8_AUDIO_BINS],
+                    &demodFT8_d[audio_ft8_bin_10m],
+                    FT8_AUDIO_BINS * sizeof(std::complex<float>),
+                    cudaMemcpyDeviceToHost, stream));
+            }
+
             ring_write_idx++;
 
             // On trigger: snapshot the last FT8_CAPTURE_BLOCKS blocks into a decode slot.
@@ -229,9 +303,27 @@ int FT8Cuda::doCopy(uint64_t now) {
                 if (last_snapshot_thread.joinable())
                     last_snapshot_thread.join();
 
-                last_snapshot_thread = std::thread([this, decode_slot, next_buf]() {
-                    // Wait for Costas scan + soft symbols kernel.
+                double snap_seconds = seconds;
+                last_snapshot_thread = std::thread([this, decode_slot, next_buf, snap_start, snap_seconds]() {
+                    // Wait for Costas scan + soft symbols kernel (also ensures audio D2H done).
                     cudaEventSynchronize(scan_done);
+
+                    // Snapshot audio rings immediately after sync (before doCopy can overwrite).
+                    std::vector<std::complex<float>> audio_snap, audio_snap_10m;
+                    if (enable_corpus) {
+                        const size_t snap_bins = (size_t)FT8_CAPTURE_BLOCKS * FT8_AUDIO_BINS;
+                        audio_snap.resize(snap_bins);
+                        audio_snap_10m.resize(snap_bins);
+                        for (int b = 0; b < FT8_CAPTURE_BLOCKS; ++b) {
+                            uint64_t slot = (snap_start + b) % (uint64_t)AUDIO_RING_SLOTS;
+                            memcpy(&audio_snap[(size_t)b * FT8_AUDIO_BINS],
+                                   &audioBins_host[slot * FT8_AUDIO_BINS],
+                                   FT8_AUDIO_BINS * sizeof(std::complex<float>));
+                            memcpy(&audio_snap_10m[(size_t)b * FT8_AUDIO_BINS],
+                                   &audioBins_host_10m[slot * FT8_AUDIO_BINS],
+                                   FT8_AUDIO_BINS * sizeof(std::complex<float>));
+                        }
+                    }
 
                     uint32_t n = 0;
                     cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
@@ -259,6 +351,51 @@ int FT8Cuda::doCopy(uint64_t now) {
 
                     // Signal ft8.cc: GPU scan + soft LLRs are ready.
                     rt8BufferPosition.setPosition(next_buf, 1);
+
+                    // Corpus WAV write: IFFT each block's 1920 bins → real PCM → save_wav.
+                    if (enable_corpus && !audio_snap.empty()) {
+                        mkdir("ft8_corpus", 0755);
+                        time_t t = (time_t)snap_seconds;
+                        struct tm* tm_info = gmtime(&t);
+                        int total_samples = FT8_CAPTURE_BLOCKS * FT8_AUDIO_BINS;
+
+                        kiss_fft_cfg cfg = kiss_fft_alloc(FT8_AUDIO_BINS, 1, NULL, NULL);
+                        kiss_fft_cpx in_buf[FT8_AUDIO_BINS], out_buf[FT8_AUDIO_BINS];
+
+                        auto write_band_wav = [&](const std::vector<std::complex<float>>& snap,
+                                                  const char* band_prefix) {
+                            std::vector<float> pcm(total_samples);
+                            for (int b = 0; b < FT8_CAPTURE_BLOCKS; ++b) {
+                                const std::complex<float>* src = &snap[(size_t)b * FT8_AUDIO_BINS];
+                                for (int k = 0; k < FT8_AUDIO_BINS; ++k) {
+                                    in_buf[k].r = src[k].real();
+                                    in_buf[k].i = src[k].imag();
+                                }
+                                kiss_fft(cfg, in_buf, out_buf);
+                                for (int k = 0; k < FT8_AUDIO_BINS; ++k)
+                                    pcm[(size_t)b * FT8_AUDIO_BINS + k] = out_buf[k].r / FT8_AUDIO_BINS;
+                            }
+                            float peak = 1e-10f;
+                            for (float v : pcm) if (fabsf(v) > peak) peak = fabsf(v);
+                            for (float& v : pcm) v /= peak;
+
+                            char path[256];
+                            snprintf(path, sizeof(path),
+                                     "ft8_corpus/%s_%04d%02d%02d_%02d%02d%02d.wav",
+                                     band_prefix,
+                                     tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+                                     tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+                            if (save_wav(pcm.data(), total_samples, audio_sample_rate, path) == 0)
+                                printf("Corpus: saved %s (%d samples @ %d Hz)\n",
+                                       path, total_samples, audio_sample_rate);
+                            else
+                                fprintf(stderr, "Corpus: save_wav failed for %s\n", path);
+                        };
+
+                        write_band_wav(audio_snap,     "20m");
+                        write_band_wav(audio_snap_10m, "10m");
+                        kiss_fft_free(cfg);
+                    }
                 });
 
                 buffer_number++;

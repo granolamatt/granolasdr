@@ -5,8 +5,13 @@
 
 // Total blocks per FT8 decode window: 79 data symbols + 27 guard blocks.
 // Rolling ring snapshot (trigger==14) places the on-time signal at block ≈14,
-// giving ≈2.2s early tolerance and ≈2.1s late tolerance without every-other-epoch.
+// giving ≈2.2s early tolerance and ≈2.4s late tolerance within the 30-slot
+// scan window (FT8ScanCuda hardcodes time_off 0..29 regardless of num_blocks).
 #define FT8_CAPTURE_BLOCKS (FT8_NN + 27)
+
+// Width of the 20m audio extraction window in FT8 FFT bins.
+// 1920 bins × 6.25 Hz/bin ≈ 12 kHz, covering the full FT8 passband above dial.
+#define FT8_AUDIO_BINS 1920
 
 // Time oversampling: number of FFTs computed per symbol period, each offset by
 // 1/FT8_TIME_OSR of a symbol. Must match the waterfall_init time_osr argument in ft8.cc.
