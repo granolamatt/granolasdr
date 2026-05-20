@@ -9,11 +9,13 @@ A wideband HF FT8 decoder for the RX888 SDR. Simultaneously monitors all major H
 ```
 RX888 SDR (140 MS/s real)
   └─ HFChannelizer (CUDA)
-       Wideband R2C FFT (1M pts) → selects 10 HF bands → composite IFFT
-       Output: 16,384 complex samples/slot at 4.375 MS/s
+       1,400,000-pt R2C FFT → 100 Hz/bin, 200 blocks/sec
+       Selects 10 HF band slices → 65,536-pt composite IFFT
+       Output: 32,768 complex samples/slot at 6.5536 MS/s
+       Audio: 120 bins/band × 10 bands → 120-pt IFFT → 12 kHz ZMQ streams
   └─ FT8Cuda (CUDA)
-       698,880-pt C2C FFT at 4 time × 4 freq offsets (16 FFTs/block)
-       uint8_t magnitude → 200-block GPU ring buffer (2.2 GB VRAM)
+       1,048,576-pt C2C FFT at 4 time × 4 freq offsets (16 FFTs/block)
+       uint8_t magnitude → 200-block GPU ring buffer (~3.4 GB VRAM)
        Costas sync scan → candidate list (fo, to, ts, fs)
        Soft symbol kernel → float32 LLRs for each candidate (~70 MB D2H)
   └─ FT8 (CPU, ft8_lib)
@@ -31,7 +33,7 @@ Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
 
 - [RX888 MkII](https://github.com/RXToolsRX888/RX888) or compatible
 - NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
-- NVIDIA GPU with ≥ 8 GB VRAM (GPU ring buffer ~2.2 GB + LLR buffers ~140 MB)
+- NVIDIA GPU with ≥ 8 GB VRAM (GPU ring buffer ~3.4 GB + LLR buffers ~140 MB)
 - 16 GB system RAM recommended (~70 MB pinned for LLR staging; rest for OS/driver overhead)
 
 ### System dependencies
@@ -39,11 +41,13 @@ Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
 ```bash
 # Ubuntu/Debian
 sudo apt install build-essential cmake libusb-1.0-0-dev libzmq3-dev \
-                 python3 python3-pip
+                 python3 python3-pip pulseaudio-utils
 
 # Python packages
 pip3 install pyzmq
 ```
+
+`pulseaudio-utils` provides `pactl` and `pacat`, needed for the audio streaming feature.
 
 ### CUDA toolkit
 
@@ -136,6 +140,55 @@ python3 psk_uploader.py --call W1AW --grid DM78
 Uploads are batched and sent every 5 minutes as required by PSKReporter.
 Verify your reports appeared: https://pskreporter.info/analyze.html
 
+### Audio streaming
+
+While `hf_rx` is running, it continuously publishes 12 kHz mono audio for each of the 10 HF bands on ZMQ PUB sockets, ports 5581–5590 (160m through 10m). `audio_router.py` receives these streams and routes them into PulseAudio virtual sinks, making each band appear as a separate audio device on your system.
+
+**One-time setup — create PulseAudio virtual sinks:**
+
+```bash
+python3 audio_router.py --create-sinks
+```
+
+This creates 10 null sinks named `granola-160m` through `granola-10m` (displayed as `GranolaSDR-160m` etc.). They persist until reboot; to remove them manually use `pactl unload-module`.
+
+**Start routing:**
+
+```bash
+python3 audio_router.py
+```
+
+Subscribe to individual bands or a subset:
+
+```bash
+python3 audio_router.py --bands 20m,40m,80m
+```
+
+Connect to a remote `hf_rx` host:
+
+```bash
+python3 audio_router.py --host 192.168.1.x
+```
+
+**Listen to a band:**
+
+Open any audio app (browser, VLC, SDR software), select the output device `GranolaSDR-20m`, or use `pavucontrol` to move an existing app's output to a band sink. From the command line:
+
+```bash
+parec --device=granola-20m.monitor --rate=12000 --format=float32le --channels=1 \
+  | aplay -r 12000 -f FLOAT_LE -c 1
+```
+
+**Frame format** (published by `hf_rx`, consumed by `audio_router.py`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `band_id` | uint32 | Band index 0–9 (160m–10m) |
+| `seq` | uint32 | Monotonically increasing, wraps at 2³² |
+| samples | 60 × float32 | PCM at 12 kHz |
+
+Frame rate: 200 Hz (60 samples × 200 = 12,000 samples/sec). Each band covers ~6 kHz centered on the FT8 dial frequency.
+
 ## Python tools
 
 Install dependencies:
@@ -147,6 +200,10 @@ pip3 install -r requirements.txt
 ### `psk_uploader.py`
 
 Subscribes to the ZMQ PUB socket and batches decoded messages into PSKReporter IPFIX UDP packets.
+
+### `audio_router.py`
+
+Routes the 10-band 12 kHz ZMQ audio streams into PulseAudio null sinks. See [Audio streaming](#audio-streaming) above.
 
 ### `check_uploads.py`
 
@@ -184,7 +241,7 @@ granolasdr processed and compare which signals each decoder found.
 | Parameter | Value |
 |-----------|-------|
 | Band | 20m FT8 (14.074 MHz dial) |
-| Sample rate | ~12,019 Hz (= 4,375,000 × 1920 / 698,880) |
+| Sample rate | 12,000 Hz |
 | Format | 16-bit signed PCM, mono |
 | Duration | 106 symbol-blocks ≈ 17 s per file |
 | Filename | `ft8_corpus/20m_YYYYMMDD_HHMMSS.wav` |
@@ -227,7 +284,7 @@ python3 compare_corpus.py granola_log.jsonl ALL.TXT --date 20240518
 ```
 gm/
   cuda/
-    HFChannelizer.cc      — CUDA polyphase channelizer; maps wideband bins to 10 HF bands
+    HFChannelizer.cc      — CUDA channelizer; 1.4 MHz R2C FFT → 10-band composite IFFT + audio
     FT8Cuda.cc            — 4×4 oversampled FFT, GPU mag ring, scan dispatch, D2H
     FT8ScanCuda.cu        — GPU Costas sync scan; outputs candidate list
     FT8SoftCuda.cu        — GPU soft symbol kernel; outputs float32 LLRs per candidate
@@ -238,6 +295,7 @@ gm/
   rx888/                  — RX888 USB driver interface
   zmqcode/                — ZMQ server/pub utilities
 ft8_lib/                  — FT8 codec (prebuilt libft8.a)
+audio_router.py        — Route 10-band ZMQ audio streams to PulseAudio null sinks
 psk_uploader.py        — PSKReporter IPFIX uploader
 compare_psk.py         — Decoder vs PSKReporter comparison tool
 compare_corpus.py      — Granolasdr vs JTDX/WSJT-X decode comparison
