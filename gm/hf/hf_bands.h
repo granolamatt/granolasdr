@@ -4,28 +4,29 @@
 #include <stdint.h>
 
 // Single source of truth for RX888 HF band layout.
-// Wideband FFT: 1048576-pt R2C at 140 MS/s → bin_hz ≈ 133.5 Hz.
+// Wideband FFT: 1400000-pt R2C at 140 MS/s → bin_hz = 100.0 Hz exactly.
 // Each row: wideband bin range occupied by one HF amateur band.
 // bw = wb_end - wb_start (number of composite IFFT bins for this band).
-// Derived from calc_rf.py.
+// All indices: freq_Hz / 100.
 struct HFBand {
     uint32_t wb_start;
     uint32_t wb_end;
     uint32_t bw;
     const char* name;
+    uint32_t ft8_dial_bin; // wideband bin for FT8 dial freq (for audio extraction)
 };
 
 static const HFBand kHFBands[] = {
-    {13480,  14980,  1500, "160m"},
-    {26212,  29960,  3748,  "80m"},
-    {39920,  40712,   792,  "60m"},
-    {52424,  54676,  2252,  "40m"},
-    {75644,  76024,   380,  "30m"},
-    {104856, 107480, 2624,  "20m"},
-    {135324, 136076,  752,  "17m"},
-    {157284, 160660, 3376,  "15m"},
-    {186420, 187172,  752,  "12m"},
-    {209712, 222448, 12736, "10m"},
+    { 18000,  20000,  2000, "160m",  18400},
+    { 35000,  40000,  5000,  "80m",  35730},
+    { 53300,  54100,   800,  "60m",  53380},
+    { 70000,  73000,  3000,  "40m",  70740},
+    {101000, 101500,   500,  "30m", 101360},
+    {140000, 143500,  3500,  "20m", 140740},
+    {180680, 181680,  1000,  "17m", 181000},
+    {210000, 214500,  4500,  "15m", 210740},
+    {248900, 249900,  1000,  "12m", 249150},
+    {280000, 297000, 17000,  "10m", 280740},
 };
 static const int kNumHFBands = (int)(sizeof(kHFBands) / sizeof(kHFBands[0]));
 

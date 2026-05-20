@@ -27,14 +27,14 @@
 
 
 // ---- Composite-to-RF frequency conversion --------------------------------- //
-// The HFChannelizer packs HF bands into a 32768-bin composite IFFT, then
-// outputs 16384 complex samples at 4.375 MS/s. The FT8 FFT (698880 points) has
-// bin_hz = 4,375,000 / 698,880 ≈ 6.25 Hz. freq_offset is a bin in that composite
-// FFT, not an RF frequency. Convert it back using the HFChannelizer bin table.
+// The HFChannelizer packs HF bands into a 65536-bin composite IFFT, then
+// outputs 32768 complex samples at 6.5536 MS/s. The FT8 FFT (1048576 points) has
+// bin_hz = 6,553,600 / 1,048,576 = 6.25 Hz exactly. freq_offset is a bin in that
+// composite FFT, not an RF frequency. Convert it back using the HFChannelizer bin table.
 //
 // Mapping: composite_ifft_bin = round(freq_offset * IFFT_SIZE / FT8_FFT_SIZE)
 //          Then look up composite_ifft_bin in kBandMap to get the wideband bin,
-//          then rf_hz = wb_bin * 140e6 / 1048576.
+//          then rf_hz = wb_bin * 140e6 / 1400000 = wb_bin * 100.
 //
 // kBandMap is built at startup from kHFBands (gm/hf/hf_bands.h) — single source of truth.
 static const int kBandMapSize = kNumHFBands;
@@ -50,9 +50,9 @@ static void init_band_map() {
     }
 }
 
-static const int kIfftSize        = 32768;
-static const int kFt8FftSize      = 698880;
-static const int kWidebandFftSize = 1048576; // 2 * NLARGE
+static const int kIfftSize        = 65536;
+static const int kFt8FftSize      = 1048576;
+static const int kWidebandFftSize = 1400000; // 2 * NLARGE
 static const float kWbSampleRate  = 140000000.0f;
 
 // Returns actual RF frequency in Hz, or the raw bin number if no band matches.
@@ -344,13 +344,13 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
 void load_monitor(monitor_t* me)
 {
     float symbol_period = FT8_SYMBOL_PERIOD;
-    me->block_size    = 698880;
-    me->subblock_size = 698880;
-    me->nfft          = 698880;
-    me->fft_norm      = 698880;
+    me->block_size    = 1048576;
+    me->subblock_size = 1048576;
+    me->nfft          = 1048576;
+    me->fft_norm      = 1048576;
 
     me->min_bin = 0;
-    me->max_bin = 698880;
+    me->max_bin = 1048576;
     const int num_bins = me->max_bin - me->min_bin;
 
     // Phase 4: skip waterfall mag alloc — GPU computes LLRs from ring buffer.

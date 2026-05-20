@@ -65,15 +65,15 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaEventCreateWithFlags(&ring_ready,  cudaEventDisableTiming));
 
         cuda_h = gm::cuda::device::HostCuda(stream);
-        rfft_length = 698880; // half off for some reason
+        rfft_length = 1048576; // 2^20; 6553600 Hz composite / 6.25 Hz/bin
 
         // Compute FT8 FFT bins for 20m (14.074 MHz) and 10m (28.074 MHz) dials.
-        // Chain: wb_bin = round(freq * 1048576 / 140e6)
+        // Chain: wb_bin = round(freq * 1400000 / 140e6) = round(freq / 100)
         //        ifft_bin = (sum of bw[0..band-1]) + (wb_bin - wb_start_band)
-        //        ft8_bin  = round(ifft_bin * rfft_length / 32768)
+        //        ft8_bin  = round(ifft_bin * rfft_length / 65536)
         {
-            const int kWbFftSize = 1048576;
-            const int kIfftSize  = 32768;
+            const int kWbFftSize = 1400000;
+            const int kIfftSize  = 65536;
 
             // 20m: kHFBands index 5
             {
@@ -82,7 +82,7 @@ audioBins_host_10m(NULL) {
                 for (int i = 0; i < 5; ++i) ifft_start += (int)kHFBands[i].bw;
                 int ifft_bin  = ifft_start + (wb_bin - (int)kHFBands[5].wb_start);
                 audio_ft8_bin = (int)roundf((float)ifft_bin * rfft_length / kIfftSize);
-                audio_sample_rate = (int)roundf(4375000.0f * FT8_AUDIO_BINS / rfft_length);
+                audio_sample_rate = (int)roundf(6553600.0f * FT8_AUDIO_BINS / rfft_length);
                 printf("20m audio: wb_bin=%d ifft_bin=%d ft8_bin=%d audio_rate=%d Hz\n",
                        wb_bin, ifft_bin, audio_ft8_bin, audio_sample_rate);
             }
