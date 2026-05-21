@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include "gm/cuda/FT8ScanCuda.h"
 
 // FT8 QP-ADMM LDPC batch decoder — GPU stream-aware launcher.
 //
@@ -13,7 +14,7 @@
 // ldpc_stream without synchronizing. x_hat_d and parity_d must be device
 // buffers pre-allocated to FT8_LDPC_BATCH × 174 and FT8_LDPC_BATCH entries.
 
-#define FT8_LDPC_BATCH 4096
+#define FT8_LDPC_BATCH FT8_GPU_CAND_MAX
 
 void ft8_ldpc_init_constants();
 void ft8_ldpc_decode_batch(
