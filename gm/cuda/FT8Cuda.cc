@@ -299,6 +299,7 @@ int FT8Cuda::doCopy(uint64_t now) {
                         slot.count_d, slot.log174_d,
                         (int)rfft_length, FT8_CAPTURE_BLOCKS,
                         FT8_TIME_OSR, FT8_FREQ_OSR,
+                        (int)CONT_CAND_MAX,
                         cont_scan_stream);
 
                     // Async D2H of all per-slot buffers into pinned host memory.
@@ -363,6 +364,7 @@ int FT8Cuda::doCopy(uint64_t now) {
                     gpu_cand_count_d, log174_d,
                     (int)rfft_length, FT8_CAPTURE_BLOCKS,
                     FT8_TIME_OSR, FT8_FREQ_OSR,
+                    FT8_GPU_CAND_MAX,
                     scan_stream);
                 cudaEventRecord(scan_done, scan_stream);
 
