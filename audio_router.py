@@ -41,6 +41,37 @@ FRAME_SAMPLES = struct.Struct(f"<{SAMPLES_PER_FRAME}f")
 FRAME_BYTES = FRAME_HEADER.size + FRAME_SAMPLES.size  # 968
 
 
+def delete_null_sinks():
+    try:
+        out = subprocess.check_output(
+            ["pactl", "list", "modules", "short"],
+            stderr=subprocess.STDOUT
+        ).decode()
+    except subprocess.CalledProcessError as e:
+        print(f"pactl list failed: {e.output.decode().strip()}", file=sys.stderr)
+        return
+
+    deleted = 0
+    for line in out.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 2 or 'module-null-sink' not in parts[1]:
+            continue
+        args = parts[2] if len(parts) > 2 else ''
+        if 'sink_name=granola-sink' not in args:
+            continue
+        module_id = parts[0].strip()
+        sink_name = next((a.split('=',1)[1] for a in args.split() if a.startswith('sink_name=')), module_id)
+        try:
+            subprocess.check_call(["pactl", "unload-module", module_id],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"Removed {sink_name} (module {module_id})")
+            deleted += 1
+        except subprocess.CalledProcessError:
+            print(f"Failed to unload module {module_id} ({sink_name})", file=sys.stderr)
+
+    print(f"Removed {deleted} sink(s)." if deleted else "No granola-sink modules found.")
+
+
 def create_null_sinks(num_sinks):
     for i in range(num_sinks):
         sink = f"granola-sink{i}"
@@ -174,9 +205,15 @@ def main():
                     help=f"Number of sinks to route (default: {NUM_SINKS})")
     ap.add_argument("--create-sinks", action="store_true",
                     help="Create PulseAudio null sinks via pactl")
+    ap.add_argument("--delete-sinks", action="store_true",
+                    help="Remove all granola-sink PulseAudio modules and exit")
     ap.add_argument("--control", default="http://localhost:8080",
                     help="Control server base URL")
     args = ap.parse_args()
+
+    if args.delete_sinks:
+        delete_null_sinks()
+        sys.exit(0)
 
     num = min(max(args.sinks, 1), NUM_SINKS)
 
