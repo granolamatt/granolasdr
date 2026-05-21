@@ -75,7 +75,7 @@ const int kLDPC_iterations = 25;
 
 const int kMax_decoded_messages = 200;
 
-#define CALLSIGN_HASHTABLE_SIZE 256
+#define CALLSIGN_HASHTABLE_SIZE 2048
 
 static struct
 {
@@ -119,22 +119,19 @@ void hashtable_add(const char* callsign, uint32_t hash)
 {
     uint16_t hash10 = (hash >> 12) & 0x3FFu;
     int idx_hash = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0')
+    for (int probe = 0; probe < CALLSIGN_HASHTABLE_SIZE; ++probe)
     {
+        if (callsign_hashtable[idx_hash].callsign[0] == '\0')
+            break;
         if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) == hash) && (0 == strcmp(callsign_hashtable[idx_hash].callsign, callsign)))
         {
-            // reset age
             callsign_hashtable[idx_hash].hash &= 0x3FFFFFu;
-            LOG(LOG_DEBUG, "Found a duplicate [%s]\n", callsign);
             return;
         }
-        else
-        {
-            LOG(LOG_DEBUG, "Hash table clash!\n");
-            // Move on to check the next entry in hash table
-            idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
-        }
+        idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
     }
+    if (callsign_hashtable[idx_hash].callsign[0] != '\0')
+        return; // table full, drop silently
     callsign_hashtable_size++;
     strncpy(callsign_hashtable[idx_hash].callsign, callsign, 11);
     callsign_hashtable[idx_hash].callsign[11] = '\0';
@@ -146,14 +143,15 @@ bool hashtable_lookup(ftx_callsign_hash_type_t hash_type, uint32_t hash, char* c
     uint8_t hash_shift = (hash_type == FTX_CALLSIGN_HASH_10_BITS) ? 12 : (hash_type == FTX_CALLSIGN_HASH_12_BITS ? 10 : 0);
     uint16_t hash10 = (hash >> (12 - hash_shift)) & 0x3FFu;
     int idx_hash = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0')
+    for (int probe = 0; probe < CALLSIGN_HASHTABLE_SIZE; ++probe)
     {
+        if (callsign_hashtable[idx_hash].callsign[0] == '\0')
+            break;
         if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) >> hash_shift) == hash)
         {
             strcpy(callsign, callsign_hashtable[idx_hash].callsign);
             return true;
         }
-        // Move on to check the next entry in hash table
         idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
     }
     callsign[0] = '\0';

@@ -5,14 +5,12 @@
 #include <complex>
 #include <chrono>
 #include <cstring>
-#include <immintrin.h>
 
 #include "gm/cuda/HFChannelizer.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/buffer/BufferPosition.h"
 #include "gm/rx888/rx888.h"
 
-#include "ft8_lib/fft/kiss_fft.h"
 #include "gm/hf/hf_bands.h"
 #include "third_party/httplib.h"
 #include "third_party/nlohmann_json.hpp"
@@ -43,6 +41,7 @@ fftInData_d(NULL),
 fftData_d(NULL),
 demodData_d(NULL),
 channelData_d(NULL),
+audioBins_d(NULL),
 num_blocks(0),
 buffer_number(0),
 audio_pinned(NULL),
@@ -100,6 +99,20 @@ ctrl_port_(ctrl_port) {
         fftRes = cufftSetStream(iplan, stream);
         if (fftRes) printf("HFChannelizer: cufftSetStream (C2C) failed\n");
 
+        // Batched audio IFFT: NUM_SINKS × AUDIO_BINS C2C on GPU.
+        cuda_check_error(cudaMalloc((void**)&audioBins_d,
+            (size_t)NUM_SINKS * AUDIO_BINS * sizeof(std::complex<float>)));
+        {
+            int audio_n[1] = {AUDIO_BINS};
+            fftRes = cufftPlanMany(&audio_plan, 1, audio_n,
+                nullptr, 1, AUDIO_BINS,
+                nullptr, 1, AUDIO_BINS,
+                CUFFT_C2C, NUM_SINKS);
+            if (fftRes) printf("HFChannelizer: cufftPlanMany (audio IFFT) failed\n");
+            fftRes = cufftSetStream(audio_plan, stream);
+            if (fftRes) printf("HFChannelizer: cufftSetStream (audio) failed\n");
+        }
+
         // Pinned ring: AUDIO_RING × NUM_SINKS × AUDIO_BINS complex floats for D2H→worker handoff.
         const size_t audio_ring_bytes =
             (size_t)AUDIO_RING * NUM_SINKS * AUDIO_BINS * sizeof(std::complex<float>);
@@ -132,6 +145,7 @@ HFChannelizer::~HFChannelizer() {
         audio_sockets[i] = nullptr;
     }
     if (audio_pinned) cudaFreeHost(audio_pinned);
+    if (audioBins_d) cudaFree(audioBins_d);
     if (inData_d) cudaFree(inData_d);
     if (fftInData_d) cudaFree(fftInData_d);
     if (fftData_d) cudaFree(fftData_d);
@@ -139,6 +153,7 @@ HFChannelizer::~HFChannelizer() {
     if (demodData_d) cudaFree(demodData_d);
     cufftDestroy(plan);
     cufftDestroy(iplan);
+    cufftDestroy(audio_plan);
     cudaStreamDestroy(stream);
 }
 
@@ -166,8 +181,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             return 0;
         }
 
-        // Audio extraction: async D2H of AUDIO_BINS bins per sink.
-        // sink_bins[i] is read atomically — wait-free, safe from CUDA callback thread.
+        // Audio extraction: D2D gather bins → audioBins_d, batched GPU IFFT, D2H to pinned ring.
         {
             uint64_t produce = audio_produce_idx.load(std::memory_order_relaxed);
             uint64_t consume = audio_consume_idx.load(std::memory_order_acquire);
@@ -177,11 +191,18 @@ int HFChannelizer::doCopy(uint64_t now) {
                 for (int i = 0; i < NUM_SINKS; i++) {
                     uint32_t start_bin = sink_bins[i].load(std::memory_order_acquire);
                     cuda_check_error(cudaMemcpyAsync(
-                        dst + i * AUDIO_BINS,
+                        audioBins_d + i * AUDIO_BINS,
                         &fftData_d[start_bin],
                         AUDIO_BINS * sizeof(std::complex<float>),
-                        cudaMemcpyDeviceToHost, stream));
+                        cudaMemcpyDeviceToDevice, stream));
                 }
+                cufftResult_t arval = cufftExecC2C(audio_plan,
+                    (cufftComplex*)audioBins_d, (cufftComplex*)audioBins_d, CUFFT_INVERSE);
+                if (arval) printf("Error in audio IFFT\n");
+                cuda_check_error(cudaMemcpyAsync(
+                    dst, audioBins_d,
+                    (size_t)NUM_SINKS * AUDIO_BINS * sizeof(std::complex<float>),
+                    cudaMemcpyDeviceToHost, stream));
                 static std::atomic<uint64_t>* s_audio_produce = &audio_produce_idx;
                 cudaStreamAddCallback(stream,
                     [](cudaStream_t, cudaError_t, void*) {
@@ -228,9 +249,6 @@ int HFChannelizer::doCopy(uint64_t now) {
 }
 
 void HFChannelizer::audioWorker() {
-    kiss_fft_cfg cfg = kiss_fft_alloc(AUDIO_BINS, 1, NULL, NULL);
-    std::vector<kiss_fft_cpx> in_buf(AUDIO_BINS), out_buf(AUDIO_BINS);
-
     // Frame: [sink_id: u32][seq: u32][AUDIO_VALID × f32] = 968 bytes
     const size_t frame_bytes = 2 * sizeof(uint32_t) + AUDIO_VALID * sizeof(float);
     std::vector<uint8_t> frame(frame_bytes);
@@ -242,7 +260,7 @@ void HFChannelizer::audioWorker() {
         uint64_t produce = audio_produce_idx.load(std::memory_order_acquire);
         uint64_t consume = audio_consume_idx.load(std::memory_order_relaxed);
         if (produce <= consume) {
-            _mm_pause();
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
             continue;
         }
 
@@ -250,17 +268,11 @@ void HFChannelizer::audioWorker() {
         const std::complex<float>* src = audio_pinned + slot * (size_t)NUM_SINKS * AUDIO_BINS;
 
         for (int sink = 0; sink < NUM_SINKS; sink++) {
-            const std::complex<float>* bins_in = src + sink * AUDIO_BINS;
-            for (int k = 0; k < AUDIO_BINS; k++) {
-                in_buf[k].r = bins_in[k].real();
-                in_buf[k].i = bins_in[k].imag();
-            }
-            kiss_fft(cfg, in_buf.data(), out_buf.data());
-
+            const std::complex<float>* ifft_out = src + sink * AUDIO_BINS;
             // Last AUDIO_VALID samples are valid (overlap-save second half).
             const float norm = 1.0f / AUDIO_BINS;
             for (int k = 0; k < AUDIO_VALID; k++)
-                pcm[k] = out_buf[AUDIO_BINS - AUDIO_VALID + k].r * norm;
+                pcm[k] = ifft_out[AUDIO_BINS - AUDIO_VALID + k].real() * norm;
 
             uint32_t sink32 = (uint32_t)sink;
             memcpy(frame.data(), &sink32, sizeof(uint32_t));
@@ -275,8 +287,6 @@ void HFChannelizer::audioWorker() {
         seq++;
         audio_consume_idx.fetch_add(1, std::memory_order_release);
     }
-
-    kiss_fft_free(cfg);
 }
 
 void HFChannelizer::controlWorker() {
