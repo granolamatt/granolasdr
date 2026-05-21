@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <numeric>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
@@ -437,7 +438,22 @@ namespace hf {
         if (n == 0) return;
         n = std::min(n, gm::cuda::CONT_CAND_MAX);
 
-        for (uint32_t i = 0; i < n; ++i) {
+        // Sort by score descending and cap LDPC work at 200 candidates.
+        // Keeps CPU bounded (~20ms max) even when the Costas scan finds thousands of matches.
+        static const uint32_t kContLdpcMax = 200;
+        uint32_t take = std::min(n, kContLdpcMax);
+
+        std::vector<uint32_t> order(n);
+        std::iota(order.begin(), order.end(), 0);
+        if (n > take) {
+            std::partial_sort(order.begin(), order.begin() + take, order.end(),
+                              [&r](uint32_t a, uint32_t b) {
+                                  return r.score[a] > r.score[b];
+                              });
+        }
+
+        for (uint32_t ii = 0; ii < take; ++ii) {
+            uint32_t i = order[ii];
             const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
             ftx_message_t msg;
             ftx_decode_status_t st;

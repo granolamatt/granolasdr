@@ -560,7 +560,7 @@ void FT8Cuda::contWorker() {
     while (cont_scan_active.load(std::memory_order_acquire)) {
         uint64_t wi = cont_write_idx.load(std::memory_order_acquire);
         if (ri == wi) {
-            _mm_pause();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         ContScanResult& slot = cont_slots[ri % CONTINUOUS_SLOTS];
