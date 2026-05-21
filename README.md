@@ -12,7 +12,7 @@ RX888 SDR (140 MS/s real)
        1,400,000-pt R2C FFT → 100 Hz/bin, 200 blocks/sec
        Selects 10 HF band slices → 65,536-pt composite IFFT
        Output: 32,768 complex samples/slot at 6.5536 MS/s
-       Audio: 120 bins/band × 10 bands → 120-pt IFFT → 12 kHz ZMQ streams
+       Audio: 4 tunable sinks × 480 bins → 480-pt IFFT → 48 kHz ZMQ streams
   └─ FT8Cuda (CUDA)
        1,048,576-pt C2C FFT at 4 time × 4 freq offsets (16 FFTs/block)
        uint8_t magnitude → 200-block GPU ring buffer (~3.4 GB VRAM)
@@ -142,7 +142,46 @@ Verify your reports appeared: https://pskreporter.info/analyze.html
 
 ### Audio streaming
 
-While `hf_rx` is running, it continuously publishes 12 kHz mono audio for each of the 10 HF bands on ZMQ PUB sockets, ports 5581–5590 (160m through 10m). `audio_router.py` receives these streams and routes them into PulseAudio virtual sinks, making each band appear as a separate audio device on your system.
+While `hf_rx` is running it publishes 48 kHz mono audio from 4 tunable virtual radios on ZMQ PUB sockets (ports 5581–5584). Each sink is independently tunable to any HF frequency via the REST control API on port 8080.
+
+**Default sink frequencies at startup:**
+
+| Sink | Port | Default | Label |
+|------|------|---------|-------|
+| 0 | 5581 | 14.074 MHz | 20m FT8 |
+| 1 | 5582 | 7.074 MHz | 40m FT8 |
+| 2 | 5583 | 3.573 MHz | 80m FT8 |
+| 3 | 5584 | 28.074 MHz | 10m FT8 |
+
+**Web control UI:**
+
+Open `http://localhost:8080/` in a browser. Each sink row has a frequency input (in Hz), a preset dropdown for all 10 FT8 band frequencies, and a Tune/Apply button. Status auto-refreshes every 2 seconds.
+
+**REST API:**
+
+```bash
+# Show current sink frequencies
+curl http://localhost:8080/api/status
+
+# Tune sink 0 to 14.074 MHz (20m FT8)
+curl -s -X POST http://localhost:8080/api/tune \
+     -H 'Content-Type: application/json' \
+     -d '{"sink":0,"freq_hz":14074000,"label":"20m FT8"}'
+
+# Apply a preset
+curl -s -X POST http://localhost:8080/api/preset \
+     -H 'Content-Type: application/json' \
+     -d '{"sink":1,"preset":"40m"}'
+
+# List all FT8 presets
+curl http://localhost:8080/api/presets
+```
+
+By default the control server binds to `127.0.0.1:8080` (localhost only). To allow LAN access:
+
+```bash
+./hf_rx --control-host 0.0.0.0 --control-port 8080
+```
 
 **One-time setup — create PulseAudio virtual sinks:**
 
@@ -150,18 +189,12 @@ While `hf_rx` is running, it continuously publishes 12 kHz mono audio for each o
 python3 audio_router.py --create-sinks
 ```
 
-This creates 10 null sinks named `granola-160m` through `granola-10m` (displayed as `GranolaSDR-160m` etc.). They persist until reboot; to remove them manually use `pactl unload-module`.
+This creates 4 null sinks named `granola-sink0` through `granola-sink3`. They persist until reboot; to remove them manually use `pactl unload-module`.
 
 **Start routing:**
 
 ```bash
 python3 audio_router.py
-```
-
-Subscribe to individual bands or a subset:
-
-```bash
-python3 audio_router.py --bands 20m,40m,80m
 ```
 
 Connect to a remote `hf_rx` host:
@@ -170,24 +203,24 @@ Connect to a remote `hf_rx` host:
 python3 audio_router.py --host 192.168.1.x
 ```
 
-**Listen to a band:**
+**Listen:**
 
-Open any audio app (browser, VLC, SDR software), select the output device `GranolaSDR-20m`, or use `pavucontrol` to move an existing app's output to a band sink. From the command line:
+Open any audio app and select `GranolaSDR-Sink0`, or from the command line:
 
 ```bash
-parec --device=granola-20m.monitor --rate=12000 --format=float32le --channels=1 \
-  | aplay -r 12000 -f FLOAT_LE -c 1
+parec --device=granola-sink0.monitor --rate=48000 --format=float32le --channels=1 \
+  | aplay -r 48000 -f FLOAT_LE -c 1
 ```
 
 **Frame format** (published by `hf_rx`, consumed by `audio_router.py`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `band_id` | uint32 | Band index 0–9 (160m–10m) |
+| `sink_id` | uint32 | Sink index 0–3 |
 | `seq` | uint32 | Monotonically increasing, wraps at 2³² |
-| samples | 60 × float32 | PCM at 12 kHz |
+| samples | 240 × float32 | PCM at 48 kHz |
 
-Frame rate: 200 Hz (60 samples × 200 = 12,000 samples/sec). Each band covers ~6 kHz centered on the FT8 dial frequency.
+Frame size: 968 bytes. Frame rate: 200 Hz (240 samples × 200 = 48,000 samples/sec).
 
 ## Python tools
 
@@ -203,7 +236,7 @@ Subscribes to the ZMQ PUB socket and batches decoded messages into PSKReporter I
 
 ### `audio_router.py`
 
-Routes the 10-band 12 kHz ZMQ audio streams into PulseAudio null sinks. See [Audio streaming](#audio-streaming) above.
+Routes 4 tunable 48 kHz ZMQ audio streams into PulseAudio null sinks. See [Audio streaming](#audio-streaming) above.
 
 ### `check_uploads.py`
 
@@ -284,7 +317,7 @@ python3 compare_corpus.py granola_log.jsonl ALL.TXT --date 20240518
 ```
 gm/
   cuda/
-    HFChannelizer.cc      — CUDA channelizer; 1.4 MHz R2C FFT → 10-band composite IFFT + audio
+    HFChannelizer.cc      — CUDA channelizer; 1.4 MHz R2C FFT → 10-band composite IFFT + 4 tunable audio sinks
     FT8Cuda.cc            — 4×4 oversampled FFT, GPU mag ring, scan dispatch, D2H
     FT8ScanCuda.cu        — GPU Costas sync scan; outputs candidate list
     FT8SoftCuda.cu        — GPU soft symbol kernel; outputs float32 LLRs per candidate
@@ -295,7 +328,9 @@ gm/
   rx888/                  — RX888 USB driver interface
   zmqcode/                — ZMQ server/pub utilities
 ft8_lib/                  — FT8 codec (prebuilt libft8.a)
-audio_router.py        — Route 10-band ZMQ audio streams to PulseAudio null sinks
+audio_router.py        — Route 4-sink 48 kHz ZMQ audio streams to PulseAudio null sinks
+control/index.html     — Web UI for tuning sinks (served by hf_rx on port 8080)
+third_party/           — Vendored single-header libs: cpp-httplib, nlohmann/json
 psk_uploader.py        — PSKReporter IPFIX uploader
 compare_psk.py         — Decoder vs PSKReporter comparison tool
 compare_corpus.py      — Granolasdr vs JTDX/WSJT-X decode comparison
