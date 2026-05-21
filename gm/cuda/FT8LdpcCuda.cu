@@ -23,9 +23,9 @@ constexpr int BLOCK = 192;
 constexpr int MAX_ITER = 50;
 constexpr float RHO    = 1.0f;
 
-// Shared memory per block: sx[174] + sz[83*7] + su[83*7] + sc_ok
-//   = 696 + 2324 + 2324 + 4 = 5348 bytes
-constexpr int SMEM_BYTES = N * 4 + M * D_MAX * 4 + M * D_MAX * 4 + 4;
+// Shared memory per block: s_scale[1] + sx[174] + sz[83*7] + su[83*7] + sc_ok
+//   = 4 + 696 + 2324 + 2324 + 4 = 5352 bytes
+constexpr int SMEM_BYTES = 4 + N * 4 + M * D_MAX * 4 + M * D_MAX * 4 + 4;
 static_assert(SMEM_BYTES <= 49152, "shared memory exceeds 48 KB limit");
 } // namespace
 
@@ -241,6 +241,7 @@ __global__ void qp_admm_ft8_kernel(
     const int tid = threadIdx.x;
     if (b >= B) return;
 
+    __shared__ float s_scale;
     __shared__ float sx[N];
     __shared__ float sz[M * D_MAX];
     __shared__ float su[M * D_MAX];
@@ -249,11 +250,28 @@ __global__ void qp_admm_ft8_kernel(
     const float* llr_b = llr + (ptrdiff_t)b * N;
     const float  eps   = 1e-6f;
 
+    // Normalize LLRs to variance 24, matching ftx_normalize_logl() on the CPU.
+    // FT8SoftCuda raw LLRs (s2 = mag_byte * 0.5) can have |llr| >> 6, which
+    // hard-clamps every x to {eps, 1-eps} and destroys soft coding gain.
+    // Thread 0 computes the scale factor serially (174 reads ≈ negligible vs ADMM loop).
+    if (tid == 0) {
+        float sum = 0.0f, sum2 = 0.0f;
+        for (int j = 0; j < N; ++j) {
+            float v = llr_b[j];
+            sum  += v;
+            sum2 += v * v;
+        }
+        float inv_n = 1.0f / N;
+        float var = (sum2 - sum * sum * inv_n) * inv_n;
+        s_scale = (var > 1e-6f) ? sqrtf(24.0f / var) : 1.0f;
+    }
+    __syncthreads();
+
     // Initialize x from LLRs.
     // Sign fix: negate LLR because FT8SoftCuda produces positive = bit 1 likely,
     // but QP-ADMM needs positive = bit 0 likely.
     if (tid < N) {
-        const float qj = -llr_b[tid] * 0.5f;   // SIGN FIX (init)
+        const float qj = -llr_b[tid] * s_scale * 0.5f;   // SIGN FIX + NORM (init)
         const float dj = RHO * (float)g_deg_v[tid];
         sx[tid] = fmaxf(eps, fminf(1.0f - eps, -qj / dj));
     }
@@ -273,7 +291,7 @@ __global__ void qp_admm_ft8_kernel(
                 const int sk = g_var_adj[tid][e][1];
                 zu_sum += sz[ci * D_MAX + sk] - su[ci * D_MAX + sk];
             }
-            const float qj = -llr_b[tid] * 0.5f;   // SIGN FIX (x-update)
+            const float qj = -llr_b[tid] * s_scale * 0.5f;   // SIGN FIX + NORM (x-update)
             const float dj = RHO * (float)g_deg_v[tid];
             sx[tid] = fmaxf(eps, fminf(1.0f - eps,
                             (RHO * zu_sum - qj) / dj));

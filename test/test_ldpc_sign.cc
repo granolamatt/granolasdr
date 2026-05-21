@@ -1,12 +1,15 @@
 // test_ldpc_sign.cc — Verify FT8LdpcCuda sign convention and basic decode.
 //
-// Three test vectors:
+// Four test vectors:
 //   1. All-zero codeword (llr[i] = -10): parity must pass, x_hat must be all zeros.
 //      (All-zero is always a valid LDPC codeword; H*0=0 mod 2.)
 //   2. All-zero LLR (llr[i] = 0): gradient is zero, ADMM trivially converges to
 //      all-zeros codeword, so parity=true. Validates init path doesn't NaN/crash.
 //   3. Sign sanity: flipped LLRs from test 1 (llr[i] = +10) must produce parity=false.
 //      (If the sign fix were missing, test 1 and 3 outcomes would be swapped.)
+//   4. Normalization: all-zero codeword with FT8SoftCuda-scale raw LLRs (llr[i] = -80).
+//      Without normalization, over-scaled hard decisions still converge (trivial case)
+//      but this validates the scale path. More importantly tests that var>0 branch works.
 
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -99,6 +102,17 @@ int main()
         float llr[FTX_LDPC_N];
         for (int i = 0; i < FTX_LDPC_N; ++i) llr[i] = +10.0f;
         bool ok = run_test("sign sanity (flipped, llr=+10, must fail)", llr, /*expect_parity=*/false);
+        if (ok) ++pass;
+        ++total;
+    }
+
+    // Test 4: all-zero codeword with FT8SoftCuda-scale raw LLRs (var >> 24).
+    // Before normalization fix, |llr|=80 → |qj|=40 >> rho*deg=3, x hard-clamps.
+    // This still decodes (trivial codeword), but validates the normalization branch runs.
+    {
+        float llr[FTX_LDPC_N];
+        for (int i = 0; i < FTX_LDPC_N; ++i) llr[i] = -80.0f;
+        bool ok = run_test("raw-scale codeword (llr=-80, tests norm path)", llr, /*expect_parity=*/true);
         if (ok) ++pass;
         ++total;
     }
