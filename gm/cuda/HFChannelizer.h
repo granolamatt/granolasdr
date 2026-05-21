@@ -2,6 +2,7 @@
 #define _GM_CUDA_HFCHANNELIZER_H_
 
 #include <atomic>
+#include <string>
 #include <thread>
 #include <cuda.h>
 #include <cufft.h>
@@ -15,7 +16,9 @@ namespace cuda {
 
 class HFChannelizer : public Thread {
 public:
-    HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP);
+    HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP,
+                  const std::string& ctrl_host = "127.0.0.1",
+                  int ctrl_port = 8080);
     ~HFChannelizer();
     void run();
     void stop() {
@@ -52,14 +55,20 @@ private:
     uint32_t nTune;
     uint32_t nChannels;
 
-    // Audio extraction: 120 bins × 10 bands from front FFT → 12 kHz ZMQ audio.
-    // Each block: async D2H 120 bins/band → worker thread IFFTs + ZMQ publishes.
-    static const int AUDIO_BANDS = 10;
-    static const int AUDIO_BINS  = 120;  // bins from front FFT (100 Hz/bin, 12 kHz BW)
-    static const int AUDIO_VALID = 60;   // valid samples per block (overlap-save, 12 kHz)
-    static const int AUDIO_RING  = 16;   // ring depth for D2H→worker handoff
+    // Audio extraction: NUM_SINKS tunable 48 kHz channels from front FFT.
+    // Each sink is independently tunable at runtime via REST API.
+    // AUDIO_BINS bins per sink → AUDIO_VALID valid PCM samples/block at 48 kHz.
+    static const int NUM_SINKS  = 4;
+    static const int AUDIO_BINS = 480;  // bins from front FFT (100 Hz/bin, 48 kHz BW)
+    static const int AUDIO_VALID = 240; // valid samples per block (overlap-save, 48 kHz)
+    static const int AUDIO_RING  = 16;  // ring depth for D2H→worker handoff
 
-    // Pinned host ring: AUDIO_RING × AUDIO_BANDS × AUDIO_BINS complex floats
+    // Per-sink tuning state: start bin in wideband FFT (freq_hz / 100).
+    // Written by controlWorker, read in doCopy — atomic for wait-free access.
+    std::atomic<uint32_t> sink_bins[NUM_SINKS];
+    std::string           sink_labels[NUM_SINKS];
+
+    // Pinned host ring: AUDIO_RING × NUM_SINKS × AUDIO_BINS complex floats
     std::complex<float>* audio_pinned;
 
     std::atomic<uint64_t> audio_produce_idx{0};
@@ -67,8 +76,14 @@ private:
     std::thread audio_thread;
     void audioWorker();
 
+    // REST control server (cpp-httplib, runs in its own thread)
+    std::string ctrl_host_;
+    int         ctrl_port_;
+    std::thread ctrl_thread;
+    void controlWorker();
+
     zmq::context_t audio_zmq_ctx;
-    zmq::socket_t* audio_sockets[AUDIO_BANDS];
+    zmq::socket_t* audio_sockets[NUM_SINKS];
 };
 }
 }

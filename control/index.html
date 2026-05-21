@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>granolasdr control</title>
+<style>
+  body { font-family: monospace; background: #1a1a1a; color: #e0e0e0; max-width: 600px; margin: 40px auto; padding: 0 16px; }
+  h1 { color: #7ec8e3; font-size: 1.2em; margin-bottom: 24px; }
+  .sink { border: 1px solid #333; border-radius: 4px; padding: 14px; margin-bottom: 12px; }
+  .sink-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .sink-id { color: #7ec8e3; font-weight: bold; min-width: 50px; }
+  .sink-label { color: #aaa; font-size: 0.9em; flex: 1; }
+  .sink-freq { color: #98e890; font-size: 1.1em; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=number] { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 5px 8px; width: 120px; font-family: monospace; }
+  select { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 5px 8px; font-family: monospace; }
+  button { background: #2a4a5a; color: #e0e0e0; border: 1px solid #7ec8e3; border-radius: 3px; padding: 5px 12px; cursor: pointer; font-family: monospace; }
+  button:hover { background: #3a6a8a; }
+  .status-bar { font-size: 0.8em; color: #666; margin-top: 20px; }
+  .error { color: #e87070; font-size: 0.85em; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>granolasdr — 4 tunable sinks</h1>
+<div id="sinks"></div>
+<div class="status-bar" id="status-bar">loading...</div>
+
+<script>
+const PRESETS = [];
+
+async function loadPresets() {
+  try {
+    const r = await fetch('/api/presets');
+    const d = await r.json();
+    PRESETS.splice(0, Infinity, ...d.presets);
+  } catch(e) {}
+}
+
+function sinkHtml(s) {
+  const presetOpts = PRESETS.map(p =>
+    `<option value="${p.freq_hz}">${p.name} (${(p.freq_hz/1e6).toFixed(4)} MHz)</option>`
+  ).join('');
+
+  return `
+  <div class="sink" id="sink-${s.id}">
+    <div class="sink-header">
+      <span class="sink-id">Sink ${s.id}</span>
+      <span class="sink-label" id="label-${s.id}">${escHtml(s.label)}</span>
+      <span class="sink-freq" id="freq-${s.id}">${(s.freq_hz/1e6).toFixed(4)} MHz</span>
+    </div>
+    <div class="controls">
+      <input type="number" id="hz-${s.id}" value="${s.freq_hz}" step="100" min="0" max="69952000" placeholder="freq Hz">
+      <button onclick="tuneHz(${s.id})">Tune</button>
+      <select id="preset-${s.id}">
+        <option value="">— preset —</option>
+        ${presetOpts}
+      </select>
+      <button onclick="tunePreset(${s.id})">Apply</button>
+    </div>
+    <div class="error" id="err-${s.id}"></div>
+  </div>`;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const container = document.getElementById('sinks');
+
+    // Build or update each sink
+    for (const s of d.sinks) {
+      const existing = document.getElementById(`sink-${s.id}`);
+      if (!existing) {
+        container.insertAdjacentHTML('beforeend', sinkHtml(s));
+      } else {
+        document.getElementById(`label-${s.id}`).textContent = s.label;
+        document.getElementById(`freq-${s.id}`).textContent = (s.freq_hz/1e6).toFixed(4) + ' MHz';
+        const hzInput = document.getElementById(`hz-${s.id}`);
+        if (document.activeElement !== hzInput)
+          hzInput.value = s.freq_hz;
+      }
+    }
+    document.getElementById('status-bar').textContent =
+      'last update: ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('status-bar').textContent = 'connection error: ' + e.message;
+  }
+}
+
+async function tuneHz(sinkId) {
+  const hz = parseInt(document.getElementById(`hz-${sinkId}`).value, 10);
+  if (isNaN(hz)) return;
+  await doTune(sinkId, hz, null);
+}
+
+async function tunePreset(sinkId) {
+  const sel = document.getElementById(`preset-${sinkId}`);
+  const hz = parseInt(sel.value, 10);
+  if (isNaN(hz) || !sel.value) return;
+  const label = sel.options[sel.selectedIndex].text.split(' ')[0] + ' FT8';
+  await doTune(sinkId, hz, label);
+}
+
+async function doTune(sinkId, freq_hz, label) {
+  const errEl = document.getElementById(`err-${sinkId}`);
+  errEl.textContent = '';
+  const body = { sink: sinkId, freq_hz };
+  if (label) body.label = label;
+  try {
+    const r = await fetch('/api/tune', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!r.ok) errEl.textContent = d.error || 'error';
+    else refreshStatus();
+  } catch(e) {
+    errEl.textContent = e.message;
+  }
+}
+
+async function init() {
+  await loadPresets();
+  await refreshStatus();
+  setInterval(refreshStatus, 2000);
+}
+
+init();
+</script>
+</body>
+</html>
