@@ -2,12 +2,12 @@
 #include <unistd.h>
 #include <iostream>
 #include <string.h>
-#include <complex>
 #include <chrono>
 #include <thread>
 #include <vector>
 #include <algorithm>
-#include <numeric>
+#include <atomic>
+#include <mutex>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
@@ -75,7 +75,7 @@ const int kLDPC_iterations = 25;
 
 const int kMax_decoded_messages = 200;
 
-#define CALLSIGN_HASHTABLE_SIZE 256
+#define CALLSIGN_HASHTABLE_SIZE 2048
 
 static struct
 {
@@ -119,22 +119,19 @@ void hashtable_add(const char* callsign, uint32_t hash)
 {
     uint16_t hash10 = (hash >> 12) & 0x3FFu;
     int idx_hash = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0')
+    for (int probe = 0; probe < CALLSIGN_HASHTABLE_SIZE; ++probe)
     {
+        if (callsign_hashtable[idx_hash].callsign[0] == '\0')
+            break;
         if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) == hash) && (0 == strcmp(callsign_hashtable[idx_hash].callsign, callsign)))
         {
-            // reset age
             callsign_hashtable[idx_hash].hash &= 0x3FFFFFu;
-            LOG(LOG_DEBUG, "Found a duplicate [%s]\n", callsign);
             return;
         }
-        else
-        {
-            LOG(LOG_DEBUG, "Hash table clash!\n");
-            // Move on to check the next entry in hash table
-            idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
-        }
+        idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
     }
+    if (callsign_hashtable[idx_hash].callsign[0] != '\0')
+        return; // table full, drop silently
     callsign_hashtable_size++;
     strncpy(callsign_hashtable[idx_hash].callsign, callsign, 11);
     callsign_hashtable[idx_hash].callsign[11] = '\0';
@@ -146,14 +143,15 @@ bool hashtable_lookup(ftx_callsign_hash_type_t hash_type, uint32_t hash, char* c
     uint8_t hash_shift = (hash_type == FTX_CALLSIGN_HASH_10_BITS) ? 12 : (hash_type == FTX_CALLSIGN_HASH_12_BITS ? 10 : 0);
     uint16_t hash10 = (hash >> (12 - hash_shift)) & 0x3FFu;
     int idx_hash = (hash10 * 23) % CALLSIGN_HASHTABLE_SIZE;
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0')
+    for (int probe = 0; probe < CALLSIGN_HASHTABLE_SIZE; ++probe)
     {
+        if (callsign_hashtable[idx_hash].callsign[0] == '\0')
+            break;
         if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) >> hash_shift) == hash)
         {
             strcpy(callsign, callsign_hashtable[idx_hash].callsign);
             return true;
         }
-        // Move on to check the next entry in hash table
         idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
     }
     callsign[0] = '\0';
@@ -165,9 +163,20 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
+static std::atomic<int> window_decode_count{0};
+static time_t           window_start_ts{0};
+
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             const gm::cuda::GpuScanResult* gpu = nullptr)
 {
+    // Per-15min decode count logging.
+    time_t now_ts = (time_t)tm_slot_start;
+    if (window_start_ts == 0) window_start_ts = now_ts - (now_ts % 900);
+    if (now_ts >= window_start_ts + 900) {
+        printf("[STATS] 15-min decodes: %d\n", window_decode_count.load());
+        window_decode_count.store(0);
+        window_start_ts += 900;
+    }
     const ftx_waterfall_t* wf = &mon->wf;
 
     auto t_find_start = std::chrono::steady_clock::now();
@@ -302,8 +311,10 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
             printf("DECODED: %s time_offset=%.3fs freq=%.1fHz snr=%.1f unix=%.0f\n", text, time_sec, freq_hz, snr, tm_slot_start);
-            if (unpack_status == FTX_MESSAGE_RC_OK && publisher)
+            if (unpack_status == FTX_MESSAGE_RC_OK && publisher) {
                 publisher->publishDecoded(text, freq_hz, snr, tm_slot_start, time_sec);
+                window_decode_count.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
     char band_summary[256] = "";
@@ -402,6 +413,7 @@ namespace hf {
             "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
             callsign, (double)freq_hz, (double)snr, unix_time, (double)time_offset);
         zmq::message_t msg(buf, len);
+        std::lock_guard<std::mutex> lk(zmq_mutex_);
         auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
         if (!result)
             fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);

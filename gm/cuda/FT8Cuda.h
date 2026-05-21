@@ -1,6 +1,8 @@
 #ifndef _GM_CUDA_FT8CUDA_H_
 #define _GM_CUDA_FT8CUDA_H_
 
+#include <atomic>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -42,6 +44,7 @@ public:
     const GpuScanResult& getGpuScanResult(int slot) const {
         return gpu_results[slot];
     }
+
 private:
     cudaStream_t stream;
     cudaStream_t scan_stream;     // GPU sync score kernel
@@ -101,14 +104,11 @@ private:
     uint32_t buff_pos;
 
     // Corpus audio capture (enabled with --jtdx).
-    // On each FFT block, 1920 complex bins at the 20m and 10m FT8 dial frequencies are
-    // copied asynchronously to pinned host rings (2×FT8_CAPTURE_BLOCKS slots each).
-    // At gotime the snapshot thread IFFTs them and writes 16-bit WAVs to ft8_corpus/.
     bool enable_corpus;
     int  audio_ft8_bin;       // FT8 FFT bin for 20m FT8 dial (14.074 MHz)
     int  audio_ft8_bin_10m;   // FT8 FFT bin for 10m FT8 dial (28.074 MHz)
     int  audio_sample_rate;   // derived sample rate for the audio WAVs (Hz)
-    static const int AUDIO_RING_SLOTS = 212; // 2 × FT8_CAPTURE_BLOCKS, prevents snapshot/write race
+    static const int AUDIO_RING_SLOTS = 244; // ≥ 2 × FT8_CAPTURE_BLOCKS (120), prevents snapshot/write race
     std::complex<float>* audioBins_host;      // pinned ring: 20m, AUDIO_RING_SLOTS × FT8_AUDIO_BINS
     std::complex<float>* audioBins_host_10m;  // pinned ring: 10m, AUDIO_RING_SLOTS × FT8_AUDIO_BINS
 };

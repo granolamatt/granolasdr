@@ -9,7 +9,6 @@
 #include <cmath>
 #include <ctime>
 #include <sys/stat.h>
-
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
@@ -61,8 +60,8 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaStreamCreate(&stream));
         cuda_check_error(cudaStreamCreate(&scan_stream));
         cuda_check_error(cudaStreamCreate(&transfer_stream));
-        cuda_check_error(cudaEventCreateWithFlags(&scan_done,   cudaEventDisableTiming));
-        cuda_check_error(cudaEventCreateWithFlags(&ring_ready,  cudaEventDisableTiming));
+        cuda_check_error(cudaEventCreateWithFlags(&scan_done,  cudaEventDisableTiming));
+        cuda_check_error(cudaEventCreateWithFlags(&ring_ready, cudaEventDisableTiming));
 
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 1048576; // 2^20; 6553600 Hz composite / 6.25 Hz/bin
@@ -255,6 +254,9 @@ int FT8Cuda::doCopy(uint64_t now) {
 
             ring_write_idx++;
 
+            // Commit all device ring writes before epoch path reads.
+            cudaEventRecord(ring_ready, stream);
+
             // On trigger: snapshot the last FT8_CAPTURE_BLOCKS blocks into a decode slot.
             // Background thread does the ring→slot copy so doCopy never blocks.
             uint64_t trigger_second = (uint64_t)(seconds);
@@ -271,14 +273,10 @@ int FT8Cuda::doCopy(uint64_t now) {
                 int next_buf = buffer_number + 1;
                 int dev_snap_start = (int)(snap_start % RING_BLOCKS);
 
-                // Commit all device ring writes up to this point.
-                cudaEventRecord(ring_ready, stream);
-
-                // scan_stream and transfer_stream both wait for ring writes before proceeding.
                 cudaStreamWaitEvent(scan_stream,    ring_ready, 0);
                 cudaStreamWaitEvent(transfer_stream, ring_ready, 0);
 
-                // Launch GPU sync scan on scan_stream (non-blocking for doCopy hot path).
+                // Launch epoch Costas scan on scan_stream.
                 ft8_gpu_scan(
                     magFT8_ring_d,
                     dev_snap_start, RING_BLOCKS,
@@ -297,6 +295,7 @@ int FT8Cuda::doCopy(uint64_t now) {
                     gpu_cand_count_d, log174_d,
                     (int)rfft_length, FT8_CAPTURE_BLOCKS,
                     FT8_TIME_OSR, FT8_FREQ_OSR,
+                    FT8_GPU_CAND_MAX,
                     scan_stream);
                 cudaEventRecord(scan_done, scan_stream);
 
@@ -306,7 +305,11 @@ int FT8Cuda::doCopy(uint64_t now) {
                 double snap_seconds = seconds;
                 last_snapshot_thread = std::thread([this, decode_slot, next_buf, snap_start, snap_seconds]() {
                     // Wait for Costas scan + soft symbols kernel (also ensures audio D2H done).
-                    cudaEventSynchronize(scan_done);
+                    cudaError_t ev;
+                    while ((ev = cudaEventQuery(scan_done)) == cudaErrorNotReady)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    if (ev != cudaSuccess)
+                        fprintf(stderr, "[EPOCH] CUDA event error: %s\n", cudaGetErrorString(ev));
 
                     // Snapshot audio rings immediately after sync (before doCopy can overwrite).
                     std::vector<std::complex<float>> audio_snap, audio_snap_10m;
@@ -413,7 +416,7 @@ int FT8Cuda::doCopy(uint64_t now) {
 
 void FT8Cuda::run() {
     uint64_t now = inPos->getNow(1) + 1;
-    
+
     while(isRunning()) {
         uint64_t next = inPos->getPosition(now+1, 1);
         while(now < next) {

@@ -31,6 +31,7 @@ private:
     cudaStream_t stream;
     cufftHandle plan;
     cufftHandle iplan;
+    cufftHandle audio_plan;  // batched NUM_SINKS × AUDIO_BINS C2C IFFT
     double lastepoch;
 
     const static int BUFFERS = 16;
@@ -50,6 +51,7 @@ private:
     int doCopy(uint64_t now);
     std::complex<float>* channelData_d;
     std::complex<float>* demodData_d;
+    std::complex<float>* audioBins_d;  // device staging: NUM_SINKS × AUDIO_BINS for batched IFFT
     std::vector<std::vector<uint32_t>> bins;
     uint32_t fft_length;
     uint32_t nTune;

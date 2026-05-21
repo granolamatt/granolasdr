@@ -4,9 +4,8 @@
 #include "ft8_lib/ft8/constants.h"
 
 // Total blocks per FT8 decode window: 79 data symbols + 27 guard blocks.
-// Rolling ring snapshot (trigger==14) places the on-time signal at block ≈14,
-// giving ≈2.2s early tolerance and ≈2.4s late tolerance within the 30-slot
-// scan window (FT8ScanCuda hardcodes time_off 0..29 regardless of num_blocks).
+// Rolling ring snapshot (trigger==14) places the on-time signal at block ≈18,
+// keeping signal start well within the scan kernel's time_off search range 0..29.
 #define FT8_CAPTURE_BLOCKS (FT8_NN + 27)
 
 // Width of the 20m audio extraction window in FT8 FFT bins.

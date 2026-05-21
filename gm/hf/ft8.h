@@ -1,12 +1,13 @@
 #ifndef _GM_HF_FT8_H_
 #define _GM_HF_FT8_H_
 
+#include <mutex>
 #include <zmq.hpp>
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
 #include "ft8_lib/common/monitor.h"
 
-// Forward-declare FT8Cuda so ft8.h doesn't pull in CUDA headers.
+// Forward-declare CUDA types so ft8.h doesn't pull in CUDA headers.
 namespace gm { namespace cuda { class FT8Cuda; } }
 
 namespace gm {
@@ -24,9 +25,10 @@ public:
     void stop() {
         setRunning(false);
     }
-    // publish one decoded message; called from decode()
+    // publish one decoded message; callable from any thread (zmq_mutex_ protected)
     void publishDecoded(const char* callsign, float freq_hz, float snr,
                         double unix_time, float time_offset);
+
 private:
     monitor_t mon;
     gm::buffer::BufferPosition<uint8_t>* inPos;
@@ -34,6 +36,7 @@ private:
 
     zmq::context_t zmq_ctx;
     zmq::socket_t  zmq_pub;
+    std::mutex     zmq_mutex_;
 };
 
 }
