@@ -391,7 +391,8 @@ namespace hf {
       inPos(inP),
       ft8cuda(ft8cuda_in),
       zmq_ctx(1),
-      zmq_pub(zmq_ctx, ZMQ_PUB) {
+      zmq_pub(zmq_ctx, ZMQ_PUB),
+      timing_log_(nullptr) {
         init_band_map();
         hashtable_init();
         load_monitor(&mon);
@@ -399,10 +400,20 @@ namespace hf {
         std::string endpoint = "tcp://*:" + std::to_string(zmq_port);
         zmq_pub.bind(endpoint);
         printf("FT8 ZMQ publisher bound to %s\n", endpoint.c_str());
+
+        timing_log_ = fopen("ft8_timing.csv", "a");
+        if (timing_log_) {
+            fseek(timing_log_, 0, SEEK_END);
+            if (ftell(timing_log_) == 0)
+                fprintf(timing_log_, "wall_clock,epoch_time,epoch_mod15,dt_sec,freq_hz,snr,callsign\n");
+            printf("FT8 timing log: ft8_timing.csv\n");
+        } else {
+            perror("FT8: cannot open ft8_timing.csv");
+        }
     }
 
     FT8::~FT8() {
-        // waterfall destroy
+        if (timing_log_) fclose(timing_log_);
     }
 
     void FT8::publishDecoded(const char* callsign, float freq_hz, float snr,
@@ -417,6 +428,16 @@ namespace hf {
         auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
         if (!result)
             fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+
+        if (timing_log_) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            double wall = ts.tv_sec + ts.tv_nsec * 1e-9;
+            fprintf(timing_log_, "%.3f,%.3f,%.3f,%.3f,%.0f,%.1f,%s\n",
+                    wall, unix_time, fmod(unix_time, 15.0),
+                    (double)time_offset, (double)freq_hz, (double)snr, callsign);
+            fflush(timing_log_);
+        }
     }
 
     void FT8::run() {

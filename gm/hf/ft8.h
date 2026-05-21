@@ -1,6 +1,7 @@
 #ifndef _GM_HF_FT8_H_
 #define _GM_HF_FT8_H_
 
+#include <cstdio>
 #include <mutex>
 #include <zmq.hpp>
 #include "gm/Thread.h"
@@ -37,6 +38,7 @@ private:
     zmq::context_t zmq_ctx;
     zmq::socket_t  zmq_pub;
     std::mutex     zmq_mutex_;
+    FILE*          timing_log_;
 };
 
 }

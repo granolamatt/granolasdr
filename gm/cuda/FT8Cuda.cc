@@ -266,6 +266,18 @@ int FT8Cuda::doCopy(uint64_t now) {
                            ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS);
             if (gotime) {
                 last_trigger_second = trigger_second;
+                {
+                    static uint64_t s_prev_ring = 0;
+                    static double   s_prev_sec  = 0.0;
+                    if (s_prev_sec > 0.0) {
+                        double dt = seconds - s_prev_sec;
+                        double rate = (double)(ring_write_idx - s_prev_ring) / dt;
+                        printf("TIMING: epoch=%.3f mod15=%.3f ring=%llu blocks/s=%.2f (nominal 6.25)\n",
+                               seconds, fmod(seconds, 15.0), (unsigned long long)ring_write_idx, rate);
+                    }
+                    s_prev_ring = ring_write_idx;
+                    s_prev_sec  = seconds;
+                }
                 printf("Processing buffer %u\n", buffer_number);
 
                 int decode_slot = buffer_number % BUFFERS;
