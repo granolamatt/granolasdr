@@ -2,12 +2,12 @@
 #include <unistd.h>
 #include <iostream>
 #include <string.h>
-#include <complex>
 #include <chrono>
 #include <thread>
 #include <vector>
 #include <algorithm>
-#include <numeric>
+#include <atomic>
+#include <mutex>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
@@ -165,9 +165,28 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
+// Continuous path: reads hashtable but never writes it (save_hash=nullptr).
+// Hashed callsigns first seen on the continuous path appear as hash codes
+// until the epoch path encounters them — acceptable for a supplemental decoder.
+ftx_callsign_hash_interface_t cont_hash_if = {
+    .lookup_hash = hashtable_lookup,
+    .save_hash = nullptr
+};
+
+static std::atomic<int> window_decode_count{0};
+static time_t           window_start_ts{0};
+
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             const gm::cuda::GpuScanResult* gpu = nullptr)
 {
+    // Per-15min decode count logging.
+    time_t now_ts = (time_t)tm_slot_start;
+    if (window_start_ts == 0) window_start_ts = now_ts - (now_ts % 900);
+    if (now_ts >= window_start_ts + 900) {
+        printf("[STATS] 15-min decodes: %d\n", window_decode_count.load());
+        window_decode_count.store(0);
+        window_start_ts += 900;
+    }
     const ftx_waterfall_t* wf = &mon->wf;
 
     auto t_find_start = std::chrono::steady_clock::now();
@@ -302,8 +321,10 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
             printf("DECODED: %s time_offset=%.3fs freq=%.1fHz snr=%.1f unix=%.0f\n", text, time_sec, freq_hz, snr, tm_slot_start);
-            if (unpack_status == FTX_MESSAGE_RC_OK && publisher)
+            if (unpack_status == FTX_MESSAGE_RC_OK && publisher) {
                 publisher->publishDecoded(text, freq_hz, snr, tm_slot_start, time_sec);
+                window_decode_count.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
     char band_summary[256] = "";
@@ -402,9 +423,36 @@ namespace hf {
             "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
             callsign, (double)freq_hz, (double)snr, unix_time, (double)time_offset);
         zmq::message_t msg(buf, len);
+        std::lock_guard<std::mutex> lk(zmq_mutex_);
         auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
         if (!result)
             fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+    }
+
+    void FT8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r) {
+        uint32_t n = *r.count;
+        if (n == 0) return;
+        n = std::min(n, gm::cuda::CONT_CAND_MAX);
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
+            ftx_message_t msg;
+            ftx_decode_status_t st;
+            if (!ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) continue;
+
+            char text[FTX_MAX_MESSAGE_LENGTH];
+            ftx_message_rc_t rc = ftx_message_decode(&msg, &cont_hash_if, text);
+            if (rc != FTX_MESSAGE_RC_OK) continue;
+
+            float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
+            float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
+            float snr      = (float)r.score[i] - 26.0f;
+
+            printf("CONT: %s freq=%.1fHz snr=%.1f unix=%.0f\n",
+                   text, freq_hz, snr, r.timestamp);
+            publishDecoded(text, freq_hz, snr, r.timestamp, time_sec);
+            window_decode_count.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     void FT8::run() {

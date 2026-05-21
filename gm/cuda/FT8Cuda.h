@@ -1,6 +1,8 @@
 #ifndef _GM_CUDA_FT8CUDA_H_
 #define _GM_CUDA_FT8CUDA_H_
 
+#include <atomic>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -27,6 +29,37 @@ struct GpuScanResult {
     std::vector<float>    log174; // FTX_LDPC_N floats per candidate, CPU-side
 };
 
+// Max candidates per continuous-path scan slot.  Much smaller than FT8_GPU_CAND_MAX
+// (500k) — at min_score=5 the continuous path typically finds <200 candidates/scan.
+static const uint32_t CONT_CAND_MAX = 5000;
+
+// One slot in the continuous Costas scan ring.  Each slot owns its own device and
+// pinned-host buffers so the GPU stream can overwrite slot[N+1] while the worker
+// thread is reading slot[N].
+struct ContScanResult {
+    // Device buffers (cudaMalloc, owned by this slot)
+    uint32_t* count_d{nullptr};
+    int32_t*  fo_d{nullptr};
+    uint8_t*  to_d{nullptr};
+    uint8_t*  ts_d{nullptr};
+    uint8_t*  fs_d{nullptr};
+    int16_t*  score_d{nullptr};
+    float*    log174_d{nullptr};
+
+    // Pinned host staging (cudaHostAlloc, owned by this slot)
+    uint32_t* count{nullptr};
+    int32_t*  fo{nullptr};
+    uint8_t*  to{nullptr};
+    uint8_t*  ts{nullptr};
+    uint8_t*  fs{nullptr};
+    int16_t*  score{nullptr};
+    float*    log174{nullptr};
+
+    double      timestamp{0.0};   // lastsecond when dispatched
+    cudaEvent_t event{};          // fires after all async D2H completes
+    std::atomic<bool> dispatched{false};
+};
+
 class FT8Cuda : public Thread {
 public:
     FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool enable_corpus = false);
@@ -42,6 +75,14 @@ public:
     const GpuScanResult& getGpuScanResult(int slot) const {
         return gpu_results[slot];
     }
+
+    // Register the callback invoked by the continuous-path worker thread for each
+    // scan with candidates.  Must be called before startContinuousScan().
+    void setDecodeCallback(std::function<void(ContScanResult&)> cb);
+
+    // Start the continuous-path worker thread.  Call after setDecodeCallback().
+    void startContinuousScan();
+
 private:
     cudaStream_t stream;
     cudaStream_t scan_stream;     // GPU sync score kernel
@@ -108,9 +149,24 @@ private:
     int  audio_ft8_bin;       // FT8 FFT bin for 20m FT8 dial (14.074 MHz)
     int  audio_ft8_bin_10m;   // FT8 FFT bin for 10m FT8 dial (28.074 MHz)
     int  audio_sample_rate;   // derived sample rate for the audio WAVs (Hz)
-    static const int AUDIO_RING_SLOTS = 212; // 2 × FT8_CAPTURE_BLOCKS, prevents snapshot/write race
+    static const int AUDIO_RING_SLOTS = 244; // ≥ 2 × FT8_CAPTURE_BLOCKS (120), prevents snapshot/write race
     std::complex<float>* audioBins_host;      // pinned ring: 20m, AUDIO_RING_SLOTS × FT8_AUDIO_BINS
     std::complex<float>* audioBins_host_10m;  // pinned ring: 10m, AUDIO_RING_SLOTS × FT8_AUDIO_BINS
+
+    // Continuous Costas scan path.
+    static const int CONTINUOUS_SLOTS = 8;
+    ContScanResult cont_slots[CONTINUOUS_SLOTS];
+    std::atomic<uint64_t> cont_write_idx{0};
+    std::atomic<uint64_t> cont_read_idx{0};
+    std::atomic<bool>     cont_scan_active{false};
+    std::thread           cont_worker_thread;
+    std::function<void(ContScanResult&)> decode_callback;
+    cudaStream_t cont_scan_stream{};
+    cudaEvent_t  cont_ring_ready{};   // records stream drain point for cont path
+
+    void allocContSlots();
+    void freeContSlots();
+    void contWorker();
 };
 }
 }
