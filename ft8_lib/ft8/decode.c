@@ -437,6 +437,30 @@ bool ftx_decode_from_llr(const float* log174_in, int max_iterations,
     return true;
 }
 
+// Decode from pre-decoded bits (GPU LDPC output). Skips BP LDPC; runs CRC only.
+// plain174: FTX_LDPC_N bits (0 or nonzero per byte).
+bool ftx_decode_from_bits(const uint8_t* plain174, ftx_message_t* message, ftx_decode_status_t* status)
+{
+    status->ldpc_errors = 0;
+
+    uint8_t a91[FTX_LDPC_K_BYTES];
+    pack_bits(plain174, FTX_LDPC_K, a91);
+
+    status->crc_extracted = ftx_extract_crc(a91);
+    a91[9]  &= 0xF8;
+    a91[10] &= 0x00;
+    status->crc_calculated = ftx_compute_crc(a91, 96 - 14);
+
+    if (status->crc_extracted != status->crc_calculated)
+        return false;
+
+    message->hash = status->crc_calculated;
+    for (int i = 0; i < 10; ++i)
+        message->payload[i] = a91[i];
+
+    return true;
+}
+
 // Public wrapper for ft8_extract_likelihood — used by VALIDATE_SOFT_SYMBOLS.
 void ftx_get_ft8_llr(const ftx_waterfall_t* wf, const ftx_candidate_t* cand, float* log174)
 {

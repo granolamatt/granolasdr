@@ -17,10 +17,12 @@ namespace hf {
 class FT8 : public Thread {
 
 public:
-    // ft8cuda is optional; non-null enables VALIDATE_GPU_CANDS comparison output.
+    // ft8cuda is optional; non-null enables GPU candidate path.
+    // use_gpu_ldpc enables the GPU QP-ADMM LDPC decoder (requires --gpu-ldpc flag).
     FT8(gm::buffer::BufferPosition<uint8_t>* inP,
         gm::cuda::FT8Cuda* ft8cuda = nullptr,
-        int zmq_port = 5580);
+        int zmq_port = 5580,
+        bool use_gpu_ldpc = false);
     ~FT8();
     void run();
     void stop() {
@@ -34,6 +36,7 @@ private:
     monitor_t mon;
     gm::buffer::BufferPosition<uint8_t>* inPos;
     gm::cuda::FT8Cuda* ft8cuda;
+    bool use_gpu_ldpc;
 
     zmq::context_t zmq_ctx;
     zmq::socket_t  zmq_pub;

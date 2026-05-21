@@ -12,6 +12,7 @@
 #include "gm/cuda/HostCuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
+#include "gm/cuda/FT8LdpcCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
 
@@ -26,7 +27,9 @@ struct GpuScanResult {
     std::vector<uint8_t>  ts;
     std::vector<uint8_t>  fs;
     std::vector<int16_t>  score;
-    std::vector<float>    log174; // FTX_LDPC_N floats per candidate, CPU-side
+    std::vector<float>    log174;   // FTX_LDPC_N floats per candidate
+    std::vector<uint8_t>  x_hat;   // FTX_LDPC_N bits per candidate (GPU LDPC output)
+    std::vector<bool>     parity;  // parity check result per candidate
 };
 
 class FT8Cuda : public Thread {
@@ -49,8 +52,10 @@ private:
     cudaStream_t stream;
     cudaStream_t scan_stream;     // GPU sync score kernel
     cudaStream_t transfer_stream; // D2H mag snapshot (device ring → CPU decode slot)
+    cudaStream_t ldpc_stream;     // QP-ADMM LDPC decode (low priority, NonBlocking)
     cudaEvent_t  ring_ready;      // fired when device ring D2D writes are committed
     cudaEvent_t  scan_done;       // fired when GPU scan kernel completes
+    cudaEvent_t  ldpc_done;       // fired when LDPC batch kernel completes
     cufftHandle rplan;
     double lastepoch;
     const static int BUFFERS = 2;      // number of decode slots for ft8.cc
@@ -83,6 +88,10 @@ private:
     // Soft symbol LLR buffers (Phase 4).
     float* log174_d;   // device: FT8_GPU_CAND_MAX * kFtxLdpcN floats
     float* log174;     // pinned host staging: same size
+
+    // GPU LDPC output buffers (device).
+    uint8_t* x_hat_d;   // FT8_LDPC_BATCH × FTX_LDPC_N decoded bits
+    bool*    parity_d;  // FT8_LDPC_BATCH parity flags
 
     // GPU candidate output buffers (device).
     int32_t*  gpu_cand_fo_d;

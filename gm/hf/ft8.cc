@@ -167,7 +167,7 @@ static std::atomic<int> window_decode_count{0};
 static time_t           window_start_ts{0};
 
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
-            const gm::cuda::GpuScanResult* gpu = nullptr)
+            const gm::cuda::GpuScanResult* gpu = nullptr, bool use_gpu_ldpc = false)
 {
     // Per-15min decode count logging.
     time_t now_ts = (time_t)tm_slot_start;
@@ -227,23 +227,54 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
     };
     std::vector<CandResult> results(num_candidates);
 
-    int num_threads = std::min(num_candidates,
-                               (int)std::thread::hardware_concurrency());
-    if (num_threads < 1) num_threads = 1;
+    bool using_gpu_ldpc = use_gpu_ldpc
+                          && gpu
+                          && !gpu->x_hat.empty()
+                          && !gpu->parity.empty()
+                          && (int)gpu->parity.size() >= num_candidates;
 
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads);
-    for (int t = 0; t < num_threads; ++t) {
-        workers.emplace_back([&, t, gpu]() {
-            for (int idx = t; idx < num_candidates; idx += num_threads) {
-                results[idx].ok = ftx_decode_from_llr(
-                    gpu->log174.data() + (size_t)idx * FTX_LDPC_N,
-                    kLDPC_iterations,
-                    &results[idx].message, &results[idx].status);
-            }
-        });
+    if (using_gpu_ldpc) {
+        // GPU already decoded all LDPC frames. For candidates that passed parity,
+        // skip LDPC entirely and run CRC only via ftx_decode_from_bits().
+        // Candidates that failed parity get results[idx].ok = false without CRC.
+        int num_threads = std::min(num_candidates,
+                                   (int)std::thread::hardware_concurrency());
+        if (num_threads < 1) num_threads = 1;
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads);
+        for (int t = 0; t < num_threads; ++t) {
+            workers.emplace_back([&, t]() {
+                for (int idx = t; idx < num_candidates; idx += num_threads) {
+                    if (!gpu->parity[idx]) {
+                        results[idx].ok = false;
+                        results[idx].status.ldpc_errors = 1;
+                        continue;
+                    }
+                    results[idx].ok = ftx_decode_from_bits(
+                        gpu->x_hat.data() + (size_t)idx * FTX_LDPC_N,
+                        &results[idx].message, &results[idx].status);
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+    } else {
+        int num_threads = std::min(num_candidates,
+                                   (int)std::thread::hardware_concurrency());
+        if (num_threads < 1) num_threads = 1;
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads);
+        for (int t = 0; t < num_threads; ++t) {
+            workers.emplace_back([&, t, gpu]() {
+                for (int idx = t; idx < num_candidates; idx += num_threads) {
+                    results[idx].ok = ftx_decode_from_llr(
+                        gpu->log174.data() + (size_t)idx * FTX_LDPC_N,
+                        kLDPC_iterations,
+                        &results[idx].message, &results[idx].status);
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
     }
-    for (auto& w : workers) w.join();
     auto t_ldpc_end = std::chrono::steady_clock::now();
 
     // Sequential: dedup and print (callsign hashtable is not thread-safe).
@@ -323,10 +354,11 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms ldpc=%.1fms\n",
+    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms %s=%.1fms\n",
            num_decoded, num_candidates,
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
+           using_gpu_ldpc ? "ldpc_gpu" : "ldpc",
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
 
     fflush(stdout);
@@ -387,9 +419,11 @@ namespace hf {
 
     FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP,
              gm::cuda::FT8Cuda* ft8cuda_in,
-             int zmq_port) :
+             int zmq_port,
+             bool use_gpu_ldpc_in) :
       inPos(inP),
       ft8cuda(ft8cuda_in),
+      use_gpu_ldpc(use_gpu_ldpc_in),
       zmq_ctx(1),
       zmq_pub(zmq_ctx, ZMQ_PUB),
       timing_log_(nullptr) {
@@ -459,7 +493,7 @@ namespace hf {
                 printf("Processing %f\n", seconds);
                 const gm::cuda::GpuScanResult* gpu_res =
                     ft8cuda ? &ft8cuda->getGpuScanResult(buff) : nullptr;
-                decode(&mon, seconds, this, gpu_res);
+                decode(&mon, seconds, this, gpu_res, use_gpu_ldpc);
                 monitor_reset(&mon);
                 now += 1;
             }

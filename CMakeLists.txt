@@ -41,6 +41,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/HostCuda.cu"
     "gm/cuda/FT8ScanCuda.cu"
     "gm/cuda/FT8SoftCuda.cu"
+    "gm/cuda/FT8LdpcCuda.cu"
     "gm/cuda/OverlapSave.cc"
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"
@@ -83,6 +84,9 @@ target_link_libraries (zmqclient ${LIBLOC} zmq)
 
 add_executable(decode_corpus decode_corpus.cc ft8_lib/fft/kiss_fft.c)
 target_link_libraries (decode_corpus ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
+
+add_executable(test_ldpc_sign test/test_ldpc_sign.cc)
+target_link_libraries(test_ldpc_sign gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
 
 
 #adb push cudatest /data/local/develop/

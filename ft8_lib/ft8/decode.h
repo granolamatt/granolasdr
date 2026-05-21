@@ -99,6 +99,10 @@ bool ftx_decode_candidate(const ftx_waterfall_t* power, const ftx_candidate_t* c
 /// @param[in] log174_in FTX_LDPC_N un-normalized LLRs (will be copied and normalized internally)
 bool ftx_decode_from_llr(const float* log174_in, int max_iterations, ftx_message_t* message, ftx_decode_status_t* status);
 
+/// Decode from pre-decoded bit array (GPU LDPC output). Skips LDPC; runs CRC only.
+/// @param[in] plain174 FTX_LDPC_N bits (0 or nonzero per byte), already LDPC-decoded
+bool ftx_decode_from_bits(const uint8_t* plain174, ftx_message_t* message, ftx_decode_status_t* status);
+
 /// Extract raw FT8 LLRs from waterfall for a candidate (used by VALIDATE_SOFT_SYMBOLS).
 void ftx_get_ft8_llr(const ftx_waterfall_t* wf, const ftx_candidate_t* cand, float* log174);
 

@@ -12,6 +12,7 @@
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
+#include "gm/cuda/FT8LdpcCuda.h"
 #include "gm/cuda/HostCuda.h"
 #include "ft8_lib/ft8/constants.h"
 #include "gm/buffer/BufferPosition.h"
@@ -39,6 +40,8 @@ magFT8(NULL),
 magFT8_ring_d(NULL),
 log174_d(NULL),
 log174(NULL),
+x_hat_d(NULL),
+parity_d(NULL),
 gpu_cand_fo_d(NULL),
 gpu_cand_to_d(NULL),
 gpu_cand_ts_d(NULL),
@@ -60,8 +63,17 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaStreamCreate(&stream));
         cuda_check_error(cudaStreamCreate(&scan_stream));
         cuda_check_error(cudaStreamCreate(&transfer_stream));
+        {
+            // LDPC stream: low priority, non-blocking so it doesn't inherit
+            // the default stream's implicit sync with other streams.
+            int lo_pri, hi_pri;
+            cudaDeviceGetStreamPriorityRange(&lo_pri, &hi_pri);
+            cuda_check_error(cudaStreamCreateWithPriority(
+                &ldpc_stream, cudaStreamNonBlocking, lo_pri));
+        }
         cuda_check_error(cudaEventCreateWithFlags(&scan_done,  cudaEventDisableTiming));
         cuda_check_error(cudaEventCreateWithFlags(&ring_ready, cudaEventDisableTiming));
+        cuda_check_error(cudaEventCreateWithFlags(&ldpc_done,  cudaEventDisableTiming));
 
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 1048576; // 2^20; 6553600 Hz composite / 6.25 Hz/bin
@@ -150,6 +162,15 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaMalloc((void**)&gpu_cand_score_d, FT8_GPU_CAND_MAX * sizeof(int16_t)));
         cuda_check_error(cudaMalloc((void**)&gpu_cand_count_d, sizeof(uint32_t)));
 
+        // GPU LDPC output buffers: FT8_LDPC_BATCH candidates × 174 bits each.
+        cuda_check_error(cudaMalloc((void**)&x_hat_d,
+            (size_t)FT8_LDPC_BATCH * FTX_LDPC_N * sizeof(uint8_t)));
+        cuda_check_error(cudaMalloc((void**)&parity_d,
+            (size_t)FT8_LDPC_BATCH * sizeof(bool)));
+
+        // Copy FT8 H-matrix into __constant__ memory.
+        ft8_ldpc_init_constants();
+
         // Now for the sub channels
         cufftResult fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
         if (fftRes) {
@@ -180,15 +201,19 @@ FT8Cuda::~FT8Cuda() {
     if (gpu_cand_fs_d) cudaFree(gpu_cand_fs_d);
     if (gpu_cand_score_d) cudaFree(gpu_cand_score_d);
     if (gpu_cand_count_d) cudaFree(gpu_cand_count_d);
+    if (x_hat_d) cudaFree(x_hat_d);
+    if (parity_d) cudaFree(parity_d);
     if (magFT8) cudaFreeHost(magFT8);
     if (audioBins_host) cudaFreeHost(audioBins_host);
     if (audioBins_host_10m) cudaFreeHost(audioBins_host_10m);
     cufftDestroy(rplan);
     cudaEventDestroy(scan_done);
     cudaEventDestroy(ring_ready);
+    cudaEventDestroy(ldpc_done);
     cudaStreamDestroy(stream);
     cudaStreamDestroy(scan_stream);
     cudaStreamDestroy(transfer_stream);
+    cudaStreamDestroy(ldpc_stream);
 }
 
 int FT8Cuda::doCopy(uint64_t now) {
@@ -311,19 +336,42 @@ int FT8Cuda::doCopy(uint64_t now) {
                     scan_stream);
                 cudaEventRecord(scan_done, scan_stream);
 
+                // Dispatch LDPC batch decode on ldpc_stream after scan_done.
+                // Launch with FT8_LDPC_BATCH regardless of actual candidate count —
+                // gpu_cand_count_d is still being written by the scan kernel.
+                // Extra blocks decode garbage LLRs (harmless; parity will be false).
+                cudaStreamWaitEvent(ldpc_stream, scan_done, 0);
+                ft8_ldpc_decode_batch(log174_d, x_hat_d, parity_d, ldpc_stream);
+                cudaEventRecord(ldpc_done, ldpc_stream);
+
                 if (last_snapshot_thread.joinable())
                     last_snapshot_thread.join();
 
                 double snap_seconds = seconds;
                 last_snapshot_thread = std::thread([this, decode_slot, next_buf, snap_start, snap_seconds]() {
-                    // Wait for Costas scan + soft symbols kernel (also ensures audio D2H done).
-                    cudaError_t ev;
-                    while ((ev = cudaEventQuery(scan_done)) == cudaErrorNotReady)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    if (ev != cudaSuccess)
-                        fprintf(stderr, "[EPOCH] CUDA event error: %s\n", cudaGetErrorString(ev));
+                    // Poll ldpc_done with a 500ms timeout.
+                    // ldpc_done fires after LDPC batch completes (which is after scan_done).
+                    bool ldpc_ok = false;
+                    {
+                        auto deadline = std::chrono::steady_clock::now()
+                                        + std::chrono::milliseconds(500);
+                        cudaError_t ev;
+                        while ((ev = cudaEventQuery(ldpc_done)) == cudaErrorNotReady) {
+                            if (std::chrono::steady_clock::now() >= deadline) {
+                                fprintf(stderr, "[EPOCH] ldpc_done timeout — skipping LDPC results\n");
+                                ev = cudaErrorNotReady; // treat as timeout
+                                goto ldpc_timeout;
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        }
+                        if (ev != cudaSuccess)
+                            fprintf(stderr, "[EPOCH] CUDA ldpc_done error: %s\n", cudaGetErrorString(ev));
+                        else
+                            ldpc_ok = true;
+                        ldpc_timeout:;
+                    }
 
-                    // Snapshot audio rings immediately after sync (before doCopy can overwrite).
+                    // Snapshot audio rings immediately after GPU work (before doCopy can overwrite).
                     std::vector<std::complex<float>> audio_snap, audio_snap_10m;
                     if (enable_corpus) {
                         const size_t snap_bins = (size_t)FT8_CAPTURE_BLOCKS * FT8_AUDIO_BINS;
@@ -360,11 +408,30 @@ int FT8Cuda::doCopy(uint64_t now) {
                         cudaMemcpy(res.score.data(), gpu_cand_score_d, n * sizeof(int16_t), cudaMemcpyDeviceToHost);
                         cudaMemcpy(log174, log174_d, (size_t)n * FTX_LDPC_N * sizeof(float), cudaMemcpyDeviceToHost);
                         memcpy(res.log174.data(), log174, (size_t)n * FTX_LDPC_N * sizeof(float));
+
+                        if (ldpc_ok) {
+                            res.x_hat.resize((size_t)n * FTX_LDPC_N);
+                            res.parity.resize(n);
+                            cudaMemcpy(res.x_hat.data(), x_hat_d,
+                                (size_t)n * FTX_LDPC_N * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+                            // bool* device → std::vector<bool>: copy via staging array
+                            std::vector<bool> par_tmp(n);
+                            bool* par_stage = new bool[n];
+                            cudaMemcpy(par_stage, parity_d, n * sizeof(bool), cudaMemcpyDeviceToHost);
+                            for (uint32_t i = 0; i < n; ++i) par_tmp[i] = par_stage[i];
+                            delete[] par_stage;
+                            res.parity = std::move(par_tmp);
+                        } else {
+                            res.x_hat.clear();
+                            res.parity.clear();
+                        }
                     } else {
                         res.log174.clear();
+                        res.x_hat.clear();
+                        res.parity.clear();
                     }
 
-                    // Signal ft8.cc: GPU scan + soft LLRs are ready.
+                    // Signal ft8.cc: GPU scan + soft LLRs (and LDPC if ldpc_ok) are ready.
                     rt8BufferPosition.setPosition(next_buf, 1);
 
                     // Corpus WAV write: IFFT each block's 1920 bins → real PCM → save_wav.
