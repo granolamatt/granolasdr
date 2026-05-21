@@ -165,12 +165,15 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
-// Continuous path: reads hashtable but never writes it (save_hash=nullptr).
-// Hashed callsigns first seen on the continuous path appear as hash codes
-// until the epoch path encounters them — acceptable for a supplemental decoder.
+// Continuous path reads hashtable but never writes it.
+// Hashed callsigns first seen here appear as hash codes until the epoch path
+// encounters them — acceptable for a supplemental decoder.
+// save_hash must be non-null (ft8_lib calls it unconditionally when hash_if != NULL).
+static void hashtable_add_noop(const char*, uint32_t) {}
+
 ftx_callsign_hash_interface_t cont_hash_if = {
     .lookup_hash = hashtable_lookup,
-    .save_hash = nullptr
+    .save_hash = hashtable_add_noop
 };
 
 static std::atomic<int> window_decode_count{0};
