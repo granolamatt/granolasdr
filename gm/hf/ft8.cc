@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
-#include <numeric>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
@@ -164,17 +163,6 @@ bool hashtable_lookup(ftx_callsign_hash_type_t hash_type, uint32_t hash, char* c
 ftx_callsign_hash_interface_t hash_if = {
     .lookup_hash = hashtable_lookup,
     .save_hash = hashtable_add
-};
-
-// Continuous path reads hashtable but never writes it.
-// Hashed callsigns first seen here appear as hash codes until the epoch path
-// encounters them — acceptable for a supplemental decoder.
-// save_hash must be non-null (ft8_lib calls it unconditionally when hash_if != NULL).
-static void hashtable_add_noop(const char*, uint32_t) {}
-
-ftx_callsign_hash_interface_t cont_hash_if = {
-    .lookup_hash = hashtable_lookup,
-    .save_hash = hashtable_add_noop
 };
 
 static std::atomic<int> window_decode_count{0};
@@ -431,47 +419,6 @@ namespace hf {
         auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
         if (!result)
             fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
-    }
-
-    void FT8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r) {
-        uint32_t n = *r.count;
-        if (n == 0) return;
-        n = std::min(n, gm::cuda::CONT_CAND_MAX);
-
-        // Sort by score descending and cap LDPC work at 200 candidates.
-        // Keeps CPU bounded (~20ms max) even when the Costas scan finds thousands of matches.
-        static const uint32_t kContLdpcMax = 200;
-        uint32_t take = std::min(n, kContLdpcMax);
-
-        std::vector<uint32_t> order(n);
-        std::iota(order.begin(), order.end(), 0);
-        if (n > take) {
-            std::partial_sort(order.begin(), order.begin() + take, order.end(),
-                              [&r](uint32_t a, uint32_t b) {
-                                  return r.score[a] > r.score[b];
-                              });
-        }
-
-        for (uint32_t ii = 0; ii < take; ++ii) {
-            uint32_t i = order[ii];
-            const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
-            ftx_message_t msg;
-            ftx_decode_status_t st;
-            if (!ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) continue;
-
-            char text[FTX_MAX_MESSAGE_LENGTH];
-            ftx_message_rc_t rc = ftx_message_decode(&msg, &cont_hash_if, text);
-            if (rc != FTX_MESSAGE_RC_OK) continue;
-
-            float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
-            float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
-            float snr      = (float)r.score[i] - 26.0f;
-
-            printf("CONT: %s freq=%.1fHz snr=%.1f unix=%.0f\n",
-                   text, freq_hz, snr, r.timestamp);
-            publishDecoded(text, freq_hz, snr, r.timestamp, time_sec);
-            window_decode_count.fetch_add(1, std::memory_order_relaxed);
-        }
     }
 
     void FT8::run() {

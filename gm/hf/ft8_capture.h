@@ -3,11 +3,10 @@
 
 #include "ft8_lib/ft8/constants.h"
 
-// Total blocks per FT8 decode window: 79 data symbols + 41 guard blocks.
-// Rolling ring snapshot (trigger==12) places the on-time signal at block ≈12,
-// giving ≈1.9s early tolerance and ≈6.6s late tolerance within the 41-slot
-// scan window (time_off search covers 0..40 extra slots beyond FT8_NN).
-#define FT8_CAPTURE_BLOCKS (FT8_NN + 41)
+// Total blocks per FT8 decode window: 79 data symbols + 27 guard blocks.
+// Rolling ring snapshot (trigger==14) places the on-time signal at block ≈18,
+// keeping signal start well within the scan kernel's time_off search range 0..29.
+#define FT8_CAPTURE_BLOCKS (FT8_NN + 27)
 
 // Width of the 20m audio extraction window in FT8 FFT bins.
 // 1920 bins × 6.25 Hz/bin ≈ 12 kHz, covering the full FT8 passband above dial.

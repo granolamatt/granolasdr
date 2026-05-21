@@ -42,11 +42,6 @@ int main(int argc, char* argv[]) {
 
     gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel);
 
-    ft8channel.setDecodeCallback([&ft8](gm::cuda::ContScanResult& r) {
-        ft8.decodeAndPublishContinuous(r);
-    });
-    ft8channel.startContinuousScan();
-
     ft8.start();
 
     while (true) {

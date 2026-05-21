@@ -9,8 +9,6 @@
 #include <cmath>
 #include <ctime>
 #include <sys/stat.h>
-#include <immintrin.h>
-
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
@@ -62,10 +60,8 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaStreamCreate(&stream));
         cuda_check_error(cudaStreamCreate(&scan_stream));
         cuda_check_error(cudaStreamCreate(&transfer_stream));
-        cuda_check_error(cudaStreamCreate(&cont_scan_stream));
-        cuda_check_error(cudaEventCreateWithFlags(&scan_done,      cudaEventDisableTiming));
-        cuda_check_error(cudaEventCreateWithFlags(&ring_ready,     cudaEventDisableTiming));
-        cuda_check_error(cudaEventCreateWithFlags(&cont_ring_ready, cudaEventDisableTiming));
+        cuda_check_error(cudaEventCreateWithFlags(&scan_done,  cudaEventDisableTiming));
+        cuda_check_error(cudaEventCreateWithFlags(&ring_ready, cudaEventDisableTiming));
 
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 1048576; // 2^20; 6553600 Hz composite / 6.25 Hz/bin
@@ -154,8 +150,6 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaMalloc((void**)&gpu_cand_score_d, FT8_GPU_CAND_MAX * sizeof(int16_t)));
         cuda_check_error(cudaMalloc((void**)&gpu_cand_count_d, sizeof(uint32_t)));
 
-        allocContSlots();
-
         // Now for the sub channels
         cufftResult fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
         if (fftRes) {
@@ -172,8 +166,6 @@ audioBins_host_10m(NULL) {
 }
 
 FT8Cuda::~FT8Cuda() {
-    cont_scan_active.store(false);
-    if (cont_worker_thread.joinable()) cont_worker_thread.join();
     if (last_snapshot_thread.joinable()) last_snapshot_thread.join();
     if (demodData_d) cudaFree(demodData_d);
     if (demodFT8_d) cudaFree(demodFT8_d);
@@ -191,15 +183,12 @@ FT8Cuda::~FT8Cuda() {
     if (magFT8) cudaFreeHost(magFT8);
     if (audioBins_host) cudaFreeHost(audioBins_host);
     if (audioBins_host_10m) cudaFreeHost(audioBins_host_10m);
-    freeContSlots();
     cufftDestroy(rplan);
     cudaEventDestroy(scan_done);
     cudaEventDestroy(ring_ready);
-    cudaEventDestroy(cont_ring_ready);
     cudaStreamDestroy(stream);
     cudaStreamDestroy(scan_stream);
     cudaStreamDestroy(transfer_stream);
-    cudaStreamDestroy(cont_scan_stream);
 }
 
 int FT8Cuda::doCopy(uint64_t now) {
@@ -265,73 +254,13 @@ int FT8Cuda::doCopy(uint64_t now) {
 
             ring_write_idx++;
 
-            // Commit all device ring writes; both epoch and continuous paths wait on this.
+            // Commit all device ring writes before epoch path reads.
             cudaEventRecord(ring_ready, stream);
-
-            // Continuous Costas scan: run every 8 blocks (~1.3 s) once the ring is full.
-            // Running every block saturated the GPU and caused HFChannelizer to fall behind.
-            if (cont_scan_active.load(std::memory_order_acquire) &&
-                ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS &&
-                (ring_write_idx % 8) == 0) {
-                uint64_t wi = cont_write_idx.load(std::memory_order_relaxed);
-                uint64_t ri = cont_read_idx.load(std::memory_order_acquire);
-                if (wi - ri >= (uint64_t)CONTINUOUS_SLOTS) {
-                    fprintf(stderr, "cont_slots full, dropping at ring_write_idx=%lu\n",
-                            (unsigned long)ring_write_idx);
-                } else {
-                    ContScanResult& slot = cont_slots[wi % CONTINUOUS_SLOTS];
-                    uint64_t cont_snap = ring_write_idx - FT8_CAPTURE_BLOCKS;
-                    int dev_cont_snap = (int)(cont_snap % RING_BLOCKS);
-
-                    cudaStreamWaitEvent(cont_scan_stream, ring_ready, 0);
-
-                    ft8_gpu_scan(
-                        magFT8_ring_d,
-                        dev_cont_snap, RING_BLOCKS,
-                        slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
-                        slot.score_d, slot.count_d, CONT_CAND_MAX,
-                        (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                        FT8_TIME_OSR, FT8_FREQ_OSR, /*min_score=*/5,
-                        cont_scan_stream);
-
-                    ft8_soft_symbols(
-                        magFT8_ring_d,
-                        dev_cont_snap, RING_BLOCKS,
-                        slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
-                        slot.count_d, slot.log174_d,
-                        (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                        FT8_TIME_OSR, FT8_FREQ_OSR,
-                        (int)CONT_CAND_MAX,
-                        cont_scan_stream);
-
-                    // Async D2H of all per-slot buffers into pinned host memory.
-                    cudaMemcpyAsync(slot.count,  slot.count_d,  sizeof(uint32_t),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.fo,     slot.fo_d,     CONT_CAND_MAX * sizeof(int32_t),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.to,     slot.to_d,     CONT_CAND_MAX * sizeof(uint8_t),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.ts,     slot.ts_d,     CONT_CAND_MAX * sizeof(uint8_t),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.fs,     slot.fs_d,     CONT_CAND_MAX * sizeof(uint8_t),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.score,  slot.score_d,  CONT_CAND_MAX * sizeof(int16_t),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.log174, slot.log174_d,
-                                    (size_t)CONT_CAND_MAX * kFtxLdpcN * sizeof(float),
-                                    cudaMemcpyDeviceToHost, cont_scan_stream);
-
-                    cudaEventRecord(slot.event, cont_scan_stream);
-                    slot.timestamp = lastsecond;
-                    slot.dispatched.store(true, std::memory_order_release);
-                    cont_write_idx.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
 
             // On trigger: snapshot the last FT8_CAPTURE_BLOCKS blocks into a decode slot.
             // Background thread does the ring→slot copy so doCopy never blocks.
             uint64_t trigger_second = (uint64_t)(seconds);
-            bool gotime = (trigger == 12 &&
+            bool gotime = (trigger == 14 &&
                            (seconds - trunc(seconds)) > 0.7 &&
                            trigger_second != last_trigger_second &&
                            ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS);
@@ -376,7 +305,11 @@ int FT8Cuda::doCopy(uint64_t now) {
                 double snap_seconds = seconds;
                 last_snapshot_thread = std::thread([this, decode_slot, next_buf, snap_start, snap_seconds]() {
                     // Wait for Costas scan + soft symbols kernel (also ensures audio D2H done).
-                    cudaEventSynchronize(scan_done);
+                    cudaError_t ev;
+                    while ((ev = cudaEventQuery(scan_done)) == cudaErrorNotReady)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    if (ev != cudaSuccess)
+                        fprintf(stderr, "[EPOCH] CUDA event error: %s\n", cudaGetErrorString(ev));
 
                     // Snapshot audio rings immediately after sync (before doCopy can overwrite).
                     std::vector<std::complex<float>> audio_snap, audio_snap_10m;
@@ -497,101 +430,6 @@ void FT8Cuda::run() {
             if (!numCopied) exit(-200);
 	        now += numCopied;
         }
-    }
-}
-
-void FT8Cuda::allocContSlots() {
-    const size_t log174_bytes = (size_t)CONT_CAND_MAX * kFtxLdpcN * sizeof(float);
-    for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
-        ContScanResult& s = cont_slots[i];
-        cuda_check_error(cudaMalloc((void**)&s.count_d,  sizeof(uint32_t)));
-        cuda_check_error(cudaMalloc((void**)&s.fo_d,     CONT_CAND_MAX * sizeof(int32_t)));
-        cuda_check_error(cudaMalloc((void**)&s.to_d,     CONT_CAND_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&s.ts_d,     CONT_CAND_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&s.fs_d,     CONT_CAND_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&s.score_d,  CONT_CAND_MAX * sizeof(int16_t)));
-        cuda_check_error(cudaMalloc((void**)&s.log174_d, log174_bytes));
-        cuda_check_error(cudaHostAlloc((void**)&s.count,  sizeof(uint32_t),      cudaHostAllocDefault));
-        cuda_check_error(cudaHostAlloc((void**)&s.fo,     CONT_CAND_MAX * sizeof(int32_t), cudaHostAllocDefault));
-        cuda_check_error(cudaHostAlloc((void**)&s.to,     CONT_CAND_MAX * sizeof(uint8_t), cudaHostAllocDefault));
-        cuda_check_error(cudaHostAlloc((void**)&s.ts,     CONT_CAND_MAX * sizeof(uint8_t), cudaHostAllocDefault));
-        cuda_check_error(cudaHostAlloc((void**)&s.fs,     CONT_CAND_MAX * sizeof(uint8_t), cudaHostAllocDefault));
-        cuda_check_error(cudaHostAlloc((void**)&s.score,  CONT_CAND_MAX * sizeof(int16_t), cudaHostAllocDefault));
-        cuda_check_error(cudaHostAlloc((void**)&s.log174, log174_bytes,           cudaHostAllocDefault));
-        cuda_check_error(cudaEventCreateWithFlags(&s.event, cudaEventDisableTiming));
-    }
-    printf("Continuous scan: %d slots × %.1f MB = %.1f MB device + %.1f MB pinned\n",
-           CONTINUOUS_SLOTS,
-           (double)(log174_bytes + CONT_CAND_MAX * (4+1+1+1+2)) / 1e6,
-           (double)CONTINUOUS_SLOTS * (log174_bytes + CONT_CAND_MAX * (4+1+1+1+2)) / 1e6,
-           (double)CONTINUOUS_SLOTS * (log174_bytes + CONT_CAND_MAX * (4+1+1+1+2)) / 1e6);
-}
-
-void FT8Cuda::freeContSlots() {
-    for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
-        ContScanResult& s = cont_slots[i];
-        if (s.count_d)  cudaFree(s.count_d);
-        if (s.fo_d)     cudaFree(s.fo_d);
-        if (s.to_d)     cudaFree(s.to_d);
-        if (s.ts_d)     cudaFree(s.ts_d);
-        if (s.fs_d)     cudaFree(s.fs_d);
-        if (s.score_d)  cudaFree(s.score_d);
-        if (s.log174_d) cudaFree(s.log174_d);
-        if (s.count)  cudaFreeHost(s.count);
-        if (s.fo)     cudaFreeHost(s.fo);
-        if (s.to)     cudaFreeHost(s.to);
-        if (s.ts)     cudaFreeHost(s.ts);
-        if (s.fs)     cudaFreeHost(s.fs);
-        if (s.score)  cudaFreeHost(s.score);
-        if (s.log174) cudaFreeHost(s.log174);
-        if (s.event)  cudaEventDestroy(s.event);
-    }
-}
-
-void FT8Cuda::setDecodeCallback(std::function<void(ContScanResult&)> cb) {
-    decode_callback = std::move(cb);
-}
-
-void FT8Cuda::startContinuousScan() {
-    cont_scan_active.store(true, std::memory_order_release);
-    cont_worker_thread = std::thread([this]() { contWorker(); });
-}
-
-void FT8Cuda::contWorker() {
-    uint64_t ri = 0;
-    while (cont_scan_active.load(std::memory_order_acquire)) {
-        uint64_t wi = cont_write_idx.load(std::memory_order_acquire);
-        if (ri == wi) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        ContScanResult& slot = cont_slots[ri % CONTINUOUS_SLOTS];
-        // Wait for dispatched flag (ensures timestamp is visible too).
-        while (!slot.dispatched.load(std::memory_order_acquire)) {
-            _mm_pause();
-        }
-        // Wait for GPU scan + soft symbols + D2H to complete.
-        // Poll with 1ms sleep so this thread doesn't pin a CPU core.
-        cudaError_t ev_err;
-        while ((ev_err = cudaEventQuery(slot.event)) == cudaErrorNotReady)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        if (ev_err != cudaSuccess)
-            fprintf(stderr, "[CONT] CUDA event error: %s\n", cudaGetErrorString(ev_err));
-
-        uint32_t n = *slot.count;
-        if (n > 0 && decode_callback) {
-            n = std::min(n, CONT_CAND_MAX);
-            *slot.count = n;
-            printf("[CONT] ring=%lu cands=%u\n", (unsigned long)(ri), n);
-            try {
-                decode_callback(slot);
-            } catch (...) {
-                fprintf(stderr, "[CONT] decode_callback threw exception at slot %lu\n",
-                        (unsigned long)(ri % CONTINUOUS_SLOTS));
-            }
-        }
-        slot.dispatched.store(false, std::memory_order_release);
-        cont_read_idx.store(++ri, std::memory_order_release);
     }
 }
 
