@@ -29,9 +29,8 @@ struct GpuScanResult {
     std::vector<float>    log174; // FTX_LDPC_N floats per candidate, CPU-side
 };
 
-// Max candidates per continuous-path scan slot.  Much smaller than FT8_GPU_CAND_MAX
-// (500k) — at min_score=5 the continuous path typically finds <200 candidates/scan.
-static const uint32_t CONT_CAND_MAX = 5000;
+// Max candidates per continuous-path scan slot.
+static const uint32_t CONT_CAND_MAX = 1000;
 
 // One slot in the continuous Costas scan ring.  Each slot owns its own device and
 // pinned-host buffers so the GPU stream can overwrite slot[N+1] while the worker

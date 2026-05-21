@@ -268,9 +268,11 @@ int FT8Cuda::doCopy(uint64_t now) {
             // Commit all device ring writes; both epoch and continuous paths wait on this.
             cudaEventRecord(ring_ready, stream);
 
-            // Continuous Costas scan: run on every block once the ring is full.
+            // Continuous Costas scan: run every 8 blocks (~1.3 s) once the ring is full.
+            // Running every block saturated the GPU and caused HFChannelizer to fall behind.
             if (cont_scan_active.load(std::memory_order_acquire) &&
-                ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS) {
+                ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS &&
+                (ring_write_idx % 8) == 0) {
                 uint64_t wi = cont_write_idx.load(std::memory_order_relaxed);
                 uint64_t ri = cont_read_idx.load(std::memory_order_acquire);
                 if (wi - ri >= (uint64_t)CONTINUOUS_SLOTS) {
@@ -569,7 +571,12 @@ void FT8Cuda::contWorker() {
             _mm_pause();
         }
         // Wait for GPU scan + soft symbols + D2H to complete.
-        cudaEventSynchronize(slot.event);
+        // Poll with 1ms sleep so this thread doesn't pin a CPU core.
+        cudaError_t ev_err;
+        while ((ev_err = cudaEventQuery(slot.event)) == cudaErrorNotReady)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (ev_err != cudaSuccess)
+            fprintf(stderr, "[CONT] CUDA event error: %s\n", cudaGetErrorString(ev_err));
 
         uint32_t n = *slot.count;
         if (n > 0 && decode_callback) {
