@@ -27,7 +27,7 @@
 namespace gm {
 namespace cuda {
 
-FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus) :
+FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, int min_score) :
 inPos(inP),
 buff_pos{0},
 ring_write_idx(0),
@@ -50,6 +50,7 @@ gpu_cand_score_d(NULL),
 gpu_cand_count_d(NULL),
 buffer_number(0),
 enable_corpus(corpus),
+min_score(min_score),
 audio_ft8_bin(0),
 audio_ft8_bin_10m(0),
 audio_sample_rate(0),
@@ -320,7 +321,7 @@ int FT8Cuda::doCopy(uint64_t now) {
                     gpu_cand_fo_d, gpu_cand_to_d, gpu_cand_ts_d, gpu_cand_fs_d,
                     gpu_cand_score_d, gpu_cand_count_d, FT8_GPU_CAND_MAX,
                     (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                    FT8_TIME_OSR, FT8_FREQ_OSR, /*min_score=*/5,
+                    FT8_TIME_OSR, FT8_FREQ_OSR, min_score,
                     scan_stream);
 
                 // Soft symbols kernel runs after Costas scan on the same stream.

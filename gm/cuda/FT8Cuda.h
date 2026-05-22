@@ -34,7 +34,7 @@ struct GpuScanResult {
 
 class FT8Cuda : public Thread {
 public:
-    FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool enable_corpus = false);
+    FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool enable_corpus = false, int min_score = 5);
     ~FT8Cuda();
     void run();
     void stop() {
@@ -103,6 +103,8 @@ private:
 
     // Host-side results per decode slot.
     GpuScanResult gpu_results[BUFFERS];
+
+    int min_score;
 
     std::vector<std::vector<uint32_t>> bins;
     size_t rfft_length;
