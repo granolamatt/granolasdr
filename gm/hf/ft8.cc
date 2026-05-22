@@ -175,6 +175,11 @@ static int    g_ldpc_capture_fd    = -1;
 static int    g_ldpc_capture_count = 0;
 constexpr int kLdpcCaptureMax      = 500;
 
+// Score log: set SCORE_LOG=/path/to/score_ldpc.csv to write per-candidate
+// (epoch_unix, score, parity, crc_ok) rows for offline threshold analysis.
+static FILE*            g_score_log      = nullptr;
+static std::once_flag   s_score_log_init;
+
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             const gm::cuda::GpuScanResult* gpu = nullptr, bool use_gpu_ldpc = false)
 {
@@ -187,6 +192,21 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             if (g_ldpc_capture_fd >= 0)
                 fprintf(stderr, "[LDPC CAPTURE] Writing up to %d LLR vectors to %s\n",
                         kLdpcCaptureMax, path);
+        }
+    });
+
+    // One-time score log init: SCORE_LOG=/path writes per-candidate
+    // (epoch_unix, costas_score, parity_pass, crc_ok) for threshold analysis.
+    std::call_once(s_score_log_init, []() {
+        const char* path = getenv("SCORE_LOG");
+        if (path) {
+            g_score_log = fopen(path, "a");
+            if (g_score_log) {
+                fseek(g_score_log, 0, SEEK_END);
+                if (ftell(g_score_log) == 0)
+                    fprintf(g_score_log, "epoch_unix,score,parity,crc_ok\n");
+                fprintf(stderr, "[SCORE LOG] Writing per-candidate score data to %s\n", path);
+            }
         }
     });
 
@@ -285,9 +305,34 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         }
         for (auto& w : workers) w.join();
         int pp = n_parity_pass.load(), az = n_allzero.load();
-        if (pp > 0)
-            fprintf(stderr, "[GPU LDPC] parity_pass=%d  all_zeros=%d (%.0f%%)\n",
-                    pp, az, 100.0 * az / pp);
+
+        // Per-epoch score histogram: buckets [5-9],[10-14],[15-19],[20-24],[25+].
+        // Shows parity-pass and crc-ok counts per bucket so we can see whether
+        // low-score candidates ever decode and whether the threshold is worth lowering.
+        constexpr int N_BKT = 5;
+        int bkt_total[N_BKT] = {}, bkt_pass[N_BKT] = {}, bkt_crc[N_BKT] = {};
+        int n_crc_ok = 0;
+        for (int idx = 0; idx < num_candidates; ++idx) {
+            int s = (int)gpu->score[idx];
+            int b = (s < 10) ? 0 : (s < 15) ? 1 : (s < 20) ? 2 : (s < 25) ? 3 : 4;
+            bkt_total[b]++;
+            if (gpu->parity[idx]) bkt_pass[b]++;
+            if (results[idx].ok)  { bkt_crc[b]++; n_crc_ok++; }
+            if (g_score_log)
+                fprintf(g_score_log, "%.0f,%d,%d,%d\n",
+                        tm_slot_start, s,
+                        (int)gpu->parity[idx], (int)results[idx].ok);
+        }
+        if (g_score_log) fflush(g_score_log);
+
+        const char* bnames[N_BKT] = {"[5-9]","[10-14]","[15-19]","[20-24]","[25+]"};
+        fprintf(stderr, "[GPU LDPC] n=%d  parity=%d  crc=%d  zeros=%d  |",
+                num_candidates, pp, n_crc_ok, az);
+        for (int b = 0; b < N_BKT; ++b)
+            if (bkt_total[b] > 0)
+                fprintf(stderr, "  %s p=%d/%d crc=%d",
+                        bnames[b], bkt_pass[b], bkt_total[b], bkt_crc[b]);
+        fprintf(stderr, "\n");
     } else {
         int num_threads = std::min(num_candidates,
                                    (int)std::thread::hardware_concurrency());
