@@ -21,6 +21,7 @@ int main(int argc, char* argv[]) {
     bool use_gpu_ldpc  = false;
     std::string ctrl_host = "127.0.0.1";
     int ctrl_port = 8080;
+    int min_score = 5;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--jtdx") == 0) {
@@ -31,6 +32,8 @@ int main(int argc, char* argv[]) {
             ctrl_host = argv[++i];
         } else if (strcmp(argv[i], "--control-port") == 0 && i + 1 < argc) {
             ctrl_port = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
+            min_score = std::stoi(argv[++i]);
         }
     }
 
@@ -40,7 +43,7 @@ int main(int argc, char* argv[]) {
     gm::cuda::HFChannelizer epochbuffer(mydsp.getRxBufferPosition(), ctrl_host, ctrl_port);
     epochbuffer.start();
 
-    gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer(), enable_corpus);
+    gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer(), enable_corpus, min_score);
     ft8channel.start();
 
     gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel, 5580, use_gpu_ldpc);
