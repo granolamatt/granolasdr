@@ -42,7 +42,7 @@ static bool run_test(const char* name,
 
     cudaStream_t s;
     cudaStreamCreate(&s);
-    ft8_ldpc_decode_batch(llr_batch_d, x_hat_batch_d, parity_batch_d, s);
+    ft8_ldpc_decode_batch(llr_batch_d, x_hat_batch_d, parity_batch_d, s, 1);
     cudaStreamSynchronize(s);
 
     bool got_parity = false;
