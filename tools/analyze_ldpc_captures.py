@@ -43,16 +43,104 @@ def normalize_llr(llr: np.ndarray) -> np.ndarray:
     return llr * scale
 
 
-def run_configs(llrs_norm_negated: np.ndarray, H_csr, H_csc, H_syndrome):
+def bp_sum_product(llrs: np.ndarray, H_csr, H_syndrome,
+                   max_iter: int = 25, return_iters: bool = False):
+    """
+    Sum-product BP matching ft8_lib's bp_decode algorithm exactly.
+    Input sign convention: positive = bit 1 likely (ft8_lib / FT8SoftCuda convention).
+    No negation needed — pass llrs_norm directly (not negated).
+    """
+    B, n = llrs.shape
+    m = H_csr.shape[0]
+    rows, cols = H_csr.nonzero()
+
+    # Adjacency tables matching ft8_lib kFTX_LDPC_Nm / kFTX_LDPC_Mn layout
+    check_edges = [[] for _ in range(m)]
+    var_edges   = [[] for _ in range(n)]
+    for e, (r, c) in enumerate(zip(rows, cols)):
+        check_edges[r].append((e, c))
+        var_edges[c].append((e, r))
+
+    tov = np.zeros((B, n, 3), dtype=np.float64)   # check→var messages (3 per variable)
+    var_edge_slot = np.full((n, 3), -1, dtype=np.int32)
+    for j in range(n):
+        for slot, (e, _) in enumerate(var_edges[j]):
+            var_edge_slot[j, slot] = e
+
+    iters = np.full(B, max_iter, dtype=np.int32)
+    converged_mask = np.zeros(B, dtype=bool)
+    best_x = np.zeros((B, n), dtype=np.int8)
+
+    eps = 1e-10
+
+    for it in range(max_iter):
+        # Hard decision: positive LLR → bit 1 (ft8_lib convention)
+        L_total = llrs.copy()
+        for j in range(n):
+            for slot in range(3):
+                L_total[:, j] += tov[:, j, slot]
+        x_hat = (L_total > 0).astype(np.int8)
+
+        synd = (x_hat.astype(np.int32) @ H_syndrome.T.toarray()) % 2
+        newly_ok = np.all(synd == 0, axis=1) & ~converged_mask
+        if newly_ok.any():
+            iters[newly_ok] = it + 1
+            converged_mask |= newly_ok
+            best_x[newly_ok] = x_hat[newly_ok]
+        if converged_mask.all():
+            break
+
+        # v2c messages: L_total - own tov contribution
+        # toc[check][slot] = tanh(-v2c / 2)
+        toc = {}
+        for i in range(m):
+            edges = check_edges[i]
+            d = len(edges)
+            toc_row = np.zeros((B, d))
+            for k, (e, j) in enumerate(edges):
+                slot = next(s for s, (ee, _) in enumerate(var_edges[j]) if ee == e)
+                v2c = L_total[:, j] - tov[:, j, slot]
+                toc_row[:, k] = np.tanh(np.clip(-v2c / 2, -10, 10))
+            toc[i] = toc_row
+
+        # c2v messages: product of all other tanh values, then -2*atanh
+        new_tov = np.zeros_like(tov)
+        for j in range(n):
+            for slot, (e, i) in enumerate(var_edges[j]):
+                edges = check_edges[i]
+                k = next(kk for kk, (ee, _) in enumerate(edges) if ee == e)
+                prod = np.ones(B)
+                for kk in range(len(edges)):
+                    if kk != k:
+                        prod *= toc[i][:, kk]
+                prod = np.clip(prod, -1 + eps, 1 - eps)
+                new_tov[:, j, slot] = -2 * np.arctanh(prod)
+        tov = new_tov
+
+    # Final hard decision for non-converged
+    L_total = llrs.copy()
+    for j in range(n):
+        for slot in range(3):
+            L_total[:, j] += tov[:, j, slot]
+    x_hat = (L_total > 0).astype(np.int8)
+    best_x[~converged_mask] = x_hat[~converged_mask]
+
+    if return_iters:
+        return best_x, iters
+    return best_x
+
+
+def run_configs(llrs_norm_negated: np.ndarray, llrs_norm: np.ndarray,
+                H_csr, H_csc, H_syndrome):
     """Run ADMM/BP at several configs, return (config_label, n_converged) list."""
     configs = [
-        ("ADMM rho=1.0 iter=50",  "qp",  dict(rho=1.0, max_iter=50)),
-        ("ADMM rho=1.0 iter=100", "qp",  dict(rho=1.0, max_iter=100)),
-        ("ADMM rho=1.0 iter=200", "qp",  dict(rho=1.0, max_iter=200)),
-        ("ADMM rho=0.5 iter=100", "qp",  dict(rho=0.5, max_iter=100)),
-        ("ADMM rho=0.5 iter=200", "qp",  dict(rho=0.5, max_iter=200)),
-        ("BP   iter=25",          "bp",  dict(max_iter=25)),
-        ("BP   iter=50",          "bp",  dict(max_iter=50)),
+        ("ADMM rho=1.0 iter=50",      "qp",  dict(rho=1.0, max_iter=50)),
+        ("ADMM rho=1.0 iter=100",     "qp",  dict(rho=1.0, max_iter=100)),
+        ("ADMM rho=1.0 iter=200",     "qp",  dict(rho=1.0, max_iter=200)),
+        ("MinSum α=0.75 iter=25",     "bp",  dict(max_iter=25, alpha=0.75)),
+        ("MinSum α=1.0  iter=25",     "bp",  dict(max_iter=25, alpha=1.0)),
+        ("SumProduct iter=25",        "sp",  dict(max_iter=25)),
+        ("SumProduct iter=50",        "sp",  dict(max_iter=50)),
     ]
 
     results = []
@@ -62,6 +150,11 @@ def run_configs(llrs_norm_negated: np.ndarray, H_csr, H_csc, H_syndrome):
             x_hat, iters = qp_admm.decode(
                 llrs_norm_negated, H_csr, H_csc, H_syndrome,
                 return_iters=True, **kwargs)
+        elif decoder == "sp":
+            # Sum-product uses positive=bit1 convention — pass un-negated
+            max_iter = kwargs.get("max_iter", 25)
+            x_hat, iters = bp_sum_product(
+                llrs_norm, H_csr, H_syndrome, max_iter=max_iter, return_iters=True)
         else:
             x_hat, iters = bp_baseline.decode(
                 llrs_norm_negated, H_csr, H_csc, H_syndrome,
@@ -121,7 +214,7 @@ def main():
     print("done.")
 
     print(f"\nRunning {B} vectors through ADMM/BP (float64)...\n")
-    results = run_configs(llrs_for_admm, H_csr, H_csc, H_syndrome)
+    results = run_configs(llrs_for_admm, llrs_norm, H_csr, H_csc, H_syndrome)
 
     print(f"{'Config':<25}  {'Conv':>5}  {'/ Total':>7}  {'Rate':>6}  {'Mean iters':>11}")
     print("-" * 64)
@@ -132,9 +225,10 @@ def main():
 
     print()
     print("Interpretation:")
-    print("  If ADMM rho=1.0 iter=100 rate ~100%  → GPU CUDA bug (needs fix or more iters)")
-    print("  If ADMM rate << BP rate (iter=25)    → algorithm limitation for this code/SNR")
-    print("  If rho=0.5 significantly better      → try lowering RHO in FT8LdpcCuda.cu")
+    print("  SumProduct ~100%                     → ft8_lib algorithm confirmed correct")
+    print("  MinSum << SumProduct                 → min-sum is a weak proxy for ft8_lib at this SNR")
+    print("  ADMM rate close to SumProduct        → algorithm is fine; investigate GPU kernel")
+    print("  ADMM rate << SumProduct              → algorithm limitation; consider GPU sum-product BP")
 
 
 if __name__ == "__main__":
