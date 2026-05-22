@@ -263,6 +263,7 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (num_threads < 1) num_threads = 1;
         std::vector<std::thread> workers;
         workers.reserve(num_threads);
+        std::atomic<int> n_parity_pass{0}, n_allzero{0};
         for (int t = 0; t < num_threads; ++t) {
             workers.emplace_back([&, t]() {
                 for (int idx = t; idx < num_candidates; idx += num_threads) {
@@ -271,13 +272,22 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
                         results[idx].status.ldpc_errors = 1;
                         continue;
                     }
+                    n_parity_pass.fetch_add(1, std::memory_order_relaxed);
+                    const uint8_t* bits = gpu->x_hat.data() + (size_t)idx * FTX_LDPC_N;
+                    bool allzero = true;
+                    for (int b = 0; b < FTX_LDPC_N && allzero; ++b)
+                        if (bits[b]) allzero = false;
+                    if (allzero) n_allzero.fetch_add(1, std::memory_order_relaxed);
                     results[idx].ok = ftx_decode_from_bits(
-                        gpu->x_hat.data() + (size_t)idx * FTX_LDPC_N,
-                        &results[idx].message, &results[idx].status);
+                        bits, &results[idx].message, &results[idx].status);
                 }
             });
         }
         for (auto& w : workers) w.join();
+        int pp = n_parity_pass.load(), az = n_allzero.load();
+        if (pp > 0)
+            fprintf(stderr, "[GPU LDPC] parity_pass=%d  all_zeros=%d (%.0f%%)\n",
+                    pp, az, 100.0 * az / pp);
     } else {
         int num_threads = std::min(num_candidates,
                                    (int)std::thread::hardware_concurrency());

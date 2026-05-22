@@ -132,7 +132,7 @@ def bp_sum_product(llrs: np.ndarray, H_csr, H_syndrome,
 
 def run_configs(llrs_norm_negated: np.ndarray, llrs_norm: np.ndarray,
                 H_csr, H_csc, H_syndrome):
-    """Run ADMM/BP at several configs, return (config_label, n_converged) list."""
+    """Run ADMM/BP at several configs, return result tuples."""
     configs = [
         ("ADMM rho=1.0 iter=50",      "qp",  dict(rho=1.0, max_iter=50)),
         ("ADMM rho=1.0 iter=100",     "qp",  dict(rho=1.0, max_iter=100)),
@@ -165,7 +165,13 @@ def run_configs(llrs_norm_negated: np.ndarray, llrs_norm: np.ndarray,
         converged = np.all(synd == 0, axis=1)
         n_conv = int(converged.sum())
         mean_iters = float(iters[converged].mean()) if n_conv > 0 else float('nan')
-        results.append((label, n_conv, B, mean_iters))
+
+        # All-zeros check: the zero codeword trivially satisfies every parity row
+        # (row sum = 0, even). ADMM converging to all-zeros is a false positive.
+        n_allzero = int(np.all(x_hat[converged] == 0, axis=1).sum()) if n_conv > 0 else 0
+        n_allone  = int(np.all(x_hat[converged] == 1, axis=1).sum()) if n_conv > 0 else 0
+
+        results.append((label, n_conv, B, mean_iters, n_allzero, n_allone))
     return results
 
 
@@ -194,8 +200,11 @@ def main():
 
     # Show LLR statistics
     all_var = np.var(llrs, axis=1)
-    print(f"LLR variance: min={all_var.min():.2f}  median={np.median(all_var):.2f}  max={all_var.max():.2f}")
-    print(f"LLR magnitude: mean={np.abs(llrs).mean():.3f}  max={np.abs(llrs).max():.3f}")
+    per_vec_mean = np.mean(llrs, axis=1)
+    print(f"LLR variance:    min={all_var.min():.2f}  median={np.median(all_var):.2f}  max={all_var.max():.2f}")
+    print(f"LLR magnitude:   mean={np.abs(llrs).mean():.3f}  max={np.abs(llrs).max():.3f}")
+    print(f"LLR global mean: {np.mean(llrs):.4f}  (per-vector: min={per_vec_mean.min():.3f}  "
+          f"median={np.median(per_vec_mean):.3f}  max={per_vec_mean.max():.3f})")
 
     # Apply normalization (same as CUDA kernel) and negate for Python ADMM sign convention.
     # FT8SoftCuda: positive = bit 1 likely.
@@ -232,19 +241,31 @@ def main():
     print(f"\nRunning {B} vectors through ADMM/BP (float64)...\n")
     results = run_configs(llrs_for_admm, llrs_norm, H_csr, H_csc, H_syndrome)
 
-    print(f"{'Config':<25}  {'Conv':>5}  {'/ Total':>7}  {'Rate':>6}  {'Mean iters':>11}")
-    print("-" * 64)
-    for label, n_conv, total, mean_iters in results:
+    print(f"{'Config':<25}  {'Conv':>5}  {'/ Total':>7}  {'Rate':>6}  {'Mean iters':>11}  {'AllZero':>8}  {'AllOne':>7}")
+    print("-" * 84)
+    for label, n_conv, total, mean_iters, n_allzero, n_allone in results:
         rate = 100.0 * n_conv / total if total > 0 else 0.0
         iters_str = f"{mean_iters:.1f}" if not np.isnan(mean_iters) else "n/a"
-        print(f"{label:<25}  {n_conv:>5}  {total:>7}  {rate:>5.1f}%  {iters_str:>11}")
+        flag = "  ← TRIVIAL" if n_conv > 0 and n_allzero == n_conv else ""
+        print(f"{label:<25}  {n_conv:>5}  {total:>7}  {rate:>5.1f}%  {iters_str:>11}  {n_allzero:>8}{flag}  {n_allone:>7}")
+
+    print()
+    n_allzero_admm = results[0][4]  # first ADMM config
+    n_conv_admm    = results[0][1]
+    if n_conv_admm > 0 and n_allzero_admm == n_conv_admm:
+        print("*** ALL ADMM 'convergences' are the trivial all-zeros codeword!")
+        print("    This is a false-positive: ADMM objective is wrong (sign or scaling).")
+    elif n_conv_admm > 0 and n_allzero_admm > n_conv_admm // 2:
+        print(f"*** {n_allzero_admm}/{n_conv_admm} ADMM convergences are all-zeros (trivial codeword).")
+        print("    Most ADMM 'decodes' are false positives.")
 
     print()
     print("Interpretation:")
     print("  SumProduct ~100%                     → ft8_lib algorithm confirmed correct")
     print("  MinSum << SumProduct                 → min-sum is a weak proxy for ft8_lib at this SNR")
+    print("  ADMM AllZero == Conv                 → ADMM converging to trivial codeword (bug)")
     print("  ADMM rate close to SumProduct        → algorithm is fine; investigate GPU kernel")
-    print("  ADMM rate << SumProduct              → algorithm limitation; consider GPU sum-product BP")
+    print("  ADMM rate << SumProduct              → algorithm limitation")
 
 
 if __name__ == "__main__":
