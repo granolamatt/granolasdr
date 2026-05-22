@@ -275,15 +275,9 @@ __global__ void qp_admm_ft8_kernel(
         const float dj = RHO * (float)g_deg_v[tid];
         sx[tid] = fmaxf(eps, fminf(1.0f - eps, -qj / dj));
     }
-    // u starts at zero; z warm-starts from x so the first z-update is a small correction
-    // rather than projecting from 0.5. Cuts iterations needed for clean signals in half.
-    for (int idx = tid; idx < M * D_MAX; idx += BLOCK)
+    for (int idx = tid; idx < M * D_MAX; idx += BLOCK) {
+        sz[idx] = 0.0f;
         su[idx] = 0.0f;
-    __syncthreads();
-    if (tid < M) {
-        const int d = g_check_deg[tid];
-        for (int k = 0; k < d; ++k)
-            sz[tid * D_MAX + k] = sx[g_check_var_j[tid][k]];
     }
     if (tid == 0) sc_ok = false;
     __syncthreads();
