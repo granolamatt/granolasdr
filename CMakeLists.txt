@@ -88,6 +88,9 @@ target_link_libraries (decode_corpus ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.
 add_executable(test_ldpc_sign test/test_ldpc_sign.cc)
 target_link_libraries(test_ldpc_sign gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
 
+add_executable(test_ldpc_captures test/test_ldpc_captures.c)
+target_link_libraries(test_ldpc_captures ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
+
 
 #adb push cudatest /data/local/develop/
 

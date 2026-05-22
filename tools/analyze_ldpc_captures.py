@@ -204,7 +204,23 @@ def main():
     llrs_norm = np.array([normalize_llr(llr) for llr in llrs], dtype=np.float64)
     norm_var = np.var(llrs_norm, axis=1)
     print(f"After normalization: var mean={norm_var.mean():.2f} (target ~24)")
-    llrs_for_admm = -llrs_norm  # negate for Python sign convention
+
+    # ---- Hard-decision sanity check (no decoding) ----
+    # ft8_lib convention: positive LLR = bit 1.  Hard-decide on RAW and NORMALIZED LLRs.
+    # Any correctly-formatted capture should have some fraction passing parity with
+    # raw hard decisions alone (strong signals already form valid codewords).
+    # ~0% with raw hard decisions = strong sign of sign or ordering problem.
+    print("\n--- Hard-decision sanity (no LDPC decoding) ---")
+    H_csr_tmp = ft8_code.build_parity_check_matrix()
+    H_np = H_csr_tmp.toarray().astype(np.int32)
+    for label, llr_arr in [("raw (un-normalized)", llrs), ("normalized", llrs_norm)]:
+        bits = (llr_arr > 0).astype(np.int32)  # positive = bit 1 (ft8_lib convention)
+        synd = (bits @ H_np.T) % 2
+        n_pass = int(np.all(synd == 0, axis=1).sum())
+        print(f"  Hard decision on {label}: {n_pass}/{B} pass parity ({100*n_pass/B:.1f}%)")
+    print()
+
+    llrs_for_admm = -llrs_norm  # negate for Python sign convention (positive=bit0)
 
     # Build FT8 H matrix
     print("Building FT8 H matrix...", end=" ", flush=True)
