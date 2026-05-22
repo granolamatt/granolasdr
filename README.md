@@ -119,7 +119,7 @@ Frame size: 968 bytes. Frame rate: 200 Hz (240 × 200 = 48,000 samples/sec).
 
 ### Hardware
 
-- [RX888 MkII](https://github.com/RXToolsRX888/RX888) or compatible
+- [RX888 MkII](https://github.com/TAPR/RX888) or compatible
 - NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
 - NVIDIA GPU with ≥ 8 GB VRAM (GPU ring buffer ~3.4 GB + LLR buffers ~140 MB)
 - 16 GB system RAM recommended (~70 MB pinned for LLR staging; rest for OS/driver overhead)
@@ -235,7 +235,7 @@ python3 psk_uploader.py --call W1AW --grid DM78
 | `--send-test-packet` | off | Send one dummy packet and exit |
 
 Uploads are batched and sent every 5 minutes as required by PSKReporter.
-Verify your reports appeared: https://pskreporter.info/analyze.html
+Verify your reports appeared: https://pskreporter.info/pskmap.html
 
 ## Python tools
 
