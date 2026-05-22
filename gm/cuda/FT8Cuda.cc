@@ -335,32 +335,36 @@ int FT8Cuda::doCopy(uint64_t now) {
                     FT8_GPU_CAND_MAX,
                     scan_stream);
                 cudaEventRecord(scan_done, scan_stream);
-
-                // Dispatch LDPC batch decode on ldpc_stream after scan_done.
-                // Pass gpu_cand_count_d as a device pointer; each block checks it
-                // and exits immediately if blockIdx.x >= *n_cand_d.  No CPU-side
-                // sync needed — ldpc_stream already waits for scan_done, which
-                // guarantees the count is final before any block reads it.
-                cudaStreamWaitEvent(ldpc_stream, scan_done, 0);
-                ft8_ldpc_decode_batch(gpu_cand_count_d, log174_d, x_hat_d, parity_d, ldpc_stream);
-                cudaEventRecord(ldpc_done, ldpc_stream);
+                // LDPC dispatch is handled inside the snapshot thread so the
+                // main audio loop never blocks on a GPU event.
 
                 if (last_snapshot_thread.joinable())
                     last_snapshot_thread.join();
 
                 double snap_seconds = seconds;
                 last_snapshot_thread = std::thread([this, decode_slot, next_buf, snap_start, snap_seconds]() {
-                    // Poll ldpc_done with a 500ms timeout.
-                    // ldpc_done fires after LDPC batch completes (which is after scan_done).
+                    // Wait for the scan to finish on this thread (not the main loop thread).
+                    // Then dispatch LDPC with the actual candidate count so we don't flood
+                    // the GPU scheduler with hundreds of thousands of empty blocks.
+                    cudaEventSynchronize(scan_done);
+                    uint32_t n = 0;
+                    cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+                    n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
+
+                    bool ldpc_launched = (n > 0);
+                    if (ldpc_launched) {
+                        ft8_ldpc_decode_batch(n, log174_d, x_hat_d, parity_d, ldpc_stream);
+                        cudaEventRecord(ldpc_done, ldpc_stream);
+                    }
+
                     bool ldpc_ok = false;
-                    {
+                    if (ldpc_launched) {
                         auto deadline = std::chrono::steady_clock::now()
                                         + std::chrono::milliseconds(500);
                         cudaError_t ev;
                         while ((ev = cudaEventQuery(ldpc_done)) == cudaErrorNotReady) {
                             if (std::chrono::steady_clock::now() >= deadline) {
                                 fprintf(stderr, "[EPOCH] ldpc_done timeout — skipping LDPC results\n");
-                                ev = cudaErrorNotReady; // treat as timeout
                                 goto ldpc_timeout;
                             }
                             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -389,9 +393,7 @@ int FT8Cuda::doCopy(uint64_t now) {
                         }
                     }
 
-                    uint32_t n = 0;
-                    cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-                    n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
+                    // n is already set from the D2H above
 
                     GpuScanResult& res = gpu_results[decode_slot];
                     res.count = n;
