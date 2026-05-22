@@ -1,0 +1,550 @@
+// QP-ADMM LDPC batch decoder for FT8 (174,91) — stream-aware GPU launcher.
+//
+// Adapted from /home/matt/workarea/qp-admm/src/ldpc/qp_admm_cuda.cu.
+// Sign fix (critical): FT8SoftCuda produces positive LLR = bit 1 likely,
+// but QP-ADMM expects positive LLR = bit 0 likely.  Both sites that compute
+// qj = llr_b[tid] * 0.5f are negated → qj = -llr_b[tid] * 0.5f.
+//
+// Architecture: one block per candidate, 192 threads per block.
+//   x-update  : threads 0–173
+//   z-update  : threads 0–82  (parity polytope projection via bisection)
+//   u-update  : threads 0–82
+//   parity    : thread 0 (serial ~290 ops)
+
+#include <cuda_runtime.h>
+#include <cstdint>
+#include "gm/cuda/FT8LdpcCuda.h"
+
+namespace {
+constexpr int N     = 174;
+constexpr int M     = 83;
+constexpr int D_MAX = 7;
+constexpr int BLOCK = 192;
+constexpr int MAX_ITER = 100;
+constexpr float RHO    = 1.0f;
+
+// Shared memory per block: s_scale[1] + sx[174] + sz[83*7] + su[83*7] + sc_ok
+//   = 4 + 696 + 2324 + 2324 + 4 = 5352 bytes
+constexpr int SMEM_BYTES = 4 + N * 4 + M * D_MAX * 4 + M * D_MAX * 4 + 4;
+static_assert(SMEM_BYTES <= 49152, "shared memory exceeds 48 KB limit");
+} // namespace
+
+// H-matrix constant memory (~7.4 KB, cached per SM).
+__constant__ int g_check_var_j[M][D_MAX];
+__constant__ int g_check_deg[M];
+__constant__ int g_var_adj[N][3][2];
+__constant__ int g_deg_v[N];
+
+// H-matrix data for FT8 (174,91) — from qp_admm.hpp HMatrixData<174,83,7,3>.
+static const int k_check_var_j[83][7] = {
+    {  3,  30,  58,  90,  91,  95, 152},
+    {  4,  31,  59,  92, 114, 145,  -1},
+    {  5,  23,  60,  93, 121, 150,  -1},
+    {  6,  32,  61,  94,  95, 142,  -1},
+    {  7,  24,  62,  82,  92,  95, 147},
+    {  5,  31,  63,  96, 125, 137,  -1},
+    {  4,  33,  64,  77,  97, 106, 153},
+    {  8,  34,  65,  98, 138, 145,  -1},
+    {  9,  35,  66,  99, 106, 125,  -1},
+    { 10,  36,  66,  86, 100, 138, 157},
+    { 11,  37,  67, 101, 104, 154,  -1},
+    { 12,  38,  68, 102, 148, 161,  -1},
+    {  7,  39,  69,  81, 103, 113, 144},
+    { 13,  40,  70,  87, 101, 122, 155},
+    { 14,  41,  58, 105, 122, 158,  -1},
+    {  0,  32,  71, 105, 106, 156,  -1},
+    { 15,  42,  72, 107, 140, 159,  -1},
+    { 16,  36,  73,  80, 108, 130, 153},
+    { 10,  43,  74, 109, 120, 165,  -1},
+    { 44,  54,  63, 110, 129, 160, 172},
+    {  7,  45,  70, 111, 118, 165,  -1},
+    { 17,  35,  75,  88, 112, 113, 142},
+    { 18,  37,  76, 103, 115, 162,  -1},
+    { 19,  46,  69,  91, 137, 164,  -1},
+    {  1,  47,  73, 112, 127, 159,  -1},
+    { 20,  44,  77,  82, 116, 120, 150},
+    { 21,  46,  57, 117, 126, 163,  -1},
+    { 15,  38,  61, 111, 133, 157,  -1},
+    { 22,  42,  78, 119, 130, 144,  -1},
+    { 18,  34,  58,  72, 109, 124, 160},
+    { 19,  35,  62,  93, 135, 160,  -1},
+    { 13,  30,  78,  97, 131, 163,  -1},
+    {  2,  43,  79, 123, 126, 168,  -1},
+    { 18,  45,  80, 116, 134, 166,  -1},
+    {  6,  48,  57,  89,  99, 104, 167},
+    { 11,  49,  60, 117, 118, 143,  -1},
+    { 12,  50,  63, 113, 117, 156,  -1},
+    { 23,  51,  75, 128, 147, 148,  -1},
+    { 24,  52,  68,  89, 100, 129, 155},
+    { 19,  45,  64,  79, 119, 139, 169},
+    { 20,  53,  76,  99, 139, 170,  -1},
+    { 34,  81, 132, 141, 170, 173,  -1},
+    { 13,  29,  82, 112, 124, 169,  -1},
+    {  3,  28,  67, 119, 133, 172,  -1},
+    {  0,   3,  51,  56,  85, 135, 151},
+    { 25,  50,  55,  90, 121, 136, 167},
+    { 51,  83, 109, 114, 144, 167,  -1},
+    {  6,  49,  80,  98, 131, 172,  -1},
+    { 22,  54,  66,  94, 171, 173,  -1},
+    { 25,  40,  76, 108, 140, 147,  -1},
+    {  1,  26,  40,  60,  61, 114, 132},
+    { 26,  39,  55, 123, 124, 125,  -1},
+    { 17,  48,  54, 123, 140, 166,  -1},
+    {  5,  32,  84, 107, 115, 155,  -1},
+    { 27,  47,  69,  84, 104, 128, 157},
+    {  8,  53,  62, 130, 146, 154,  -1},
+    { 21,  52,  67, 108, 120, 173,  -1},
+    {  2,  12,  47,  77,  94, 122,  -1},
+    { 30,  68, 132, 149, 154, 168,  -1},
+    { 11,  42,  65,  88,  96, 134, 158},
+    {  4,  38,  74, 101, 135, 166,  -1},
+    {  1,  53,  85, 100, 134, 163,  -1},
+    { 14,  55,  86, 107, 118, 170,  -1},
+    {  9,  43,  81,  90, 110, 143, 148},
+    { 22,  33,  70,  93, 126, 152,  -1},
+    { 10,  48,  87,  91, 141, 156,  -1},
+    { 28,  33,  86,  96, 146, 161,  -1},
+    { 29,  49,  59,  85, 136, 141, 161},
+    {  9,  52,  65,  83, 111, 127, 164},
+    { 21,  56,  84,  92, 139, 158,  -1},
+    { 27,  31,  71, 102, 131, 165,  -1},
+    { 27,  28,  83,  87, 116, 142, 149},
+    {  0,  25,  44,  79, 127, 146,  -1},
+    { 16,  26,  88, 102, 115, 152,  -1},
+    { 50,  56,  97, 162, 164, 171,  -1},
+    { 20,  36,  72, 137, 151, 168,  -1},
+    { 15,  46,  75, 129, 136, 153,  -1},
+    {  2,  23,  29,  71, 103, 138,  -1},
+    {  8,  39,  89, 105, 133, 150,  -1},
+    { 14,  57,  59,  73, 110, 149, 162},
+    { 17,  41,  78, 143, 145, 151,  -1},
+    { 24,  37,  64,  98, 121, 159,  -1},
+    { 16,  41,  74, 128, 169, 171,  -1}
+};
+static const int k_check_deg[83] = {
+    7, 6, 6, 6, 7, 6, 7, 6, 6, 7, 6, 6, 7, 7, 6, 6, 6, 7, 6, 7,
+    6, 7, 6, 6, 6, 7, 6, 6, 6, 7, 6, 6, 6, 6, 7, 6, 6, 6, 7, 7,
+    6, 6, 6, 6, 7, 7, 6, 6, 6, 6, 7, 6, 6, 6, 7, 6, 6, 6, 6, 7,
+    6, 6, 6, 7, 6, 6, 6, 7, 7, 6, 6, 7, 6, 6, 6, 6, 6, 6, 6, 7,
+    6, 6, 6
+};
+static const int k_var_adj[174][3][2] = {
+    {{15,0}, {44,0}, {72,0}},   {{24,0}, {50,0}, {61,0}},
+    {{32,0}, {57,0}, {77,0}},   {{0,0}, {43,0}, {44,1}},
+    {{1,0}, {6,0}, {60,0}},     {{2,0}, {5,0}, {53,0}},
+    {{3,0}, {34,0}, {47,0}},    {{4,0}, {12,0}, {20,0}},
+    {{7,0}, {55,0}, {78,0}},    {{8,0}, {63,0}, {68,0}},
+    {{9,0}, {18,0}, {65,0}},    {{10,0}, {35,0}, {59,0}},
+    {{11,0}, {36,0}, {57,1}},   {{13,0}, {31,0}, {42,0}},
+    {{14,0}, {62,0}, {79,0}},   {{16,0}, {27,0}, {76,0}},
+    {{17,0}, {73,0}, {82,0}},   {{21,0}, {52,0}, {80,0}},
+    {{22,0}, {29,0}, {33,0}},   {{23,0}, {30,0}, {39,0}},
+    {{25,0}, {40,0}, {75,0}},   {{26,0}, {56,0}, {69,0}},
+    {{28,0}, {48,0}, {64,0}},   {{2,1}, {37,0}, {77,1}},
+    {{4,1}, {38,0}, {81,0}},    {{45,0}, {49,0}, {72,1}},
+    {{50,1}, {51,0}, {73,1}},   {{54,0}, {70,0}, {71,0}},
+    {{43,1}, {66,0}, {71,1}},   {{42,1}, {67,0}, {77,2}},
+    {{0,1}, {31,1}, {58,0}},    {{1,1}, {5,1}, {70,1}},
+    {{3,1}, {15,1}, {53,1}},    {{6,1}, {64,1}, {66,1}},
+    {{7,1}, {29,1}, {41,0}},    {{8,1}, {21,1}, {30,1}},
+    {{9,1}, {17,1}, {75,1}},    {{10,1}, {22,1}, {81,1}},
+    {{11,1}, {27,1}, {60,1}},   {{12,1}, {51,1}, {78,1}},
+    {{13,1}, {49,1}, {50,2}},   {{14,1}, {80,1}, {82,1}},
+    {{16,1}, {28,1}, {59,1}},   {{18,1}, {32,1}, {63,1}},
+    {{19,0}, {25,1}, {72,2}},   {{20,1}, {33,1}, {39,1}},
+    {{23,1}, {26,1}, {76,1}},   {{24,1}, {54,1}, {57,2}},
+    {{34,1}, {52,1}, {65,1}},   {{35,1}, {47,1}, {67,1}},
+    {{36,1}, {45,1}, {74,0}},   {{37,1}, {44,2}, {46,0}},
+    {{38,1}, {56,1}, {68,1}},   {{40,1}, {55,1}, {61,1}},
+    {{19,1}, {48,1}, {52,2}},   {{45,2}, {51,2}, {62,1}},
+    {{44,3}, {69,1}, {74,1}},   {{26,2}, {34,2}, {79,1}},
+    {{0,2}, {14,2}, {29,2}},    {{1,2}, {67,2}, {79,2}},
+    {{2,2}, {35,2}, {50,3}},    {{3,2}, {27,2}, {50,4}},
+    {{4,2}, {30,2}, {55,2}},    {{5,2}, {19,2}, {36,2}},
+    {{6,2}, {39,2}, {81,2}},    {{7,2}, {59,2}, {68,2}},
+    {{8,2}, {9,2}, {48,2}},     {{10,2}, {43,2}, {56,2}},
+    {{11,2}, {38,2}, {58,1}},   {{12,2}, {23,2}, {54,2}},
+    {{13,2}, {20,2}, {64,2}},   {{15,2}, {70,2}, {77,3}},
+    {{16,2}, {29,3}, {75,2}},   {{17,2}, {24,2}, {79,3}},
+    {{18,2}, {60,2}, {82,2}},   {{21,2}, {37,2}, {76,2}},
+    {{22,2}, {40,2}, {49,2}},   {{6,3}, {25,2}, {57,3}},
+    {{28,2}, {31,2}, {80,2}},   {{32,2}, {39,3}, {72,3}},
+    {{17,3}, {33,2}, {47,2}},   {{12,3}, {41,1}, {63,2}},
+    {{4,3}, {25,3}, {42,2}},    {{46,1}, {68,3}, {71,2}},
+    {{53,2}, {54,3}, {69,2}},   {{44,4}, {61,2}, {67,3}},
+    {{9,3}, {62,2}, {66,2}},    {{13,3}, {65,2}, {71,3}},
+    {{21,3}, {59,3}, {73,2}},   {{34,3}, {38,3}, {78,2}},
+    {{0,3}, {45,3}, {63,3}},    {{0,4}, {23,3}, {65,3}},
+    {{1,3}, {4,4}, {69,3}},     {{2,3}, {30,3}, {64,3}},
+    {{3,3}, {48,3}, {57,4}},    {{0,5}, {3,4}, {4,5}},
+    {{5,3}, {59,4}, {66,3}},    {{6,4}, {31,3}, {74,2}},
+    {{7,3}, {47,3}, {81,3}},    {{8,3}, {34,4}, {40,3}},
+    {{9,4}, {38,4}, {61,3}},    {{10,3}, {13,4}, {60,3}},
+    {{11,3}, {70,3}, {73,3}},   {{12,4}, {22,3}, {77,4}},
+    {{10,4}, {34,5}, {54,4}},   {{14,3}, {15,3}, {78,3}},
+    {{6,5}, {8,4}, {15,4}},     {{16,3}, {53,3}, {62,3}},
+    {{17,4}, {49,3}, {56,3}},   {{18,3}, {29,4}, {46,2}},
+    {{19,3}, {63,4}, {79,4}},   {{20,3}, {27,3}, {68,4}},
+    {{21,4}, {24,3}, {42,3}},   {{12,5}, {21,5}, {36,3}},
+    {{1,4}, {46,3}, {50,5}},    {{22,4}, {53,4}, {73,4}},
+    {{25,4}, {33,3}, {71,4}},   {{26,3}, {35,3}, {36,4}},
+    {{20,4}, {35,4}, {62,4}},   {{28,3}, {39,4}, {43,3}},
+    {{18,4}, {25,5}, {56,4}},   {{2,4}, {45,4}, {81,4}},
+    {{13,5}, {14,4}, {57,5}},   {{32,3}, {51,3}, {52,3}},
+    {{29,5}, {42,4}, {51,4}},   {{5,4}, {8,5}, {51,5}},
+    {{26,4}, {32,4}, {64,4}},   {{24,4}, {68,5}, {72,4}},
+    {{37,3}, {54,5}, {82,3}},   {{19,4}, {38,5}, {76,3}},
+    {{17,5}, {28,4}, {55,3}},   {{31,4}, {47,4}, {70,4}},
+    {{41,2}, {50,6}, {58,2}},   {{27,4}, {43,4}, {78,4}},
+    {{33,4}, {59,5}, {61,4}},   {{30,4}, {44,5}, {60,4}},
+    {{45,5}, {67,4}, {76,4}},   {{5,5}, {23,4}, {75,3}},
+    {{7,4}, {9,5}, {77,5}},     {{39,5}, {40,4}, {69,4}},
+    {{16,4}, {49,4}, {52,4}},   {{41,3}, {65,4}, {67,5}},
+    {{3,5}, {21,6}, {71,5}},    {{35,5}, {63,5}, {80,3}},
+    {{12,6}, {28,5}, {46,4}},   {{1,5}, {7,5}, {80,4}},
+    {{55,4}, {66,4}, {72,5}},   {{4,6}, {37,4}, {49,5}},
+    {{11,4}, {37,5}, {63,6}},   {{58,3}, {71,6}, {79,5}},
+    {{2,5}, {25,6}, {78,5}},    {{44,6}, {75,4}, {80,5}},
+    {{0,6}, {64,5}, {73,5}},    {{6,6}, {17,6}, {76,5}},
+    {{10,5}, {55,5}, {58,4}},   {{13,6}, {38,6}, {53,5}},
+    {{15,5}, {36,5}, {65,5}},   {{9,6}, {27,5}, {54,6}},
+    {{14,5}, {59,6}, {69,5}},   {{16,5}, {24,5}, {81,5}},
+    {{19,5}, {29,6}, {30,5}},   {{11,5}, {66,5}, {67,6}},
+    {{22,5}, {74,3}, {79,6}},   {{26,5}, {31,5}, {61,5}},
+    {{23,5}, {68,6}, {74,4}},   {{18,5}, {20,5}, {70,5}},
+    {{33,5}, {52,5}, {60,5}},   {{34,6}, {45,6}, {46,5}},
+    {{32,5}, {58,5}, {75,5}},   {{39,6}, {42,5}, {82,4}},
+    {{40,5}, {41,4}, {62,5}},   {{48,4}, {74,5}, {82,5}},
+    {{19,6}, {43,5}, {47,5}},   {{41,5}, {48,5}, {56,5}}
+};
+static const int k_deg_v[174] = {
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3
+};
+
+__launch_bounds__(192)
+__global__ void qp_admm_ft8_kernel(
+    int          B,
+    const float* llr,
+    uint8_t*     x_hat,
+    bool*        parity
+)
+{
+    const int b   = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (b >= B) return;
+
+    __shared__ float s_scale;
+    __shared__ float s_mean;
+    __shared__ float sx[N];
+    __shared__ float sz[M * D_MAX];
+    __shared__ float su[M * D_MAX];
+    __shared__ bool  sc_ok;
+
+    const float* llr_b = llr + (ptrdiff_t)b * N;
+    const float  eps   = 1e-6f;
+
+    // Normalize LLRs to variance 24.  Also subtract the per-vector mean so the
+    // ADMM objective is centered: FT8 codewords average ~22% ones / 78% zeros,
+    // giving a raw LLR mean of roughly -2.5 (positive = bit 1).  After negation
+    // for ADMM (positive = bit 0), all q_j are biased toward +1.4, pushing every
+    // x toward 0.  The trivial all-zeros codeword satisfies all parity checks and
+    // becomes the LP attractor, causing ~13% decode rate instead of ~90%.
+    // Centering before negation removes this bias and lets ADMM find the true word.
+    if (tid == 0) {
+        float sum = 0.0f, sum2 = 0.0f;
+        for (int j = 0; j < N; ++j) {
+            float v = llr_b[j];
+            sum  += v;
+            sum2 += v * v;
+        }
+        float inv_n = 1.0f / N;
+        s_mean = sum * inv_n;
+        float var = (sum2 - sum * sum * inv_n) * inv_n;
+        s_scale = (var > 1e-6f) ? sqrtf(24.0f / var) : 1.0f;
+    }
+    __syncthreads();
+
+    // Initialize x from centered LLRs.
+    // Sign fix: negate (LLR - mean) because FT8SoftCuda produces positive = bit 1
+    // likely, but QP-ADMM needs positive = bit 0 likely.
+    if (tid < N) {
+        const float qj = -(llr_b[tid] - s_mean) * s_scale * 0.5f;
+        const float dj = RHO * (float)g_deg_v[tid];
+        sx[tid] = fmaxf(eps, fminf(1.0f - eps, -qj / dj));
+    }
+    for (int idx = tid; idx < M * D_MAX; idx += BLOCK) {
+        sz[idx] = 0.0f;
+        su[idx] = 0.0f;
+    }
+    if (tid == 0) sc_ok = false;
+    __syncthreads();
+
+    for (int it = 0; it < MAX_ITER; ++it) {
+        // x-update
+        if (tid < N) {
+            float zu_sum = 0.0f;
+            for (int e = 0; e < g_deg_v[tid]; ++e) {
+                const int ci = g_var_adj[tid][e][0];
+                const int sk = g_var_adj[tid][e][1];
+                zu_sum += sz[ci * D_MAX + sk] - su[ci * D_MAX + sk];
+            }
+            const float qj = -(llr_b[tid] - s_mean) * s_scale * 0.5f;
+            const float dj = RHO * (float)g_deg_v[tid];
+            sx[tid] = fmaxf(eps, fminf(1.0f - eps,
+                            (RHO * zu_sum - qj) / dj));
+        }
+        __syncthreads();
+
+        // z-update: parity polytope projection per check node
+        if (tid < M) {
+            const int d = g_check_deg[tid];
+            float w[D_MAX];
+            float s = 0.0f, w_min = 1.0f, w_max = 0.0f;
+
+            for (int k = 0; k < d; ++k) {
+                float vk = sx[g_check_var_j[tid][k]] + su[tid * D_MAX + k];
+                vk = fmaxf(0.0f, fminf(1.0f, vk));
+                w[k] = vk;
+                s += vk;
+                if (vk < w_min) w_min = vk;
+                if (vk > w_max) w_max = vk;
+            }
+
+            // k_target = nearest even integer to s, clamped to [0, floor(d/2)*2].
+            // Without the clamp, odd-degree check nodes (d=7) with s==d produce
+            // k_raw = d+1 (IEEE round-to-even: rintf(3.5)=4 → 8 > 7), making the
+            // bisection impossible: it drives theta → -∞ and sets all z_k = 1
+            // (odd parity), permanently stalling ADMM on those rows.
+            const float k_raw    = 2.0f * rintf(s * 0.5f);
+            const float k_target = fmaxf(0.0f, fminf((float)(d & ~1), k_raw));
+            float lo = w_min - 1.0f, hi = w_max + 1e-6f;
+            for (int bb = 0; bb < 30; ++bb) {
+                const float mid = (lo + hi) * 0.5f;
+                float f = 0.0f;
+                for (int k = 0; k < d; ++k)
+                    f += fmaxf(0.0f, fminf(1.0f, w[k] - mid));
+                if (f > k_target) lo = mid;
+                else              hi = mid;
+            }
+            const float theta = (lo + hi) * 0.5f;
+            for (int k = 0; k < d; ++k)
+                sz[tid * D_MAX + k] = fmaxf(0.0f, fminf(1.0f, w[k] - theta));
+        }
+        __syncthreads();
+
+        // u-update
+        if (tid < M) {
+            const int d = g_check_deg[tid];
+            for (int k = 0; k < d; ++k)
+                su[tid * D_MAX + k] +=
+                    sx[g_check_var_j[tid][k]] - sz[tid * D_MAX + k];
+        }
+        __syncthreads();
+
+        // Parity check (thread 0 only)
+        if (tid == 0) {
+            bool ok = true;
+            for (int i = 0; i < M; ++i) {
+                int row_sum = 0;
+                for (int k = 0; k < g_check_deg[i]; ++k)
+                    row_sum += (sx[g_check_var_j[i][k]] > 0.5f) ? 1 : 0;
+                if (row_sum & 1) { ok = false; break; }
+            }
+            sc_ok = ok;
+        }
+        __syncthreads();
+        if (sc_ok) break;
+    }
+
+    if (tid < N)
+        x_hat[(ptrdiff_t)b * N + tid] = (sx[tid] > 0.5f) ? 1u : 0u;
+    if (tid == 0)
+        parity[b] = sc_ok;
+}
+
+void ft8_ldpc_init_constants()
+{
+    cudaMemcpyToSymbol(g_check_var_j, k_check_var_j, sizeof(k_check_var_j));
+    cudaMemcpyToSymbol(g_check_deg,   k_check_deg,   sizeof(k_check_deg));
+    cudaMemcpyToSymbol(g_var_adj,     k_var_adj,     sizeof(k_var_adj));
+    cudaMemcpyToSymbol(g_deg_v,       k_deg_v,       sizeof(k_deg_v));
+}
+
+void ft8_ldpc_decode_batch(
+    uint32_t     n_candidates,
+    const float* log174_d,
+    uint8_t*     x_hat_d,
+    bool*        parity_d,
+    cudaStream_t ldpc_stream)
+{
+    if (n_candidates == 0) return;
+    qp_admm_ft8_kernel<<<(int)n_candidates, BLOCK, 0, ldpc_stream>>>(
+        (int)n_candidates, log174_d, x_hat_d, parity_d);
+    cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
+// GPU Sum-Product Belief Propagation LDPC decoder for FT8 (174,91).
+//
+// Matches ft8_lib's bp_decode() algorithm exactly:
+//   - One thread block per candidate, 192 threads.
+//   - Thread 0..173 handle variable nodes (v2c messages, hard decisions).
+//   - Thread 0..82  handle check nodes (c2v messages).
+//   - Shared memory: sx[N] + stotal[N] + stoc[M×D_MAX] + stov[M×D_MAX] ≈ 6 KB.
+//   - Normalization to variance=24 (matching ftx_normalize_logl) but NO mean
+//     centering — BP handles biased LLRs correctly via message passing.
+//   - All-zeros detection: if hard decisions are all-zero, break (prohibited
+//     trivial solution, same guard as ft8_lib).
+//   - 25 iterations, matching ft8_lib's default.
+//
+// c2v messages use a prefix-suffix product trick (O(d) per check, O(d²) avoidance).
+// tanhf / atanhf are CUDA hardware-accelerated.
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr int BP_MAX_ITER = 25;
+constexpr int BP_BLOCK    = 192;
+
+// Shared memory bytes: s_scale(4) + sx[N](696) + stotal[N](696)
+//   + stoc[M*D_MAX](2324) + stov[M*D_MAX](2324) + sc_ok(4) = 6048
+constexpr int BP_SMEM_BYTES = 4 + N*4 + N*4 + M*D_MAX*4 + M*D_MAX*4 + 4;
+static_assert(BP_SMEM_BYTES <= 49152, "BP shared memory exceeds 48 KB");
+} // namespace
+
+__launch_bounds__(BP_BLOCK)
+__global__ void bp_ft8_kernel(
+    int          B,
+    const float* llr,
+    uint8_t*     x_hat,
+    bool*        parity
+)
+{
+    const int b   = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (b >= B) return;
+
+    __shared__ float s_scale;
+    __shared__ float sx[N];           // normalized channel LLRs (positive = bit 1)
+    __shared__ float stotal[N];       // total LLR = sx + sum of c2v messages
+    __shared__ float stoc[M * D_MAX]; // v2c tanh messages, indexed [check][slot]
+    __shared__ float stov[M * D_MAX]; // c2v LLR messages,  indexed [check][slot]
+    __shared__ bool  sc_ok;
+
+    const float* llr_b = llr + (ptrdiff_t)b * N;
+    const float  eps   = 1e-7f;
+
+    // Normalize to variance=24 (matching ftx_normalize_logl).
+    // No mean centering: BP message passing handles LLR DC offset correctly.
+    if (tid == 0) {
+        float sum = 0.0f, sum2 = 0.0f;
+        for (int j = 0; j < N; ++j) {
+            float v = llr_b[j];
+            sum  += v;
+            sum2 += v * v;
+        }
+        const float inv_n = 1.0f / N;
+        const float var   = (sum2 - sum * sum * inv_n) * inv_n;
+        s_scale = (var > 1e-6f) ? sqrtf(24.0f / var) : 1.0f;
+    }
+    __syncthreads();
+
+    if (tid < N)
+        sx[tid] = llr_b[tid] * s_scale;
+
+    for (int idx = tid; idx < M * D_MAX; idx += BP_BLOCK)
+        stov[idx] = 0.0f;
+    if (tid == 0) sc_ok = false;
+    __syncthreads();
+
+    for (int it = 0; it < BP_MAX_ITER; ++it) {
+
+        // ---- Hard decision: stotal[n] = sx[n] + sum of c2v messages -----------
+        if (tid < N) {
+            float tot = sx[tid];
+            for (int e = 0; e < 3; ++e)
+                tot += stov[g_var_adj[tid][e][0] * D_MAX + g_var_adj[tid][e][1]];
+            stotal[tid] = tot;
+        }
+        __syncthreads();
+
+        // ---- Parity check (thread 0 serial, ~580 ops) -------------------------
+        if (tid == 0) {
+            // Count ones; ft8_lib prohibits the all-zeros codeword.
+            int plain_sum = 0;
+            for (int n = 0; n < N; ++n)
+                plain_sum += (stotal[n] > 0.0f) ? 1 : 0;
+
+            bool ok = (plain_sum > 0); // false if all-zeros
+            if (ok) {
+                for (int i = 0; i < M; ++i) {
+                    int row_parity = 0;
+                    for (int k = 0; k < g_check_deg[i]; ++k)
+                        row_parity ^= (stotal[g_check_var_j[i][k]] > 0.0f) ? 1 : 0;
+                    if (row_parity) { ok = false; break; }
+                }
+            }
+            sc_ok = ok;
+        }
+        __syncthreads();
+        if (sc_ok) break;
+
+        // ---- v2c: thread n writes tanh messages for its 3 check connections ----
+        // stoc[check][slot] = tanh( -(stotal[n] - stov[check][slot]) / 2 )
+        if (tid < N) {
+            for (int e = 0; e < 3; ++e) {
+                const int ci  = g_var_adj[tid][e][0];
+                const int sk  = g_var_adj[tid][e][1];
+                const float extrinsic = stotal[tid] - stov[ci * D_MAX + sk];
+                stoc[ci * D_MAX + sk] = tanhf(-extrinsic * 0.5f);
+            }
+        }
+        __syncthreads();
+
+        // ---- c2v: thread m updates LLR messages for its d variable connections -
+        // stov[m][k] = -2 * atanh( product of stoc[m][kk] for kk != k )
+        // Prefix-suffix trick: O(d) multiplications instead of O(d²).
+        if (tid < M) {
+            const int d = g_check_deg[tid];
+            float pref[D_MAX + 1], suf[D_MAX + 1];
+            pref[0] = 1.0f;
+            for (int k = 0; k < d; ++k)
+                pref[k + 1] = pref[k] * stoc[tid * D_MAX + k];
+            suf[d] = 1.0f;
+            for (int k = d - 1; k >= 0; --k)
+                suf[k] = suf[k + 1] * stoc[tid * D_MAX + k];
+            for (int k = 0; k < d; ++k) {
+                float excl = pref[k] * suf[k + 1];
+                excl = fmaxf(-1.0f + eps, fminf(1.0f - eps, excl));
+                stov[tid * D_MAX + k] = -2.0f * atanhf(excl);
+            }
+        }
+        __syncthreads();
+    }
+
+    // Write output: hard decision from final stotal, parity from sc_ok.
+    if (tid < N)
+        x_hat[(ptrdiff_t)b * N + tid] = (stotal[tid] > 0.0f) ? 1u : 0u;
+    if (tid == 0)
+        parity[b] = sc_ok;
+}
+
+void ft8_bp_decode_batch(
+    uint32_t     n_candidates,
+    const float* log174_d,
+    uint8_t*     x_hat_d,
+    bool*        parity_d,
+    cudaStream_t ldpc_stream)
+{
+    if (n_candidates == 0) return;
+    bp_ft8_kernel<<<(int)n_candidates, BP_BLOCK, 0, ldpc_stream>>>(
+        (int)n_candidates, log174_d, x_hat_d, parity_d);
+    cudaGetLastError();
+}

@@ -18,12 +18,15 @@
 int main(int argc, char* argv[]) {
 
     bool enable_corpus = false;
+    bool use_gpu_ldpc  = false;
     std::string ctrl_host = "127.0.0.1";
     int ctrl_port = 8080;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--jtdx") == 0) {
             enable_corpus = true;
+        } else if (strcmp(argv[i], "--gpu-ldpc") == 0) {
+            use_gpu_ldpc = true;
         } else if (strcmp(argv[i], "--control-host") == 0 && i + 1 < argc) {
             ctrl_host = argv[++i];
         } else if (strcmp(argv[i], "--control-port") == 0 && i + 1 < argc) {
@@ -40,7 +43,7 @@ int main(int argc, char* argv[]) {
     gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer(), enable_corpus);
     ft8channel.start();
 
-    gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel);
+    gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel, 5580, use_gpu_ldpc);
 
     ft8.start();
 

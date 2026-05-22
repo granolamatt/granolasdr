@@ -1,5 +1,6 @@
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <iostream>
 #include <string.h>
 #include <chrono>
@@ -166,9 +167,29 @@ ftx_callsign_hash_interface_t hash_if = {
 static std::atomic<int> window_decode_count{0};
 static time_t           window_start_ts{0};
 
+// LLR capture: set LDPC_CAPTURE=/path/to/file.bin to save raw float32 LLR vectors
+// (174 floats each) for every unique decoded candidate. Load in Python with:
+//   np.fromfile(path, dtype=np.float32).reshape(-1, 174)
+// See tools/analyze_ldpc_captures.py for analysis.
+static int    g_ldpc_capture_fd    = -1;
+static int    g_ldpc_capture_count = 0;
+constexpr int kLdpcCaptureMax      = 500;
+
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
-            const gm::cuda::GpuScanResult* gpu = nullptr)
+            const gm::cuda::GpuScanResult* gpu = nullptr, bool use_gpu_ldpc = false)
 {
+    // One-time capture file init (env-var gated, no overhead when unset).
+    static std::once_flag s_cap_init;
+    std::call_once(s_cap_init, []() {
+        const char* path = getenv("LDPC_CAPTURE");
+        if (path) {
+            g_ldpc_capture_fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            if (g_ldpc_capture_fd >= 0)
+                fprintf(stderr, "[LDPC CAPTURE] Writing up to %d LLR vectors to %s\n",
+                        kLdpcCaptureMax, path);
+        }
+    });
+
     // Per-15min decode count logging.
     time_t now_ts = (time_t)tm_slot_start;
     if (window_start_ts == 0) window_start_ts = now_ts - (now_ts % 900);
@@ -227,23 +248,64 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
     };
     std::vector<CandResult> results(num_candidates);
 
-    int num_threads = std::min(num_candidates,
-                               (int)std::thread::hardware_concurrency());
-    if (num_threads < 1) num_threads = 1;
+    bool using_gpu_ldpc = use_gpu_ldpc
+                          && gpu
+                          && !gpu->x_hat.empty()
+                          && !gpu->parity.empty()
+                          && (int)gpu->parity.size() >= num_candidates;
 
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads);
-    for (int t = 0; t < num_threads; ++t) {
-        workers.emplace_back([&, t, gpu]() {
-            for (int idx = t; idx < num_candidates; idx += num_threads) {
-                results[idx].ok = ftx_decode_from_llr(
-                    gpu->log174.data() + (size_t)idx * FTX_LDPC_N,
-                    kLDPC_iterations,
-                    &results[idx].message, &results[idx].status);
-            }
-        });
+    if (using_gpu_ldpc) {
+        // GPU already decoded all LDPC frames. For candidates that passed parity,
+        // skip LDPC entirely and run CRC only via ftx_decode_from_bits().
+        // Candidates that failed parity get results[idx].ok = false without CRC.
+        int num_threads = std::min(num_candidates,
+                                   (int)std::thread::hardware_concurrency());
+        if (num_threads < 1) num_threads = 1;
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads);
+        std::atomic<int> n_parity_pass{0}, n_allzero{0};
+        for (int t = 0; t < num_threads; ++t) {
+            workers.emplace_back([&, t]() {
+                for (int idx = t; idx < num_candidates; idx += num_threads) {
+                    if (!gpu->parity[idx]) {
+                        results[idx].ok = false;
+                        results[idx].status.ldpc_errors = 1;
+                        continue;
+                    }
+                    n_parity_pass.fetch_add(1, std::memory_order_relaxed);
+                    const uint8_t* bits = gpu->x_hat.data() + (size_t)idx * FTX_LDPC_N;
+                    bool allzero = true;
+                    for (int b = 0; b < FTX_LDPC_N && allzero; ++b)
+                        if (bits[b]) allzero = false;
+                    if (allzero) n_allzero.fetch_add(1, std::memory_order_relaxed);
+                    results[idx].ok = ftx_decode_from_bits(
+                        bits, &results[idx].message, &results[idx].status);
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+        int pp = n_parity_pass.load(), az = n_allzero.load();
+        if (pp > 0)
+            fprintf(stderr, "[GPU LDPC] parity_pass=%d  all_zeros=%d (%.0f%%)\n",
+                    pp, az, 100.0 * az / pp);
+    } else {
+        int num_threads = std::min(num_candidates,
+                                   (int)std::thread::hardware_concurrency());
+        if (num_threads < 1) num_threads = 1;
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads);
+        for (int t = 0; t < num_threads; ++t) {
+            workers.emplace_back([&, t, gpu]() {
+                for (int idx = t; idx < num_candidates; idx += num_threads) {
+                    results[idx].ok = ftx_decode_from_llr(
+                        gpu->log174.data() + (size_t)idx * FTX_LDPC_N,
+                        kLDPC_iterations,
+                        &results[idx].message, &results[idx].status);
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
     }
-    for (auto& w : workers) w.join();
     auto t_ldpc_end = std::chrono::steady_clock::now();
 
     // Sequential: dedup and print (callsign hashtable is not thread-safe).
@@ -311,6 +373,13 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
             printf("DECODED: %s time_offset=%.3fs freq=%.1fHz snr=%.1f unix=%.0f\n", text, time_sec, freq_hz, snr, tm_slot_start);
+            // Save raw LLRs for offline ADMM analysis (tools/analyze_ldpc_captures.py).
+            if (g_ldpc_capture_fd >= 0 && g_ldpc_capture_count < kLdpcCaptureMax &&
+                gpu && (size_t)(idx + 1) * FTX_LDPC_N <= gpu->log174.size()) {
+                const float* llr = gpu->log174.data() + (size_t)idx * FTX_LDPC_N;
+                write(g_ldpc_capture_fd, llr, FTX_LDPC_N * sizeof(float));
+                ++g_ldpc_capture_count;
+            }
             if (unpack_status == FTX_MESSAGE_RC_OK && publisher) {
                 publisher->publishDecoded(text, freq_hz, snr, tm_slot_start, time_sec);
                 window_decode_count.fetch_add(1, std::memory_order_relaxed);
@@ -323,10 +392,11 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms ldpc=%.1fms\n",
+    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms %s=%.1fms\n",
            num_decoded, num_candidates,
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
+           using_gpu_ldpc ? "ldpc_gpu" : "ldpc",
            std::chrono::duration<double, std::milli>(t_ldpc_end - t_ldpc_start).count());
 
     fflush(stdout);
@@ -387,9 +457,11 @@ namespace hf {
 
     FT8::FT8(gm::buffer::BufferPosition<uint8_t>* inP,
              gm::cuda::FT8Cuda* ft8cuda_in,
-             int zmq_port) :
+             int zmq_port,
+             bool use_gpu_ldpc_in) :
       inPos(inP),
       ft8cuda(ft8cuda_in),
+      use_gpu_ldpc(use_gpu_ldpc_in),
       zmq_ctx(1),
       zmq_pub(zmq_ctx, ZMQ_PUB),
       timing_log_(nullptr) {
@@ -459,7 +531,7 @@ namespace hf {
                 printf("Processing %f\n", seconds);
                 const gm::cuda::GpuScanResult* gpu_res =
                     ft8cuda ? &ft8cuda->getGpuScanResult(buff) : nullptr;
-                decode(&mon, seconds, this, gpu_res);
+                decode(&mon, seconds, this, gpu_res, use_gpu_ldpc);
                 monitor_reset(&mon);
                 now += 1;
             }
