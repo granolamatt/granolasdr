@@ -410,14 +410,9 @@ void HFChannelizer::controlWorker() {
 
 void HFChannelizer::run() {
     uint64_t now = inPos->getNow(1) + 1;
-    uint64_t call_count = 0;
-    double total_wait_ms = 0, total_copy_ms = 0, max_copy_ms = 0;
 
     while(isRunning()) {
-        auto t0 = std::chrono::steady_clock::now();
         uint64_t next = inPos->getPosition(now+1, 1);
-        auto t1 = std::chrono::steady_clock::now();
-        total_wait_ms += std::chrono::duration<double,std::milli>(t1-t0).count();
 
         while(now < next) {
             uint64_t length = next - now;
@@ -426,19 +421,8 @@ void HFChannelizer::run() {
                 now = next;
                 break;
             }
-            auto tc0 = std::chrono::steady_clock::now();
             int numCopied = doCopy(now);
-            auto tc1 = std::chrono::steady_clock::now();
             if (!numCopied) exit(-200);
-            double dt = std::chrono::duration<double,std::milli>(tc1-tc0).count();
-            total_copy_ms += dt;
-            if (dt > max_copy_ms) max_copy_ms = dt;
-            call_count++;
-            if (call_count % 200 == 0) {
-                printf("HFChannelizer: avg_wait=%.2fms avg_copy=%.2fms max_copy=%.2fms (budget=5ms)\n",
-                       total_wait_ms / 200, total_copy_ms / 200, max_copy_ms);
-                total_wait_ms = total_copy_ms = max_copy_ms = 0;
-            }
 	        now += numCopied;
         }
     }
