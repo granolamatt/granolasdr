@@ -1,5 +1,6 @@
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <iostream>
 #include <string.h>
 #include <chrono>
@@ -166,9 +167,29 @@ ftx_callsign_hash_interface_t hash_if = {
 static std::atomic<int> window_decode_count{0};
 static time_t           window_start_ts{0};
 
+// LLR capture: set LDPC_CAPTURE=/path/to/file.bin to save raw float32 LLR vectors
+// (174 floats each) for every unique decoded candidate. Load in Python with:
+//   np.fromfile(path, dtype=np.float32).reshape(-1, 174)
+// See tools/analyze_ldpc_captures.py for analysis.
+static int    g_ldpc_capture_fd    = -1;
+static int    g_ldpc_capture_count = 0;
+constexpr int kLdpcCaptureMax      = 500;
+
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             const gm::cuda::GpuScanResult* gpu = nullptr, bool use_gpu_ldpc = false)
 {
+    // One-time capture file init (env-var gated, no overhead when unset).
+    static std::once_flag s_cap_init;
+    std::call_once(s_cap_init, []() {
+        const char* path = getenv("LDPC_CAPTURE");
+        if (path) {
+            g_ldpc_capture_fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            if (g_ldpc_capture_fd >= 0)
+                fprintf(stderr, "[LDPC CAPTURE] Writing up to %d LLR vectors to %s\n",
+                        kLdpcCaptureMax, path);
+        }
+    });
+
     // Per-15min decode count logging.
     time_t now_ts = (time_t)tm_slot_start;
     if (window_start_ts == 0) window_start_ts = now_ts - (now_ts % 900);
@@ -342,6 +363,13 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             printf("%+05.1f %+05.1f %+4.2f %4.0f ~  %s\n",
                 snr, tm_slot_start, time_sec, freq_hz, text);
             printf("DECODED: %s time_offset=%.3fs freq=%.1fHz snr=%.1f unix=%.0f\n", text, time_sec, freq_hz, snr, tm_slot_start);
+            // Save raw LLRs for offline ADMM analysis (tools/analyze_ldpc_captures.py).
+            if (g_ldpc_capture_fd >= 0 && g_ldpc_capture_count < kLdpcCaptureMax &&
+                gpu && (size_t)(idx + 1) * FTX_LDPC_N <= gpu->log174.size()) {
+                const float* llr = gpu->log174.data() + (size_t)idx * FTX_LDPC_N;
+                write(g_ldpc_capture_fd, llr, FTX_LDPC_N * sizeof(float));
+                ++g_ldpc_capture_count;
+            }
             if (unpack_status == FTX_MESSAGE_RC_OK && publisher) {
                 publisher->publishDecoded(text, freq_hz, snr, tm_slot_start, time_sec);
                 window_decode_count.fetch_add(1, std::memory_order_relaxed);
