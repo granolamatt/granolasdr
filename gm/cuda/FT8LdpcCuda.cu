@@ -242,6 +242,7 @@ __global__ void qp_admm_ft8_kernel(
     if (b >= B) return;
 
     __shared__ float s_scale;
+    __shared__ float s_mean;
     __shared__ float sx[N];
     __shared__ float sz[M * D_MAX];
     __shared__ float su[M * D_MAX];
@@ -250,10 +251,13 @@ __global__ void qp_admm_ft8_kernel(
     const float* llr_b = llr + (ptrdiff_t)b * N;
     const float  eps   = 1e-6f;
 
-    // Normalize LLRs to variance 24, matching ftx_normalize_logl() on the CPU.
-    // FT8SoftCuda raw LLRs (s2 = mag_byte * 0.5) can have |llr| >> 6, which
-    // hard-clamps every x to {eps, 1-eps} and destroys soft coding gain.
-    // Thread 0 computes the scale factor serially (174 reads ≈ negligible vs ADMM loop).
+    // Normalize LLRs to variance 24.  Also subtract the per-vector mean so the
+    // ADMM objective is centered: FT8 codewords average ~22% ones / 78% zeros,
+    // giving a raw LLR mean of roughly -2.5 (positive = bit 1).  After negation
+    // for ADMM (positive = bit 0), all q_j are biased toward +1.4, pushing every
+    // x toward 0.  The trivial all-zeros codeword satisfies all parity checks and
+    // becomes the LP attractor, causing ~13% decode rate instead of ~90%.
+    // Centering before negation removes this bias and lets ADMM find the true word.
     if (tid == 0) {
         float sum = 0.0f, sum2 = 0.0f;
         for (int j = 0; j < N; ++j) {
@@ -262,16 +266,17 @@ __global__ void qp_admm_ft8_kernel(
             sum2 += v * v;
         }
         float inv_n = 1.0f / N;
+        s_mean = sum * inv_n;
         float var = (sum2 - sum * sum * inv_n) * inv_n;
         s_scale = (var > 1e-6f) ? sqrtf(24.0f / var) : 1.0f;
     }
     __syncthreads();
 
-    // Initialize x from LLRs.
-    // Sign fix: negate LLR because FT8SoftCuda produces positive = bit 1 likely,
-    // but QP-ADMM needs positive = bit 0 likely.
+    // Initialize x from centered LLRs.
+    // Sign fix: negate (LLR - mean) because FT8SoftCuda produces positive = bit 1
+    // likely, but QP-ADMM needs positive = bit 0 likely.
     if (tid < N) {
-        const float qj = -llr_b[tid] * s_scale * 0.5f;   // SIGN FIX + NORM (init)
+        const float qj = -(llr_b[tid] - s_mean) * s_scale * 0.5f;
         const float dj = RHO * (float)g_deg_v[tid];
         sx[tid] = fmaxf(eps, fminf(1.0f - eps, -qj / dj));
     }
@@ -291,7 +296,7 @@ __global__ void qp_admm_ft8_kernel(
                 const int sk = g_var_adj[tid][e][1];
                 zu_sum += sz[ci * D_MAX + sk] - su[ci * D_MAX + sk];
             }
-            const float qj = -llr_b[tid] * s_scale * 0.5f;   // SIGN FIX + NORM (x-update)
+            const float qj = -(llr_b[tid] - s_mean) * s_scale * 0.5f;
             const float dj = RHO * (float)g_deg_v[tid];
             sx[tid] = fmaxf(eps, fminf(1.0f - eps,
                             (RHO * zu_sum - qj) / dj));

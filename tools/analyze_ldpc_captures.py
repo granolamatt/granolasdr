@@ -37,10 +37,25 @@ FTX_LDPC_N = 174
 
 
 def normalize_llr(llr: np.ndarray) -> np.ndarray:
-    """Apply the same variance=24 normalization as the CUDA kernel."""
+    """Apply the same variance=24 normalization as the CUDA kernel (for BP)."""
     var = np.var(llr)
     scale = np.sqrt(24.0 / var) if var > 1e-6 else 1.0
     return llr * scale
+
+
+def normalize_llr_centered(llr: np.ndarray) -> np.ndarray:
+    """Center (subtract mean) then normalize to var=24 for ADMM.
+
+    FT8 codewords have ~22% ones / 78% zeros on average, giving raw LLR mean
+    of roughly -2.5 (positive = bit 1).  After negation for ADMM (positive = bit 0),
+    q_j values are biased toward +1.4, driving all x toward 0.  The trivial
+    all-zeros codeword satisfies every parity check and becomes the LP attractor.
+    Centering removes this bias so ADMM finds the true codeword.
+    """
+    centered = llr - np.mean(llr)
+    var = np.var(centered)
+    scale = np.sqrt(24.0 / var) if var > 1e-6 else 1.0
+    return centered * scale
 
 
 def bp_sum_product(llrs: np.ndarray, H_csr, H_syndrome,
@@ -206,13 +221,18 @@ def main():
     print(f"LLR global mean: {np.mean(llrs):.4f}  (per-vector: min={per_vec_mean.min():.3f}  "
           f"median={np.median(per_vec_mean):.3f}  max={per_vec_mean.max():.3f})")
 
-    # Apply normalization (same as CUDA kernel) and negate for Python ADMM sign convention.
-    # FT8SoftCuda: positive = bit 1 likely.
-    # Python ADMM (q_j = +llr_j/2): positive = bit 0 likely.
-    # So negate after normalizing.
+    # BP normalization: scale to var=24, keep mean (matches ft8_lib / CUDA BP path).
+    # ADMM normalization: subtract per-vector mean FIRST, then scale to var=24.
+    #   Reason: FT8 codewords have ~22% ones, giving raw LLR mean ≈ -2.5.
+    #   After negation for ADMM, q_j mean ≈ +1.4, pushing all x toward 0.
+    #   The all-zeros codeword trivially satisfies H*x=0 → ADMM LP attractor.
+    #   Centering before negation prevents this.
     llrs_norm = np.array([normalize_llr(llr) for llr in llrs], dtype=np.float64)
+    llrs_norm_centered = np.array([normalize_llr_centered(llr) for llr in llrs], dtype=np.float64)
     norm_var = np.var(llrs_norm, axis=1)
-    print(f"After normalization: var mean={norm_var.mean():.2f} (target ~24)")
+    norm_var_c = np.var(llrs_norm_centered, axis=1)
+    print(f"After normalization (BP):    var mean={norm_var.mean():.2f}  llr mean={np.mean(llrs_norm):.3f}")
+    print(f"After normalization (ADMM):  var mean={norm_var_c.mean():.2f}  llr mean={np.mean(llrs_norm_centered):.3f}  (centered)")
 
     # ---- Hard-decision sanity check (no decoding) ----
     # ft8_lib convention: positive LLR = bit 1.  Hard-decide on RAW and NORMALIZED LLRs.
@@ -229,7 +249,7 @@ def main():
         print(f"  Hard decision on {label}: {n_pass}/{B} pass parity ({100*n_pass/B:.1f}%)")
     print()
 
-    llrs_for_admm = -llrs_norm  # negate for Python sign convention (positive=bit0)
+    llrs_for_admm = -llrs_norm_centered  # centered then negated: mean(q_j) ≈ 0
 
     # Build FT8 H matrix
     print("Building FT8 H matrix...", end=" ", flush=True)
