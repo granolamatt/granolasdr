@@ -353,7 +353,7 @@ int FT8Cuda::doCopy(uint64_t now) {
 
                     bool ldpc_launched = (n > 0);
                     if (ldpc_launched) {
-                        ft8_ldpc_decode_batch(n, log174_d, x_hat_d, parity_d, ldpc_stream);
+                        ft8_bp_decode_batch(n, log174_d, x_hat_d, parity_d, ldpc_stream);
                         cudaEventRecord(ldpc_done, ldpc_stream);
                     }
 

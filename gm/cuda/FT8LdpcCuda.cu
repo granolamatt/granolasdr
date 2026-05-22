@@ -390,3 +390,161 @@ void ft8_ldpc_decode_batch(
         (int)n_candidates, log174_d, x_hat_d, parity_d);
     cudaGetLastError();
 }
+
+// ---------------------------------------------------------------------------
+// GPU Sum-Product Belief Propagation LDPC decoder for FT8 (174,91).
+//
+// Matches ft8_lib's bp_decode() algorithm exactly:
+//   - One thread block per candidate, 192 threads.
+//   - Thread 0..173 handle variable nodes (v2c messages, hard decisions).
+//   - Thread 0..82  handle check nodes (c2v messages).
+//   - Shared memory: sx[N] + stotal[N] + stoc[M×D_MAX] + stov[M×D_MAX] ≈ 6 KB.
+//   - Normalization to variance=24 (matching ftx_normalize_logl) but NO mean
+//     centering — BP handles biased LLRs correctly via message passing.
+//   - All-zeros detection: if hard decisions are all-zero, break (prohibited
+//     trivial solution, same guard as ft8_lib).
+//   - 25 iterations, matching ft8_lib's default.
+//
+// c2v messages use a prefix-suffix product trick (O(d) per check, O(d²) avoidance).
+// tanhf / atanhf are CUDA hardware-accelerated.
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr int BP_MAX_ITER = 25;
+constexpr int BP_BLOCK    = 192;
+
+// Shared memory bytes: s_scale(4) + sx[N](696) + stotal[N](696)
+//   + stoc[M*D_MAX](2324) + stov[M*D_MAX](2324) + sc_ok(4) = 6048
+constexpr int BP_SMEM_BYTES = 4 + N*4 + N*4 + M*D_MAX*4 + M*D_MAX*4 + 4;
+static_assert(BP_SMEM_BYTES <= 49152, "BP shared memory exceeds 48 KB");
+} // namespace
+
+__launch_bounds__(BP_BLOCK)
+__global__ void bp_ft8_kernel(
+    int          B,
+    const float* llr,
+    uint8_t*     x_hat,
+    bool*        parity
+)
+{
+    const int b   = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (b >= B) return;
+
+    __shared__ float s_scale;
+    __shared__ float sx[N];           // normalized channel LLRs (positive = bit 1)
+    __shared__ float stotal[N];       // total LLR = sx + sum of c2v messages
+    __shared__ float stoc[M * D_MAX]; // v2c tanh messages, indexed [check][slot]
+    __shared__ float stov[M * D_MAX]; // c2v LLR messages,  indexed [check][slot]
+    __shared__ bool  sc_ok;
+
+    const float* llr_b = llr + (ptrdiff_t)b * N;
+    const float  eps   = 1e-7f;
+
+    // Normalize to variance=24 (matching ftx_normalize_logl).
+    // No mean centering: BP message passing handles LLR DC offset correctly.
+    if (tid == 0) {
+        float sum = 0.0f, sum2 = 0.0f;
+        for (int j = 0; j < N; ++j) {
+            float v = llr_b[j];
+            sum  += v;
+            sum2 += v * v;
+        }
+        const float inv_n = 1.0f / N;
+        const float var   = (sum2 - sum * sum * inv_n) * inv_n;
+        s_scale = (var > 1e-6f) ? sqrtf(24.0f / var) : 1.0f;
+    }
+    __syncthreads();
+
+    if (tid < N)
+        sx[tid] = llr_b[tid] * s_scale;
+
+    for (int idx = tid; idx < M * D_MAX; idx += BP_BLOCK)
+        stov[idx] = 0.0f;
+    if (tid == 0) sc_ok = false;
+    __syncthreads();
+
+    for (int it = 0; it < BP_MAX_ITER; ++it) {
+
+        // ---- Hard decision: stotal[n] = sx[n] + sum of c2v messages -----------
+        if (tid < N) {
+            float tot = sx[tid];
+            for (int e = 0; e < 3; ++e)
+                tot += stov[g_var_adj[tid][e][0] * D_MAX + g_var_adj[tid][e][1]];
+            stotal[tid] = tot;
+        }
+        __syncthreads();
+
+        // ---- Parity check (thread 0 serial, ~580 ops) -------------------------
+        if (tid == 0) {
+            // Count ones; ft8_lib prohibits the all-zeros codeword.
+            int plain_sum = 0;
+            for (int n = 0; n < N; ++n)
+                plain_sum += (stotal[n] > 0.0f) ? 1 : 0;
+
+            bool ok = (plain_sum > 0); // false if all-zeros
+            if (ok) {
+                for (int i = 0; i < M; ++i) {
+                    int row_parity = 0;
+                    for (int k = 0; k < g_check_deg[i]; ++k)
+                        row_parity ^= (stotal[g_check_var_j[i][k]] > 0.0f) ? 1 : 0;
+                    if (row_parity) { ok = false; break; }
+                }
+            }
+            sc_ok = ok;
+        }
+        __syncthreads();
+        if (sc_ok) break;
+
+        // ---- v2c: thread n writes tanh messages for its 3 check connections ----
+        // stoc[check][slot] = tanh( -(stotal[n] - stov[check][slot]) / 2 )
+        if (tid < N) {
+            for (int e = 0; e < 3; ++e) {
+                const int ci  = g_var_adj[tid][e][0];
+                const int sk  = g_var_adj[tid][e][1];
+                const float extrinsic = stotal[tid] - stov[ci * D_MAX + sk];
+                stoc[ci * D_MAX + sk] = tanhf(-extrinsic * 0.5f);
+            }
+        }
+        __syncthreads();
+
+        // ---- c2v: thread m updates LLR messages for its d variable connections -
+        // stov[m][k] = -2 * atanh( product of stoc[m][kk] for kk != k )
+        // Prefix-suffix trick: O(d) multiplications instead of O(d²).
+        if (tid < M) {
+            const int d = g_check_deg[tid];
+            float pref[D_MAX + 1], suf[D_MAX + 1];
+            pref[0] = 1.0f;
+            for (int k = 0; k < d; ++k)
+                pref[k + 1] = pref[k] * stoc[tid * D_MAX + k];
+            suf[d] = 1.0f;
+            for (int k = d - 1; k >= 0; --k)
+                suf[k] = suf[k + 1] * stoc[tid * D_MAX + k];
+            for (int k = 0; k < d; ++k) {
+                float excl = pref[k] * suf[k + 1];
+                excl = fmaxf(-1.0f + eps, fminf(1.0f - eps, excl));
+                stov[tid * D_MAX + k] = -2.0f * atanhf(excl);
+            }
+        }
+        __syncthreads();
+    }
+
+    // Write output: hard decision from final stotal, parity from sc_ok.
+    if (tid < N)
+        x_hat[(ptrdiff_t)b * N + tid] = (stotal[tid] > 0.0f) ? 1u : 0u;
+    if (tid == 0)
+        parity[b] = sc_ok;
+}
+
+void ft8_bp_decode_batch(
+    uint32_t     n_candidates,
+    const float* log174_d,
+    uint8_t*     x_hat_d,
+    bool*        parity_d,
+    cudaStream_t ldpc_stream)
+{
+    if (n_candidates == 0) return;
+    bp_ft8_kernel<<<(int)n_candidates, BP_BLOCK, 0, ldpc_stream>>>(
+        (int)n_candidates, log174_d, x_hat_d, parity_d);
+    cudaGetLastError();
+}

@@ -52,7 +52,7 @@ private:
     cudaStream_t stream;
     cudaStream_t scan_stream;     // GPU sync score kernel
     cudaStream_t transfer_stream; // D2H mag snapshot (device ring → CPU decode slot)
-    cudaStream_t ldpc_stream;     // QP-ADMM LDPC decode (low priority, NonBlocking)
+    cudaStream_t ldpc_stream;     // GPU LDPC decode (low priority, NonBlocking)
     cudaEvent_t  ring_ready;      // fired when device ring D2D writes are committed
     cudaEvent_t  scan_done;       // fired when GPU scan kernel completes
     cudaEvent_t  ldpc_done;       // fired when LDPC batch kernel completes
