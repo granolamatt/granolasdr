@@ -29,20 +29,24 @@ static bool run_test(const char* name,
     cudaMalloc(&x_hat_d,  FTX_LDPC_N * sizeof(uint8_t));
     cudaMalloc(&parity_d, sizeof(bool));
 
-    // Pad to FT8_LDPC_BATCH; only slot 0 has a real input.
+    // Only slot 0 has a real input; tell the kernel n_cand=1 via a device pointer.
+    uint32_t  n_cand_h = 1;
+    uint32_t* n_cand_d = nullptr;
+    cudaMalloc(&n_cand_d, sizeof(uint32_t));
+    cudaMemcpy(n_cand_d, &n_cand_h, sizeof(uint32_t), cudaMemcpyHostToDevice);
+
     float* llr_batch_d = nullptr;
-    cudaMalloc(&llr_batch_d, (size_t)FT8_LDPC_BATCH * FTX_LDPC_N * sizeof(float));
-    cudaMemset(llr_batch_d, 0, (size_t)FT8_LDPC_BATCH * FTX_LDPC_N * sizeof(float));
+    cudaMalloc(&llr_batch_d, FTX_LDPC_N * sizeof(float));
     cudaMemcpy(llr_batch_d, llr_h, FTX_LDPC_N * sizeof(float), cudaMemcpyHostToDevice);
 
     uint8_t* x_hat_batch_d = nullptr;
     bool*    parity_batch_d = nullptr;
-    cudaMalloc(&x_hat_batch_d,  (size_t)FT8_LDPC_BATCH * FTX_LDPC_N * sizeof(uint8_t));
-    cudaMalloc(&parity_batch_d, (size_t)FT8_LDPC_BATCH * sizeof(bool));
+    cudaMalloc(&x_hat_batch_d,  FTX_LDPC_N * sizeof(uint8_t));
+    cudaMalloc(&parity_batch_d, sizeof(bool));
 
     cudaStream_t s;
     cudaStreamCreate(&s);
-    ft8_ldpc_decode_batch(llr_batch_d, x_hat_batch_d, parity_batch_d, s, 1);
+    ft8_ldpc_decode_batch(n_cand_d, llr_batch_d, x_hat_batch_d, parity_batch_d, s);
     cudaStreamSynchronize(s);
 
     bool got_parity = false;
@@ -65,7 +69,8 @@ static bool run_test(const char* name,
     }
 
     cudaFree(llr_d); cudaFree(x_hat_d); cudaFree(parity_d);
-    cudaFree(llr_batch_d); cudaFree(x_hat_batch_d); cudaFree(parity_batch_d);
+    cudaFree(n_cand_d); cudaFree(llr_batch_d);
+    cudaFree(x_hat_batch_d); cudaFree(parity_batch_d);
     cudaStreamDestroy(s);
     return ok;
 }

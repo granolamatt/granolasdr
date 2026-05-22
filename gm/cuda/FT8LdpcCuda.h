@@ -18,10 +18,10 @@
 
 void ft8_ldpc_init_constants();
 void ft8_ldpc_decode_batch(
-    const float* log174_d,
-    uint8_t*     x_hat_d,
-    bool*        parity_d,
-    cudaStream_t ldpc_stream,
-    uint32_t     n_candidates);
+    const uint32_t* n_cand_d,
+    const float*    log174_d,
+    uint8_t*        x_hat_d,
+    bool*           parity_d,
+    cudaStream_t    ldpc_stream);
 
 #endif // _GM_CUDA_FT8LDPCCUDA_H_

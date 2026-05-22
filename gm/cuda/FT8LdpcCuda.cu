@@ -231,15 +231,15 @@ static const int k_deg_v[174] = {
 
 __launch_bounds__(192)
 __global__ void qp_admm_ft8_kernel(
-    int          B,
-    const float* llr,
-    uint8_t*     x_hat,
-    bool*        parity
+    const uint32_t* n_cand_d,
+    const float*    llr,
+    uint8_t*        x_hat,
+    bool*           parity
 )
 {
     const int b   = blockIdx.x;
     const int tid = threadIdx.x;
-    if (b >= B) return;
+    if ((uint32_t)b >= *n_cand_d) return;
 
     __shared__ float s_scale;
     __shared__ float sx[N];
@@ -319,7 +319,13 @@ __global__ void qp_admm_ft8_kernel(
                 if (vk > w_max) w_max = vk;
             }
 
-            const float k_target = 2.0f * rintf(s * 0.5f);
+            // k_target = nearest even integer to s, clamped to [0, floor(d/2)*2].
+            // Without the clamp, odd-degree check nodes (d=7) with s==d produce
+            // k_raw = d+1 (IEEE round-to-even: rintf(3.5)=4 → 8 > 7), making the
+            // bisection impossible: it drives theta → -∞ and sets all z_k = 1
+            // (odd parity), permanently stalling ADMM on those rows.
+            const float k_raw    = 2.0f * rintf(s * 0.5f);
+            const float k_target = fmaxf(0.0f, fminf((float)(d & ~1), k_raw));
             float lo = w_min - 1.0f, hi = w_max + 1e-6f;
             for (int bb = 0; bb < 30; ++bb) {
                 const float mid = (lo + hi) * 0.5f;
@@ -374,14 +380,16 @@ void ft8_ldpc_init_constants()
 }
 
 void ft8_ldpc_decode_batch(
-    const float* log174_d,
-    uint8_t*     x_hat_d,
-    bool*        parity_d,
-    cudaStream_t ldpc_stream,
-    uint32_t     n_candidates)
+    const uint32_t* n_cand_d,
+    const float*    log174_d,
+    uint8_t*        x_hat_d,
+    bool*           parity_d,
+    cudaStream_t    ldpc_stream)
 {
-    if (n_candidates == 0) return;
-    qp_admm_ft8_kernel<<<n_candidates, BLOCK, 0, ldpc_stream>>>(
-        (int)n_candidates, log174_d, x_hat_d, parity_d);
-    cudaGetLastError(); // kernel launch errors surface here
+    // Launch FT8_LDPC_BATCH blocks; each block exits immediately if blockIdx.x >= *n_cand_d.
+    // Avoids a CPU-side synchronization to read the count — n_cand_d is a device pointer
+    // already valid after scan_done, which ldpc_stream waits for before running this kernel.
+    qp_admm_ft8_kernel<<<FT8_LDPC_BATCH, BLOCK, 0, ldpc_stream>>>(
+        n_cand_d, log174_d, x_hat_d, parity_d);
+    cudaGetLastError();
 }

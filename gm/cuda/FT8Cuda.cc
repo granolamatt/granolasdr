@@ -336,17 +336,13 @@ int FT8Cuda::doCopy(uint64_t now) {
                     scan_stream);
                 cudaEventRecord(scan_done, scan_stream);
 
-                // Read actual candidate count from device before launching LDPC.
-                // scan_done has been recorded; synchronize to ensure count is final,
-                // then D2H 4 bytes so we launch only as many blocks as needed.
-                // (Without this we'd launch 500K blocks for ~21K real candidates.)
-                cudaEventSynchronize(scan_done);
-                uint32_t n_ldpc = 0;
-                cudaMemcpy(&n_ldpc, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-                n_ldpc = std::min(n_ldpc, (uint32_t)FT8_GPU_CAND_MAX);
-
+                // Dispatch LDPC batch decode on ldpc_stream after scan_done.
+                // Pass gpu_cand_count_d as a device pointer; each block checks it
+                // and exits immediately if blockIdx.x >= *n_cand_d.  No CPU-side
+                // sync needed — ldpc_stream already waits for scan_done, which
+                // guarantees the count is final before any block reads it.
                 cudaStreamWaitEvent(ldpc_stream, scan_done, 0);
-                ft8_ldpc_decode_batch(log174_d, x_hat_d, parity_d, ldpc_stream, n_ldpc);
+                ft8_ldpc_decode_batch(gpu_cand_count_d, log174_d, x_hat_d, parity_d, ldpc_stream);
                 cudaEventRecord(ldpc_done, ldpc_stream);
 
                 if (last_snapshot_thread.joinable())
