@@ -32,8 +32,8 @@ struct GpuScanResult {
     std::vector<bool>     parity;  // parity check result per candidate
 };
 
-// Per-slot continuous scan candidate cap (much smaller than FT8_GPU_CAND_MAX).
-static const uint32_t CONT_CAND_MAX = 5000;
+// Per-slot continuous scan candidate cap.  Sized above epoch peak (~150) with margin.
+static const uint32_t CONT_CAND_MAX = 1000;
 
 // One slot in the continuous Costas scan pipeline.  Each slot owns its own
 // device and pinned-host buffers so cont_scan_stream can fill slot N+1 while
@@ -160,6 +160,7 @@ private:
 
     // Continuous Costas scan path.
     static const int CONTINUOUS_SLOTS = 8;
+    int cont_stride{6};  // scan every Nth ring block (~1/sec at stride=6)
     ContScanResult cont_slots[CONTINUOUS_SLOTS];
     std::atomic<uint64_t> cont_write_idx{0};
     std::atomic<uint64_t> cont_read_idx{0};

@@ -585,8 +585,6 @@ namespace hf {
             float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
             float snr      = (float)r.score[i] - 26.0f;
 
-            printf("[CONT] %s freq=%.1fHz snr=%.1f unix=%.0f offset=%.3fs\n",
-                   text, freq_hz, snr, r.timestamp, time_sec);
             publishDecoded(text, freq_hz, snr, r.timestamp, time_sec);
             window_decode_count.fetch_add(1, std::memory_order_relaxed);
         }

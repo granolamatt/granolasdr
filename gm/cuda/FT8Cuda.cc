@@ -292,9 +292,10 @@ int FT8Cuda::doCopy(uint64_t now) {
             // Commit all device ring writes; both epoch and continuous paths wait on this.
             cudaEventRecord(ring_ready, stream);
 
-            // Continuous Costas scan: run on every ring slot once the ring is full.
+            // Continuous Costas scan: run every cont_stride blocks (~1/sec at stride=6).
             if (cont_scan_active.load(std::memory_order_acquire) &&
-                ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS) {
+                ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS &&
+                ring_write_idx % cont_stride == 0) {
                 uint64_t wi = cont_write_idx.load(std::memory_order_relaxed);
                 uint64_t ri = cont_read_idx.load(std::memory_order_acquire);
                 if (wi - ri >= (uint64_t)CONTINUOUS_SLOTS) {
@@ -663,8 +664,7 @@ void FT8Cuda::contWorker() {
                 try {
                     decode_callback(slot);
                 } catch (...) {
-                    fprintf(stderr, "[CONT] decode_callback threw at slot %lu\n",
-                            (unsigned long)(ri % CONTINUOUS_SLOTS));
+                    fprintf(stderr, "[CONT] decode_callback threw\n");
                 }
             }
         }
