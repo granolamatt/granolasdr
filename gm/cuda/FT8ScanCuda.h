@@ -24,5 +24,5 @@ void ft8_gpu_scan(
     int16_t*  cand_score_d,
     uint32_t* cand_count_d,
     uint32_t  max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr, int min_score,
+    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
     cudaStream_t stream);

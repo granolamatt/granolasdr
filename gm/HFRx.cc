@@ -21,7 +21,7 @@ int main(int argc, char* argv[]) {
     bool use_gpu_ldpc  = false;
     std::string ctrl_host = "127.0.0.1";
     int ctrl_port = 8080;
-    int min_score = 5;
+    float min_score = 3.0f;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--jtdx") == 0) {
@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--control-port") == 0 && i + 1 < argc) {
             ctrl_port = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
-            min_score = std::stoi(argv[++i]);
+            min_score = std::stof(argv[++i]);
         }
     }
 

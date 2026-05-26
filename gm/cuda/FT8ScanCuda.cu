@@ -28,6 +28,8 @@ static __constant__ uint8_t kCostas[7] = {3, 1, 4, 0, 6, 5, 2};
 //   WINDOW    = blockDim.x + 8  (thread fo range plus max tone offset)
 // All threads cooperatively load the 21 windows in a coalesced stride-1 pattern,
 // then compute the Costas score entirely from shared memory (no further global reads).
+// Score metric: max-log 8-FSK — per symbol, expected tone minus best competitor tone,
+// averaged over valid Costas symbols.  Units: 0.5 dB per LSB (matches uint8 encoding).
 
 #define NUM_COSTAS_SLOTS 21
 
@@ -41,7 +43,7 @@ __global__ void ft8SyncScanKernel(
     int16_t*  __restrict__ cand_score,
     uint32_t* __restrict__ cand_count,
     uint32_t max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr, int min_score)
+    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score)
 {
     const int BLOCK_SZ = blockDim.x;
     const int WINDOW   = BLOCK_SZ + 8;  // covers tone offsets 0..7
@@ -86,40 +88,34 @@ __global__ void ft8SyncScanKernel(
     // Threads outside the valid bin range helped load smem; now they exit.
     if (fo > num_bins - 8) return;
 
-    // Compute Costas sync score entirely from shared memory.
-    int score = 0, num_avg = 0;
+    // Max-log 8-FSK Costas score: expected tone minus best competitor, per symbol.
+    int score = 0, num_valid = 0;
 
     for (int m = 0; m < 3; ++m) {
         for (int k = 0; k < 7; ++k) {
             int block_abs = time_off + 36 * m + k;
             if (block_abs >= num_blocks) break;
 
-            int sm  = kCostas[k];
-            int si  = (m * 7 + k) * WINDOW + threadIdx.x;  // base index in smem for this slot+thread
+            int sm = kCostas[k];
+            int si = (m * 7 + k) * WINDOW + threadIdx.x;
+
             int cur = (int)smem[si + sm];
 
-            // Frequency neighbors.
-            if (sm > 0) { score += cur - (int)smem[si + sm - 1]; ++num_avg; }
-            if (sm < 7) { score += cur - (int)smem[si + sm + 1]; ++num_avg; }
+            int best_other = 0;
+            for (int j = 0; j < 8; ++j) {
+                if (j == sm) continue;
+                int v = (int)smem[si + j];
+                if (v > best_other) best_other = v;
+            }
 
-            // Temporal neighbor: one block back.
-            if (k > 0 && block_abs > 0) {
-                int si_prev = (m * 7 + k - 1) * WINDOW + threadIdx.x;
-                score += cur - (int)smem[si_prev + sm];
-                ++num_avg;
-            }
-            // Temporal neighbor: one block forward.
-            if (k < 6 && block_abs + 1 < num_blocks) {
-                int si_next = (m * 7 + k + 1) * WINDOW + threadIdx.x;
-                score += cur - (int)smem[si_next + sm];
-                ++num_avg;
-            }
+            score += cur - best_other;
+            ++num_valid;
         }
     }
 
-    if (num_avg == 0) return;
-    score /= num_avg;
-    if (score < min_score) return;
+    if (num_valid == 0) return;
+    float fscore = (float)score / (float)num_valid;
+    if (fscore < min_score) return;
 
     uint32_t idx = atomicAdd(cand_count, 1u);
     if (idx < max_cands) {
@@ -127,7 +123,8 @@ __global__ void ft8SyncScanKernel(
         cand_to[idx]    = (uint8_t)time_off;
         cand_ts[idx]    = (uint8_t)time_sub;
         cand_fs[idx]    = (uint8_t)freq_sub;
-        cand_score[idx] = (int16_t)(score > 32767 ? 32767 : score);
+        int16_t s16     = (fscore >= 32767.0f) ? 32767 : (int16_t)fscore;
+        cand_score[idx] = s16;
     }
 }
 
@@ -141,7 +138,7 @@ void ft8_gpu_scan(
     int16_t*  cand_score_d,
     uint32_t* cand_count_d,
     uint32_t  max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr, int min_score,
+    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
     cudaStream_t stream)
 {
     cudaMemsetAsync(cand_count_d, 0, sizeof(uint32_t), stream);

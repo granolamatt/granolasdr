@@ -27,7 +27,7 @@
 namespace gm {
 namespace cuda {
 
-FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, int min_score) :
+FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, float min_score) :
 inPos(inP),
 buff_pos{0},
 ring_write_idx(0),
