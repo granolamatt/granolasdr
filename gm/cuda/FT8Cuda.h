@@ -32,6 +32,34 @@ struct GpuScanResult {
     std::vector<bool>     parity;  // parity check result per candidate
 };
 
+// Per-slot continuous scan candidate cap (much smaller than FT8_GPU_CAND_MAX).
+static const uint32_t CONT_CAND_MAX = 5000;
+
+// One slot in the continuous Costas scan pipeline.  Each slot owns its own
+// device and pinned-host buffers so cont_scan_stream can fill slot N+1 while
+// contWorker is consuming slot N — no aliasing between the two paths.
+struct ContScanResult {
+    uint32_t* count_d{nullptr};
+    int32_t*  fo_d{nullptr};
+    uint8_t*  to_d{nullptr};
+    uint8_t*  ts_d{nullptr};
+    uint8_t*  fs_d{nullptr};
+    int16_t*  score_d{nullptr};
+    float*    log174_d{nullptr};
+
+    uint32_t* count{nullptr};
+    int32_t*  fo{nullptr};
+    uint8_t*  to{nullptr};
+    uint8_t*  ts{nullptr};
+    uint8_t*  fs{nullptr};
+    int16_t*  score{nullptr};
+    float*    log174{nullptr};
+
+    double      timestamp{0.0};
+    cudaEvent_t event{};
+    std::atomic<bool> dispatched{false};
+};
+
 class FT8Cuda : public Thread {
 public:
     FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool enable_corpus = false, float min_score = 5.0f);
@@ -47,6 +75,13 @@ public:
     const GpuScanResult& getGpuScanResult(int slot) const {
         return gpu_results[slot];
     }
+
+    // Register callback invoked by contWorker for each scan slot with candidates.
+    // Must be called before startContinuousScan().
+    void setDecodeCallback(std::function<void(ContScanResult&)> cb);
+
+    // Start the continuous-path worker thread.
+    void startContinuousScan();
 
 private:
     cudaStream_t stream;
@@ -122,6 +157,21 @@ private:
     static const int AUDIO_RING_SLOTS = 244; // ≥ 2 × FT8_CAPTURE_BLOCKS (120), prevents snapshot/write race
     std::complex<float>* audioBins_host;      // pinned ring: 20m, AUDIO_RING_SLOTS × FT8_AUDIO_BINS
     std::complex<float>* audioBins_host_10m;  // pinned ring: 10m, AUDIO_RING_SLOTS × FT8_AUDIO_BINS
+
+    // Continuous Costas scan path.
+    static const int CONTINUOUS_SLOTS = 8;
+    ContScanResult cont_slots[CONTINUOUS_SLOTS];
+    std::atomic<uint64_t> cont_write_idx{0};
+    std::atomic<uint64_t> cont_read_idx{0};
+    std::atomic<bool>     cont_scan_active{false};
+    std::thread           cont_worker_thread;
+    std::function<void(ContScanResult&)> decode_callback;
+    cudaStream_t cont_scan_stream{};
+    cudaEvent_t  cont_ring_ready{};
+
+    void allocContSlots();
+    void freeContSlots();
+    void contWorker();
 };
 }
 }

@@ -10,6 +10,7 @@
 
 // Forward-declare CUDA types so ft8.h doesn't pull in CUDA headers.
 namespace gm { namespace cuda { class FT8Cuda; } }
+namespace gm { namespace cuda { struct ContScanResult; } }
 
 namespace gm {
 namespace hf {
@@ -31,6 +32,10 @@ public:
     // publish one decoded message; callable from any thread (zmq_mutex_ protected)
     void publishDecoded(const char* callsign, float freq_hz, float snr,
                         double unix_time, float time_offset);
+
+    // Decode and publish candidates from the continuous Costas scan path.
+    // Called from contWorker via the FT8Cuda decode callback.
+    void decodeAndPublishContinuous(gm::cuda::ContScanResult& r);
 
 private:
     monitor_t mon;

@@ -164,6 +164,14 @@ ftx_callsign_hash_interface_t hash_if = {
     .save_hash = hashtable_add
 };
 
+// Continuous path: reads hashtable but never writes it (save_hash=nullptr).
+// Callsigns first seen on the continuous path appear as hash codes until the
+// epoch path encounters them — acceptable for a supplemental decoder.
+ftx_callsign_hash_interface_t cont_hash_if = {
+    .lookup_hash = hashtable_lookup,
+    .save_hash = nullptr
+};
+
 static std::atomic<int> window_decode_count{0};
 static time_t           window_start_ts{0};
 
@@ -554,6 +562,31 @@ namespace hf {
                     wall, unix_time, fmod(unix_time, 15.0),
                     (double)time_offset, (double)freq_hz, (double)snr, callsign);
             fflush(timing_log_);
+        }
+    }
+
+    void FT8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r) {
+        uint32_t n = std::min(*r.count, gm::cuda::CONT_CAND_MAX);
+        if (n == 0) return;
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
+            ftx_message_t msg;
+            ftx_decode_status_t st;
+            if (!ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) continue;
+
+            char text[FTX_MAX_MESSAGE_LENGTH];
+            ftx_message_rc_t rc = ftx_message_decode(&msg, &cont_hash_if, text);
+            if (rc != FTX_MESSAGE_RC_OK) continue;
+
+            float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
+            float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
+            float snr      = (float)r.score[i] - 26.0f;
+
+            printf("[CONT] %s freq=%.1fHz snr=%.1f unix=%.0f offset=%.3fs\n",
+                   text, freq_hz, snr, r.timestamp, time_sec);
+            publishDecoded(text, freq_hz, snr, r.timestamp, time_sec);
+            window_decode_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
