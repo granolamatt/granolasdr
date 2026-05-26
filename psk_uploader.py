@@ -75,12 +75,13 @@ def _receiver_block(rx_call: str, rx_grid: str, rig: str) -> bytes:
 
 
 def _dedup_reports(reports: list[dict]) -> list[dict]:
-    """One report per callsign: keep the entry with the best SNR."""
-    best: dict[str, dict] = {}
+    """One report per (callsign, band): keep the entry with the best SNR.
+    Band bucket is freq // 1_000_000 so 20m and 10m are always distinct."""
+    best: dict[tuple, dict] = {}
     for r in reports:
-        call = r["call"]
-        if call not in best or r["snr"] > best[call]["snr"]:
-            best[call] = r
+        key = (r["call"], int(r["freq"]) // 1_000_000)
+        if key not in best or r["snr"] > best[key]["snr"]:
+            best[key] = r
     return list(best.values())
 
 
