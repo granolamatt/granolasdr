@@ -74,12 +74,22 @@ def _receiver_block(rx_call: str, rx_grid: str, rig: str) -> bytes:
     return struct.pack(">HH", 0x9992, 4 + len(payload)) + payload
 
 
+def _dedup_reports(reports: list[dict]) -> list[dict]:
+    """One report per callsign: keep the entry with the best SNR."""
+    best: dict[str, dict] = {}
+    for r in reports:
+        call = r["call"]
+        if call not in best or r["snr"] > best[call]["snr"]:
+            best[call] = r
+    return list(best.values())
+
+
 def _sender_block(reports: list[dict]) -> bytes:
     """99 93 ll ll + one record per report."""
     records = b""
     for r in reports:
         snr = max(-128, min(127, int(round(r["snr"]))))
-        records += (
+        rec = (
             _str(r["call"]) +
             struct.pack(">I", int(r["freq"])) +
             struct.pack(">b", snr) +
@@ -88,6 +98,10 @@ def _sender_block(reports: list[dict]) -> bytes:
             struct.pack(">B", 1) +          # informationSource=1 (auto extracted)
             struct.pack(">I", int(r["unix"]))
         )
+        if 4 + len(records) + len(rec) + 3 > 65535:  # +3 for worst-case pad
+            print(f"[psk] sender block full at {len(reports)} reports, truncating")
+            break
+        records += rec
     records = _pad4(records)
     return struct.pack(">HH", 0x9993, 4 + len(records)) + records
 
@@ -174,9 +188,10 @@ def main():
                 last_template_time = time.time()
 
             try:
-                upload(rx_call, rx_grid, rx_rig, pending, seq, session_id, include_tmpl,
+                to_send = _dedup_reports(pending)
+                upload(rx_call, rx_grid, rx_rig, to_send, seq, session_id, include_tmpl,
                        PSK_HOST, psk_port)
-                seq += len(pending)   # seq = cumulative report count, not packet count
+                seq += len(to_send)   # seq = cumulative report count, not packet count
                 packets_sent += 1
                 pending.clear()
                 last_upload = time.time()
