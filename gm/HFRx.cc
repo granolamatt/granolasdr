@@ -51,6 +51,18 @@ int main(int argc, char* argv[]) {
         ft8.decodeAndPublishContinuous(r);
     });
     ft8channel.startContinuousScan();
+
+    // Wire SSE broadcast: FT8Cuda timing → HFChannelizer SSE, FT8 decode → HFChannelizer SSE.
+    ft8channel.setTimingCallback([&epochbuffer](float scan_ms, float ldpc_ms, uint32_t n) {
+        epochbuffer.broadcastTiming(scan_ms, ldpc_ms, n);
+    });
+    ft8.setBroadcastCallback([&epochbuffer](const char* call, float freq_hz, float snr, double unix_time) {
+        epochbuffer.broadcastDecode(call, freq_hz, snr, unix_time);
+    });
+    ft8channel.setWaterfallCallback([&epochbuffer](const uint8_t* data, int len) {
+        epochbuffer.broadcastWaterfall(data, len);
+    });
+
     ft8.start();
 
     while (true) {

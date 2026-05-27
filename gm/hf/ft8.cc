@@ -558,12 +558,16 @@ namespace hf {
         int len = snprintf(buf, sizeof(buf),
             "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
             callsign, (double)freq_hz, (double)snr, unix_time, (double)time_offset);
-        if (zmq_port_ > 0) {
-            zmq::message_t msg(buf, len);
+        {
             std::lock_guard<std::mutex> lk(zmq_mutex_);
-            auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
-            if (!result)
-                fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+            if (zmq_port_ > 0) {
+                zmq::message_t msg(buf, len);
+                auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
+                if (!result)
+                    fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+            }
+            if (broadcast_callback_)
+                broadcast_callback_(callsign, freq_hz, snr, unix_time);
         }
 
         if (timing_log_) {

@@ -2,8 +2,14 @@
 #define _GM_CUDA_HFCHANNELIZER_H_
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 #include <cuda.h>
 #include <cufft.h>
 #include <zmq.hpp>
@@ -13,6 +19,30 @@
 
 namespace gm {
 namespace cuda {
+
+// Per-SSE-connection event queue.  push() evicts oldest when full (depth 200).
+// pop() blocks up to 15 s; returns a keep-alive SSE comment on timeout so that
+// httplib's content provider can detect a broken connection via sink.write().
+struct SseQueue {
+    void push(std::string frame) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (q_.size() >= 200) q_.pop();
+        q_.push(std::move(frame));
+        cv_.notify_one();
+    }
+    std::string pop() {
+        std::unique_lock<std::mutex> lk(mutex_);
+        cv_.wait_for(lk, std::chrono::seconds(15), [this]{ return !q_.empty(); });
+        if (!q_.empty()) {
+            auto s = std::move(q_.front()); q_.pop(); return s;
+        }
+        return ": keep-alive\n\n";
+    }
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::queue<std::string> q_;
+};
 
 class HFChannelizer : public Thread {
 public:
@@ -27,6 +57,21 @@ public:
     gm::buffer::BufferPosition<std::complex<float>>* getBuffer() {
         return &hfBufferPosition;
     }
+
+    // Register the timing callback; called by HFRx.cc after constructing FT8Cuda.
+    // FT8Cuda's snapshot thread calls this with (scan_ms, ldpc_ms, n) after each epoch.
+    void setTimingCallback(std::function<void(float, float, uint32_t)> cb) {
+        timing_callback_ = std::move(cb);
+    }
+
+    // Push a decode event to all connected SSE clients.
+    // Called from FT8::publishDecoded (via broadcast_callback_ set in HFRx.cc).
+    void broadcastDecode(const char* call, float freq_hz, float snr, double unix_time);
+
+    // Push a timing event to all connected SSE clients.
+    // Called from the timing_callback_ registered with FT8Cuda.
+    void broadcastTiming(float scan_ms, float ldpc_ms, uint32_t n);
+
 private:
     cudaStream_t stream;
     cufftHandle plan;
@@ -78,11 +123,28 @@ private:
     std::thread audio_thread;
     void audioWorker();
 
-    // REST control server (cpp-httplib, runs in its own thread)
+    // REST control server + SSE event broadcast (cpp-httplib, runs in its own thread)
     std::string ctrl_host_;
     int         ctrl_port_;
     std::thread ctrl_thread;
     void controlWorker();
+
+    // SSE broadcast state: one SseQueue per connected browser tab.
+    std::mutex sse_mutex_;
+    std::vector<std::shared_ptr<SseQueue>> sse_queues_;
+
+    // Registered by HFRx.cc so FT8Cuda's snapshot thread can push timing data.
+    std::function<void(float, float, uint32_t)> timing_callback_;
+
+    // WebSocket /waterfall: one frame queue per connected browser tab.
+    // Uses SseQueue (stores std::string) for binary waterfall frames.
+    std::mutex ws_mutex_;
+    std::vector<std::shared_ptr<SseQueue>> ws_queues_;
+
+public:
+    // Called from FT8Cuda's waterfall_callback_ with each 2048-byte frame.
+    void broadcastWaterfall(const uint8_t* data, int len);
+private:
 
     zmq::context_t audio_zmq_ctx;
     zmq::socket_t* audio_sockets[NUM_SINKS];

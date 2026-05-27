@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 // Upper bound on GPU candidates returned per epoch.
-static const uint32_t FT8_GPU_CAND_MAX = 500000;
+static const uint32_t FT8_GPU_CAND_MAX = 2048;
 
 // Launch the FT8 sync score scan kernel.
 //

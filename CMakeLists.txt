@@ -42,6 +42,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/FT8ScanCuda.cu"
     "gm/cuda/FT8SoftCuda.cu"
     "gm/cuda/FT8LdpcCuda.cu"
+    "gm/cuda/WaterfallKernel.cu"
     "gm/cuda/OverlapSave.cc"
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"

@@ -80,6 +80,12 @@ public:
     // Must be called before startContinuousScan().
     void setDecodeCallback(std::function<void(ContScanResult&)> cb);
 
+    // Register callback invoked after each epoch scan completes with
+    // (scan_ms, ldpc_ms, n).  Called from the snapshot thread.
+    void setTimingCallback(std::function<void(float, float, uint32_t)> cb) {
+        timing_callback_ = std::move(cb);
+    }
+
     // Start the continuous-path worker thread.
     void startContinuousScan();
 
@@ -141,6 +147,7 @@ private:
     GpuScanResult gpu_results[BUFFERS];
 
     float min_score;
+    int consecutive_timeouts_{0}; // cascade timeout detector (Phase 7)
 
     std::vector<std::vector<uint32_t>> bins;
     size_t rfft_length;
@@ -168,8 +175,23 @@ private:
     std::atomic<bool>     cont_scan_active{false};
     std::thread           cont_worker_thread;
     std::function<void(ContScanResult&)> decode_callback;
+    std::function<void(float, float, uint32_t)> timing_callback_;
     cudaStream_t cont_scan_stream{};
     cudaEvent_t  cont_ring_ready{};
+
+    // Wideband waterfall (Phase 9): 2048-byte decimated snapshot per ring block.
+    static const int WATERFALL_BINS = 2048;
+    cudaStream_t waterfall_stream{};
+    cudaEvent_t  waterfall_ready{};
+    uint8_t*     waterfall_d{nullptr};   // device: WATERFALL_BINS bytes
+    uint8_t*     waterfall_host{nullptr}; // pinned host: WATERFALL_BINS bytes
+    std::function<void(const uint8_t*, int)> waterfall_callback_;
+
+public:
+    void setWaterfallCallback(std::function<void(const uint8_t*, int)> cb) {
+        waterfall_callback_ = std::move(cb);
+    }
+private:
 
     void allocContSlots();
     void freeContSlots();

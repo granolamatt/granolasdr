@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>granolasdr control</title>
 <style>
-  body { font-family: monospace; background: #1a1a1a; color: #e0e0e0; max-width: 600px; margin: 40px auto; padding: 0 16px; }
-  h1 { color: #7ec8e3; font-size: 1.2em; margin-bottom: 24px; }
-  .sink { border: 1px solid #333; border-radius: 4px; padding: 14px; margin-bottom: 12px; }
+  body { font-family: monospace; background: #1a1a1a; color: #e0e0e0; max-width: 900px; margin: 40px auto; padding: 0 16px; }
+  h1 { color: #7ec8e3; font-size: 1.2em; margin-bottom: 20px; }
+  h2 { color: #aaa; font-size: 0.95em; margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 1px; }
+  /* sinks */
+  .sink { border: 1px solid #333; border-radius: 4px; padding: 14px; margin-bottom: 10px; }
   .sink-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
   .sink-id { color: #7ec8e3; font-weight: bold; min-width: 50px; }
   .sink-label { color: #aaa; font-size: 0.9em; flex: 1; }
@@ -17,18 +19,191 @@
   select { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 5px 8px; font-family: monospace; }
   button { background: #2a4a5a; color: #e0e0e0; border: 1px solid #7ec8e3; border-radius: 3px; padding: 5px 12px; cursor: pointer; font-family: monospace; }
   button:hover { background: #3a6a8a; }
-  .status-bar { font-size: 0.8em; color: #666; margin-top: 20px; }
   .error { color: #e87070; font-size: 0.85em; margin-top: 4px; }
+  /* dashboard panels */
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 600px) { .panels { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid #333; border-radius: 4px; padding: 12px; }
+  /* GPU timing */
+  .timing-row { display: flex; gap: 20px; }
+  .timing-val { font-size: 1.4em; color: #98e890; }
+  .timing-lbl { font-size: 0.75em; color: #666; }
+  /* band summary */
+  #band-table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+  #band-table th { color: #666; font-weight: normal; text-align: left; padding: 3px 6px; border-bottom: 1px solid #333; }
+  #band-table td { padding: 3px 6px; }
+  .band-active { color: #98e890; }
+  /* decode stream */
+  #decode-list { list-style: none; padding: 0; margin: 0; max-height: 260px; overflow-y: auto; font-size: 0.82em; }
+  #decode-list li { border-bottom: 1px solid #222; padding: 3px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dc-snr { color: #7ec8e3; display: inline-block; width: 52px; }
+  .dc-freq { color: #aaa; display: inline-block; width: 72px; }
+  .dc-band { color: #666; display: inline-block; width: 36px; }
+  /* status bar */
+  .status-bar { font-size: 0.75em; color: #555; margin-top: 16px; display: flex; gap: 20px; }
+  #sse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #555; margin-right: 4px; }
+  #sse-dot.on { background: #98e890; }
 </style>
 </head>
 <body>
-<h1>granolasdr — 4 tunable sinks</h1>
+<h1>granolasdr</h1>
+
+<div class="panels">
+  <!-- GPU timing -->
+  <div class="panel">
+    <h2>GPU timing</h2>
+    <div class="timing-row">
+      <div>
+        <div class="timing-val" id="t-scan">—</div>
+        <div class="timing-lbl">scan ms</div>
+      </div>
+      <div>
+        <div class="timing-val" id="t-ldpc">—</div>
+        <div class="timing-lbl">ldpc ms</div>
+      </div>
+      <div>
+        <div class="timing-val" id="t-cands">—</div>
+        <div class="timing-lbl">candidates</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- per-band summary (15-min window) -->
+  <div class="panel">
+    <h2>bands — 15 min window</h2>
+    <table id="band-table">
+      <thead><tr><th>band</th><th>decodes</th><th>best SNR</th></tr></thead>
+      <tbody id="band-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- decode stream -->
+<h2>decode stream <span style="color:#555;font-size:0.8em">(newest first, last 200)</span></h2>
+<ul id="decode-list"></ul>
+
+<!-- wideband waterfall -->
+<h2>wideband waterfall <span id="wf-status" style="color:#555;font-size:0.8em">disconnected</span></h2>
+<canvas id="waterfall" width="2048" height="200" style="width:100%;image-rendering:pixelated;display:block;border:1px solid #333;"></canvas>
+<div id="wf-bands" style="position:relative;height:16px;font-size:0.7em;color:#666;margin-bottom:8px;"></div>
+
+<!-- tunable sinks -->
+<h2>tunable sinks</h2>
 <div id="sinks"></div>
-<div class="status-bar" id="status-bar">loading...</div>
+
+<div class="status-bar">
+  <span><span id="sse-dot"></span>SSE <span id="sse-status">disconnected</span></span>
+  <span>last poll: <span id="status-bar">—</span></span>
+</div>
 
 <script>
-const PRESETS = [];
+// Band mapping: [min_hz, max_hz, name]
+const BANDS = [
+  [1800000,  2000000, '160m'],
+  [3500000,  4000000,  '80m'],
+  [5330000,  5410000,  '60m'],
+  [7000000,  7300000,  '40m'],
+  [10100000, 10150000, '30m'],
+  [14000000, 14350000, '20m'],
+  [18068000, 18168000, '17m'],
+  [21000000, 21450000, '15m'],
+  [24890000, 24990000, '12m'],
+  [28000000, 29700000, '10m'],
+  [50000000, 54000000,  '6m'],
+];
+function freqToBand(hz) {
+  for (const [lo, hi, name] of BANDS) if (hz >= lo && hz <= hi) return name;
+  return '?';
+}
 
+// Per-band accumulator for current 15-min window.
+const bandMap = new Map(); // name → {count, bestSnr}
+let windowStart = 0;
+
+function windowBoundary(unix) {
+  return Math.floor(unix / 900) * 900;
+}
+
+function maybeResetWindow(unix) {
+  const wb = windowBoundary(unix);
+  if (windowStart === 0) windowStart = wb;
+  if (wb > windowStart) { bandMap.clear(); windowStart = wb; }
+}
+
+// Dedup: same callsign + freq-bin + 15-s epoch = duplicate from cont/epoch overlap.
+const seenDecodes = new Map(); // key → expiry unix
+function isDuplicate(ev) {
+  const bin = Math.round(ev.freq / 6.25);
+  const epoch = Math.floor(ev.unix / 15);
+  const key = `${ev.call}|${bin}|${epoch}`;
+  const now = Date.now() / 1000;
+  if (seenDecodes.has(key) && seenDecodes.get(key) > now) return true;
+  seenDecodes.set(key, now + 30); // expire after 30 s
+  // Prune old entries periodically to avoid unbounded growth.
+  if (seenDecodes.size > 500) {
+    for (const [k, exp] of seenDecodes) if (exp <= now) seenDecodes.delete(k);
+  }
+  return false;
+}
+
+function addDecode(ev) {
+  if (isDuplicate(ev)) return;
+  maybeResetWindow(ev.unix);
+  const band = freqToBand(ev.freq);
+  const cur = bandMap.get(band) || { count: 0, bestSnr: -99 };
+  cur.count++;
+  if (ev.snr > cur.bestSnr) cur.bestSnr = ev.snr;
+  bandMap.set(band, cur);
+  renderBandTable();
+  prependDecode(ev, band);
+}
+
+function renderBandTable() {
+  const tbody = document.getElementById('band-tbody');
+  const sorted = [...bandMap.entries()].sort((a, b) => b[1].count - a[1].count);
+  tbody.innerHTML = sorted.map(([band, {count, bestSnr}]) =>
+    `<tr><td class="band-active">${band}</td><td>${count}</td><td>${bestSnr > -99 ? bestSnr.toFixed(1) : '—'}</td></tr>`
+  ).join('') || '<tr><td colspan="3" style="color:#555">no decodes this window</td></tr>';
+}
+
+function prependDecode(ev, band) {
+  const ul = document.getElementById('decode-list');
+  const snrStr = (ev.snr >= 0 ? '+' : '') + ev.snr.toFixed(1);
+  const freqStr = (ev.freq / 1e6).toFixed(4);
+  const t = new Date(ev.unix * 1000).toISOString().substr(11, 8);
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="dc-snr">${snrStr} dB</span><span class="dc-freq">${freqStr} MHz</span><span class="dc-band">${band}</span> ${escHtml(ev.call)} <span style="color:#555">${t}</span>`;
+  ul.insertBefore(li, ul.firstChild);
+  while (ul.children.length > 200) ul.removeChild(ul.lastChild);
+}
+
+function updateTiming(ev) {
+  document.getElementById('t-scan').textContent = ev.scan_ms.toFixed(1);
+  document.getElementById('t-ldpc').textContent = ev.ldpc_ms.toFixed(1);
+  document.getElementById('t-cands').textContent = ev.n;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// SSE connection
+function connectSSE() {
+  const dot = document.getElementById('sse-dot');
+  const status = document.getElementById('sse-status');
+  const es = new EventSource('/events');
+  es.onopen = () => { dot.className = 'on'; status.textContent = 'connected'; };
+  es.onerror = () => { dot.className = ''; status.textContent = 'reconnecting…'; };
+  es.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch(_) { return; }
+    if (ev.type === 'decode') addDecode(ev);
+    else if (ev.type === 'timing') updateTiming(ev);
+  };
+}
+
+// Tunable sinks (existing REST poll)
+const PRESETS = [];
 async function loadPresets() {
   try {
     const r = await fetch('/api/presets');
@@ -36,12 +211,10 @@ async function loadPresets() {
     PRESETS.splice(0, Infinity, ...d.presets);
   } catch(e) {}
 }
-
 function sinkHtml(s) {
-  const presetOpts = PRESETS.map(p =>
+  const opts = PRESETS.map(p =>
     `<option value="${p.freq_hz}">${p.name} (${(p.freq_hz/1e6).toFixed(4)} MHz)</option>`
   ).join('');
-
   return `
   <div class="sink" id="sink-${s.id}">
     <div class="sink-header">
@@ -50,88 +223,141 @@ function sinkHtml(s) {
       <span class="sink-freq" id="freq-${s.id}">${(s.freq_hz/1e6).toFixed(4)} MHz</span>
     </div>
     <div class="controls">
-      <input type="number" id="hz-${s.id}" value="${s.freq_hz}" step="100" min="0" max="69952000" placeholder="freq Hz">
+      <input type="number" id="hz-${s.id}" value="${s.freq_hz}" step="100" min="0" max="69952000">
       <button onclick="tuneHz(${s.id})">Tune</button>
-      <select id="preset-${s.id}">
-        <option value="">— preset —</option>
-        ${presetOpts}
-      </select>
+      <select id="preset-${s.id}"><option value="">— preset —</option>${opts}</select>
       <button onclick="tunePreset(${s.id})">Apply</button>
     </div>
     <div class="error" id="err-${s.id}"></div>
   </div>`;
 }
-
-function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
 async function refreshStatus() {
   try {
     const r = await fetch('/api/status');
     if (!r.ok) return;
     const d = await r.json();
     const container = document.getElementById('sinks');
-
-    // Build or update each sink
     for (const s of d.sinks) {
       const existing = document.getElementById(`sink-${s.id}`);
-      if (!existing) {
-        container.insertAdjacentHTML('beforeend', sinkHtml(s));
-      } else {
+      if (!existing) { container.insertAdjacentHTML('beforeend', sinkHtml(s)); }
+      else {
         document.getElementById(`label-${s.id}`).textContent = s.label;
         document.getElementById(`freq-${s.id}`).textContent = (s.freq_hz/1e6).toFixed(4) + ' MHz';
-        const hzInput = document.getElementById(`hz-${s.id}`);
-        if (document.activeElement !== hzInput)
-          hzInput.value = s.freq_hz;
+        const inp = document.getElementById(`hz-${s.id}`);
+        if (document.activeElement !== inp) inp.value = s.freq_hz;
       }
     }
-    document.getElementById('status-bar').textContent =
-      'last update: ' + new Date().toLocaleTimeString();
-  } catch(e) {
-    document.getElementById('status-bar').textContent = 'connection error: ' + e.message;
-  }
+    document.getElementById('status-bar').textContent = new Date().toLocaleTimeString();
+  } catch(e) { document.getElementById('status-bar').textContent = 'error: ' + e.message; }
 }
-
-async function tuneHz(sinkId) {
-  const hz = parseInt(document.getElementById(`hz-${sinkId}`).value, 10);
-  if (isNaN(hz)) return;
-  await doTune(sinkId, hz, null);
+async function tuneHz(id) {
+  const hz = parseInt(document.getElementById(`hz-${id}`).value, 10);
+  if (!isNaN(hz)) await doTune(id, hz, null);
 }
-
-async function tunePreset(sinkId) {
-  const sel = document.getElementById(`preset-${sinkId}`);
+async function tunePreset(id) {
+  const sel = document.getElementById(`preset-${id}`);
   const hz = parseInt(sel.value, 10);
-  if (isNaN(hz) || !sel.value) return;
-  const label = sel.options[sel.selectedIndex].text.split(' ')[0] + ' FT8';
-  await doTune(sinkId, hz, label);
+  if (!isNaN(hz) && sel.value) await doTune(id, hz, sel.options[sel.selectedIndex].text.split(' ')[0] + ' FT8');
 }
-
-async function doTune(sinkId, freq_hz, label) {
-  const errEl = document.getElementById(`err-${sinkId}`);
+async function doTune(id, freq_hz, label) {
+  const errEl = document.getElementById(`err-${id}`);
   errEl.textContent = '';
-  const body = { sink: sinkId, freq_hz };
+  const body = { sink: id, freq_hz };
   if (label) body.label = label;
   try {
-    const r = await fetch('/api/tune', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)
-    });
+    const r = await fetch('/api/tune', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const d = await r.json();
-    if (!r.ok) errEl.textContent = d.error || 'error';
-    else refreshStatus();
-  } catch(e) {
-    errEl.textContent = e.message;
+    if (!r.ok) errEl.textContent = d.error || 'error'; else refreshStatus();
+  } catch(e) { errEl.textContent = e.message; }
+}
+
+// Waterfall: scrolling canvas, 2048 bins wide, newest row at bottom.
+// Band labels positioned at bin index matching FT8 dial frequencies.
+const WF_BANDS = [
+  [1840, '160m'], [3573, '80m'], [5357, '60m'], [7074, '40m'],
+  [10136, '30m'], [14074, '20m'], [18100, '17m'], [21074, '15m'],
+  [24915, '12m'], [28074, '10m'],
+];
+const WF_RFFT = 1048576; // must match rfft_length in FT8Cuda
+
+function freqToWfBin(freq_khz) {
+  // FT8Cuda maps composite bin b → rfft_length bin via quadratic:
+  // src = round((rfft_length-1) * (b/2047)^2)
+  // Invert: find b such that src ≈ round(freq_khz * 1000 / 6.25) / rfft_length * 2047
+  // Simpler: the 2048-output bin index for a given rfft input bin 'r' satisfies
+  //   r ≈ (rfft_length-1) * (b/2047)^2  →  b ≈ 2047 * sqrt(r / (rfft_length-1))
+  const rfft_bin = Math.round(freq_khz * 1000 / 6.25); // Hz / (Hz/bin)
+  const b = Math.round(2047 * Math.sqrt(rfft_bin / (WF_RFFT - 1)));
+  return Math.max(0, Math.min(2047, b));
+}
+
+function renderWfBandLabels() {
+  const div = document.getElementById('wf-bands');
+  div.innerHTML = WF_BANDS.map(([khz, name]) => {
+    const b = freqToWfBin(khz);
+    const pct = (b / 2047 * 100).toFixed(2);
+    return `<span style="position:absolute;left:${pct}%;transform:translateX(-50%)">${name}</span>`;
+  }).join('');
+}
+
+let wfCanvas, wfCtx, wfImageData, wfRow = 0;
+function initWaterfall() {
+  wfCanvas = document.getElementById('waterfall');
+  wfCtx = wfCanvas.getContext('2d');
+  wfImageData = wfCtx.createImageData(2048, 1);
+  renderWfBandLabels();
+}
+
+function appendWaterfallRow(bytes) {
+  // Scroll: copy all rows up by one, paint new row at bottom.
+  const h = wfCanvas.height;
+  const w = wfCanvas.width;
+  const frame = wfCtx.getImageData(0, 0, w, h);
+  // Shift rows up by one pixel
+  frame.data.copyWithin(0, w * 4, w * 4 * h);
+  // Write new row at bottom
+  const base = (h - 1) * w * 4;
+  for (let b = 0; b < w && b < bytes.length; b++) {
+    const v = bytes[b];
+    // Map magnitude byte (0-255) to a heat color: dark blue → cyan → green → yellow → red
+    let r, g, bl;
+    if (v < 64)      { r = 0;       g = 0;       bl = v * 2; }
+    else if (v < 128){ r = 0;       g = (v-64)*4; bl = 255-(v-64)*4; }
+    else if (v < 192){ r = (v-128)*4; g = 255;     bl = 0; }
+    else             { r = 255;     g = 255-(v-192)*4; bl = 0; }
+    frame.data[base + b*4]   = r;
+    frame.data[base + b*4+1] = g;
+    frame.data[base + b*4+2] = bl;
+    frame.data[base + b*4+3] = 255;
   }
+  wfCtx.putImageData(frame, 0, 0);
+}
+
+function connectWaterfall() {
+  const statusEl = document.getElementById('wf-status');
+  const ws = new WebSocket(`ws://${location.host}/waterfall`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen  = () => { statusEl.textContent = 'connected'; statusEl.style.color = '#98e890'; };
+  ws.onerror = () => { statusEl.textContent = 'error'; statusEl.style.color = '#e87070'; };
+  ws.onclose = () => {
+    statusEl.textContent = 'reconnecting…';
+    statusEl.style.color = '#555';
+    setTimeout(connectWaterfall, 3000);
+  };
+  ws.onmessage = (e) => {
+    if (!(e.data instanceof ArrayBuffer)) return;
+    requestAnimationFrame(() => appendWaterfallRow(new Uint8Array(e.data)));
+  };
 }
 
 async function init() {
   await loadPresets();
   await refreshStatus();
   setInterval(refreshStatus, 2000);
+  connectSSE();
+  initWaterfall();
+  connectWaterfall();
 }
-
 init();
 </script>
 </body>

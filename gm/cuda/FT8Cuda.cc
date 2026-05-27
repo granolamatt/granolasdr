@@ -13,6 +13,7 @@
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
 #include "gm/cuda/FT8LdpcCuda.h"
+#include "gm/cuda/WaterfallKernel.h"
 #include "gm/cuda/HostCuda.h"
 #include "ft8_lib/ft8/constants.h"
 #include "gm/buffer/BufferPosition.h"
@@ -78,6 +79,8 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaEventCreateWithFlags(&ring_ready,     cudaEventDisableTiming));
         cuda_check_error(cudaEventCreateWithFlags(&ldpc_done,      cudaEventDisableTiming));
         cuda_check_error(cudaEventCreateWithFlags(&cont_ring_ready, cudaEventDisableTiming));
+        cuda_check_error(cudaStreamCreate(&waterfall_stream));
+        cuda_check_error(cudaEventCreateWithFlags(&waterfall_ready, cudaEventDisableTiming));
 
         cuda_h = gm::cuda::device::HostCuda(stream);
         rfft_length = 1048576; // 2^20; 6553600 Hz composite / 6.25 Hz/bin
@@ -172,6 +175,10 @@ audioBins_host_10m(NULL) {
         cuda_check_error(cudaMalloc((void**)&parity_d,
             (size_t)FT8_LDPC_BATCH * sizeof(bool)));
 
+        // Waterfall decimation buffers: WATERFALL_BINS bytes each.
+        cuda_check_error(cudaMalloc((void**)&waterfall_d, WATERFALL_BINS));
+        cuda_check_error(cudaHostAlloc((void**)&waterfall_host, WATERFALL_BINS, cudaHostAllocDefault));
+
         allocContSlots();
 
         // Copy FT8 H-matrix into __constant__ memory.
@@ -214,21 +221,31 @@ FT8Cuda::~FT8Cuda() {
     if (magFT8) cudaFreeHost(magFT8);
     if (audioBins_host) cudaFreeHost(audioBins_host);
     if (audioBins_host_10m) cudaFreeHost(audioBins_host_10m);
+    if (waterfall_d) cudaFree(waterfall_d);
+    if (waterfall_host) cudaFreeHost(waterfall_host);
     freeContSlots();
     cufftDestroy(rplan);
     cudaEventDestroy(scan_done);
     cudaEventDestroy(ring_ready);
     cudaEventDestroy(ldpc_done);
     cudaEventDestroy(cont_ring_ready);
+    cudaEventDestroy(waterfall_ready);
     cudaStreamDestroy(stream);
     cudaStreamDestroy(scan_stream);
     cudaStreamDestroy(transfer_stream);
     cudaStreamDestroy(ldpc_stream);
     cudaStreamDestroy(cont_scan_stream);
+    cudaStreamDestroy(waterfall_stream);
 }
 
 int FT8Cuda::doCopy(uint64_t now) {
     try {
+        // Non-blocking poll: if the previous waterfall frame is ready, deliver it.
+        if (waterfall_callback_ && waterfall_ready &&
+            cudaEventQuery(waterfall_ready) == cudaSuccess) {
+            waterfall_callback_(waterfall_host, WATERFALL_BINS);
+        }
+
         size_t length = inShape[1];
 
         cudaMemcpyAsync(&demodData_d[buff_pos], &inData_d[length * (now % inShape[0])],
@@ -292,6 +309,19 @@ int FT8Cuda::doCopy(uint64_t now) {
 
             // Commit all device ring writes; both epoch and continuous paths wait on this.
             cudaEventRecord(ring_ready, stream);
+
+            // Waterfall decimation: wait for ring_ready then decimate the just-written slot.
+            if (waterfall_callback_) {
+                cudaStreamWaitEvent(waterfall_stream, ring_ready, 0);
+                const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
+                const uint8_t* slot_base = &magFT8_ring_d[
+                    ((ring_write_idx - 1) % RING_BLOCKS) * block_bytes];
+                ft8_waterfall_decimate(slot_base, waterfall_d,
+                                       (int)rfft_length, WATERFALL_BINS, waterfall_stream);
+                cudaMemcpyAsync(waterfall_host, waterfall_d, WATERFALL_BINS,
+                                cudaMemcpyDeviceToHost, waterfall_stream);
+                cudaEventRecord(waterfall_ready, waterfall_stream);
+            }
 
             // Continuous Costas scan: run every cont_stride blocks (~1/sec at stride=6).
             if (cont_scan_active.load(std::memory_order_acquire) &&
@@ -421,7 +451,11 @@ int FT8Cuda::doCopy(uint64_t now) {
 
                     uint32_t n = 0;
                     cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+                    uint32_t n_raw = n;
                     n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
+                    if (n_raw > FT8_GPU_CAND_MAX)
+                        fprintf(stderr, "[EPOCH] WARNING: candidate count %u clamped to %u\n",
+                                n_raw, (uint32_t)FT8_GPU_CAND_MAX);
 
                     bool ldpc_launched = (n > 0);
                     if (ldpc_launched) {
@@ -454,8 +488,21 @@ int FT8Cuda::doCopy(uint64_t now) {
                             ldpc_ok = true;
                         ldpc_timeout:;
                     }
+
+                    // Cascade timeout detection.
+                    bool timed_out = ldpc_launched && !ldpc_ok;
+                    if (timed_out) {
+                        if (++consecutive_timeouts_ > 2)
+                            fprintf(stderr, "[EPOCH] WARNING: %d consecutive LDPC timeouts\n",
+                                    consecutive_timeouts_);
+                    } else if (ldpc_ok || !ldpc_launched) {
+                        consecutive_timeouts_ = 0;
+                    }
+
                     fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=%.1fms n=%u ldpc_ok=%d\n",
                             tag_.c_str(), scan_ms, ldpc_ms, n, (int)ldpc_ok);
+                    if (timing_callback_)
+                        timing_callback_((float)scan_ms, (float)ldpc_ms, n);
 
                     // Snapshot audio rings immediately after GPU work (before doCopy can overwrite).
                     std::vector<std::complex<float>> audio_snap, audio_snap_10m;
