@@ -47,21 +47,14 @@ int main(int argc, char* argv[]) {
     ft8channel.start();
 
     gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel, 5580, use_gpu_ldpc);
-
     ft8channel.setDecodeCallback([&ft8](gm::cuda::ContScanResult& r) {
         ft8.decodeAndPublishContinuous(r);
     });
     ft8channel.startContinuousScan();
-
     ft8.start();
 
     while (true) {
         usleep(1000000);
-        // printf("pos is %lu \n", bpos->getNow(1));
-        // uint64_t posnow = bpos->getPosition(now, 1);
-	    // uint64_t azpos = bpos->getNow();
-        // now += 1;
-        // printf("Got a new position %lu now %lu element %f\n", posnow, now, (double)azpos / 140e6);
     }
 
     return 0;

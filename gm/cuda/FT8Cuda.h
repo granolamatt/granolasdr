@@ -62,7 +62,7 @@ struct ContScanResult {
 
 class FT8Cuda : public Thread {
 public:
-    FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool enable_corpus = false, float min_score = 5.0f);
+    FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool enable_corpus = false, float min_score = 5.0f, const std::string& tag = "EPOCH");
     ~FT8Cuda();
     void run();
     void stop() {
@@ -84,6 +84,7 @@ public:
     void startContinuousScan();
 
 private:
+    std::string tag_;             // label for timing/decode output ("EPOCH", "CONT", ...)
     cudaStream_t stream;
     cudaStream_t scan_stream;     // GPU sync score kernel
     cudaStream_t transfer_stream; // D2H mag snapshot (device ring → CPU decode slot)

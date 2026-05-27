@@ -27,7 +27,8 @@
 namespace gm {
 namespace cuda {
 
-FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, float min_score) :
+FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, float min_score, const std::string& tag) :
+tag_(tag),
 inPos(inP),
 buff_pos{0},
 ring_write_idx(0),
@@ -413,7 +414,11 @@ int FT8Cuda::doCopy(uint64_t now) {
                     // Wait for the scan to finish on this thread (not the main loop thread).
                     // Then dispatch LDPC with the actual candidate count so we don't flood
                     // the GPU scheduler with hundreds of thousands of empty blocks.
+                    auto t_thread_start = std::chrono::steady_clock::now();
                     cudaEventSynchronize(scan_done);
+                    auto t_scan_done = std::chrono::steady_clock::now();
+                    double scan_ms = std::chrono::duration<double, std::milli>(t_scan_done - t_thread_start).count();
+
                     uint32_t n = 0;
                     cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
                     n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
@@ -425,23 +430,32 @@ int FT8Cuda::doCopy(uint64_t now) {
                     }
 
                     bool ldpc_ok = false;
+                    double ldpc_ms = 0.0;
                     if (ldpc_launched) {
-                        auto deadline = std::chrono::steady_clock::now()
-                                        + std::chrono::milliseconds(500);
+                        auto t_ldpc_start = std::chrono::steady_clock::now();
+                        auto deadline = t_ldpc_start + std::chrono::milliseconds(500);
                         cudaError_t ev;
                         while ((ev = cudaEventQuery(ldpc_done)) == cudaErrorNotReady) {
                             if (std::chrono::steady_clock::now() >= deadline) {
+                                ldpc_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t_ldpc_start).count();
+                                fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=TIMEOUT(%.1fms) n=%u\n",
+                                        tag_.c_str(), scan_ms, ldpc_ms, n);
                                 fprintf(stderr, "[EPOCH] ldpc_done timeout — skipping LDPC results\n");
                                 goto ldpc_timeout;
                             }
                             std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         }
+                        ldpc_ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t_ldpc_start).count();
                         if (ev != cudaSuccess)
                             fprintf(stderr, "[EPOCH] CUDA ldpc_done error: %s\n", cudaGetErrorString(ev));
                         else
                             ldpc_ok = true;
                         ldpc_timeout:;
                     }
+                    fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=%.1fms n=%u ldpc_ok=%d\n",
+                            tag_.c_str(), scan_ms, ldpc_ms, n, (int)ldpc_ok);
 
                     // Snapshot audio rings immediately after GPU work (before doCopy can overwrite).
                     std::vector<std::complex<float>> audio_snap, audio_snap_10m;

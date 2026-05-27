@@ -42,6 +42,7 @@ private:
     gm::buffer::BufferPosition<uint8_t>* inPos;
     gm::cuda::FT8Cuda* ft8cuda;
     bool use_gpu_ldpc;
+    int zmq_port_;
 
     zmq::context_t zmq_ctx;
     zmq::socket_t  zmq_pub;

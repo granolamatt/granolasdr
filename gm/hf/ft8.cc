@@ -78,13 +78,13 @@ const int kMax_decoded_messages = 200;
 
 #define CALLSIGN_HASHTABLE_SIZE 2048
 
-static struct
+static thread_local struct
 {
     char callsign[12]; ///> Up to 11 symbols of callsign + trailing zeros (always filled)
     uint32_t hash;     ///> 8 MSBs contain the age of callsign; 22 LSBs contain hash value
 } callsign_hashtable[CALLSIGN_HASHTABLE_SIZE];
 
-static int callsign_hashtable_size;
+static thread_local int callsign_hashtable_size;
 
 void hashtable_init(void)
 {
@@ -191,6 +191,7 @@ static FILE*            g_score_log      = nullptr;
 static std::once_flag   s_score_log_init;
 
 void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
+            const char* label,
             const gm::cuda::GpuScanResult* gpu = nullptr, bool use_gpu_ldpc = false)
 {
     // One-time capture file init (env-var gated, no overhead when unset).
@@ -447,8 +448,8 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
         if (band_counts[bi] > 0)
             bspos += snprintf(band_summary + bspos, (int)sizeof(band_summary) - bspos,
                               " %s:%d", kHFBands[bi].name, band_counts[bi]);
-    printf("EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms %s=%.1fms\n",
-           num_decoded, num_candidates,
+    printf("[%s] EPOCH: %d decoded / %d candidates (gpu) |%s | find=%.1fms %s=%.1fms\n",
+           label, num_decoded, num_candidates,
            band_summary[0] ? band_summary : " (none)",
            std::chrono::duration<double, std::milli>(t_find_end - t_find_start).count(),
            using_gpu_ldpc ? "ldpc_gpu" : "ldpc",
@@ -517,6 +518,7 @@ namespace hf {
       inPos(inP),
       ft8cuda(ft8cuda_in),
       use_gpu_ldpc(use_gpu_ldpc_in),
+      zmq_port_(zmq_port),
       zmq_ctx(1),
       zmq_pub(zmq_ctx, ZMQ_PUB),
       timing_log_(nullptr) {
@@ -524,9 +526,15 @@ namespace hf {
         hashtable_init();
         load_monitor(&mon);
 
-        std::string endpoint = "tcp://*:" + std::to_string(zmq_port);
-        zmq_pub.bind(endpoint);
-        printf("FT8 ZMQ publisher bound to %s\n", endpoint.c_str());
+        if (zmq_port > 0) {
+            std::string endpoint = "tcp://*:" + std::to_string(zmq_port);
+            printf("FT8 ZMQ binding to %s ...\n", endpoint.c_str());
+            fflush(stdout);
+            zmq_pub.bind(endpoint);
+            printf("FT8 ZMQ publisher bound to %s\n", endpoint.c_str());
+        } else {
+            printf("FT8 ZMQ disabled (decode counts in stdout only)\n");
+        }
 
         timing_log_ = fopen("ft8_timing.csv", "a");
         if (timing_log_) {
@@ -550,11 +558,13 @@ namespace hf {
         int len = snprintf(buf, sizeof(buf),
             "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
             callsign, (double)freq_hz, (double)snr, unix_time, (double)time_offset);
-        zmq::message_t msg(buf, len);
-        std::lock_guard<std::mutex> lk(zmq_mutex_);
-        auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
-        if (!result)
-            fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+        if (zmq_port_ > 0) {
+            zmq::message_t msg(buf, len);
+            std::lock_guard<std::mutex> lk(zmq_mutex_);
+            auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
+            if (!result)
+                fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+        }
 
         if (timing_log_) {
             struct timespec ts;
@@ -609,7 +619,9 @@ namespace hf {
                 printf("Processing %f\n", seconds);
                 const gm::cuda::GpuScanResult* gpu_res =
                     ft8cuda ? &ft8cuda->getGpuScanResult(buff) : nullptr;
-                decode(&mon, seconds, this, gpu_res, use_gpu_ldpc);
+                char label[16];
+                snprintf(label, sizeof(label), ":%d", zmq_port_);
+                decode(&mon, seconds, this, label, gpu_res, use_gpu_ldpc);
                 monitor_reset(&mon);
                 now += 1;
             }
