@@ -247,6 +247,51 @@ static std::string unpackGrid(uint32_t v) {
     return std::string(g, 4);
 }
 
+// ---- Huffman decoder for old-format data frames ----------------------------
+// Table from JS8Call's Varicode::defaultHuffTable().
+static const struct { char ch; const char* code; } kHuffTable[] = {
+    {' ', "01"},      {'E', "100"},     {'T', "1101"},    {'A', "0011"},
+    {'O', "11111"},   {'I', "11100"},   {'N', "10111"},   {'S', "10100"},
+    {'H', "00011"},   {'R', "00000"},   {'D', "111011"},  {'L', "110011"},
+    {'C', "110001"},  {'U', "101101"},  {'M', "101011"},  {'W', "001011"},
+    {'F', "001001"},  {'G', "000101"},  {'Y', "000011"},  {'P', "1111011"},
+    {'B', "1111001"}, {'.', "1110100"}, {'V', "1100101"}, {'K', "1100100"},
+    {'-', "1100001"}, {'+', "1100000"}, {'?', "1011001"}, {'!', "1011000"},
+    {'"', "1010101"}, {'X', "1010100"}, {'0', "0010101"}, {'J', "0010100"},
+    {'1', "0010001"}, {'Q', "0010000"}, {'2', "0001001"}, {'Z', "0001000"},
+    {'3', "0000101"}, {'5', "0000100"}, {'4', "11110101"},{'9', "11110100"},
+    {'8', "11110001"},{'6', "11110000"},{'7', "11101011"},{'/', "11101010"},
+};
+static const int kHuffTableSize = (int)(sizeof(kHuffTable) / sizeof(kHuffTable[0]));
+
+static std::string huffDecode(const uint8_t* bits, int nbits) {
+    std::string result;
+    int pos = 0;
+    while (pos < nbits) {
+        bool found = false;
+        for (int k = 0; k < kHuffTableSize; k++) {
+            const char* code = kHuffTable[k].code;
+            int codelen = (int)strlen(code);
+            if (pos + codelen > nbits) continue;
+            bool match = true;
+            for (int i = 0; i < codelen; i++) {
+                if ((bits[pos + i] & 1) != (uint8_t)(code[i] - '0')) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                result += kHuffTable[k].ch;
+                pos += codelen;
+                found = true;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+    return result;
+}
+
 // ---- Raw 12-char extraction (kept for dedup key usage) ---------------------
 static const char kJs8Alphabet[] =
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-+";
@@ -268,16 +313,31 @@ static std::string extractMessage12(const uint8_t* info) {
 // Also extracts the "from" callsign into *from_call if non-null.
 // Returns the raw 12-char string prefixed with "[raw]" if unable to decode.
 static std::string decodeJs8Message(const uint8_t* info, std::string* from_call) {
-    // Bits 72-74: JS8 submode type. Bit 2 set means data frame.
+    // Bits 72-74: JS8 submode (i3bit). JS8CallData=4 → fast data frame: all
+    // 72 bits are payload (no packed_flag header), flagged here not in bits[0].
     int i3bit = (int)bits_to_int(info, 72, 3);
-
     if (i3bit & 4) {
-        // Data frame (Huffman/compressed) — show raw for now
         return extractMessage12(info) + " [data]";
     }
 
-    // Bits 0-2 of the 72-bit message body: frame sub-type
+    // Bits 0-2: frame sub-type (packed_flag).
+    // Values 4-7 (bits[0]=1) are old-format data frames (deprecated but seen).
+    // Padding scheme: after content, one 0 pad bit then 1s. lastIndexOf(0) finds it.
     int packed_flag = (int)bits_to_int(info, 0, 3);
+    if (packed_flag >= 4) {
+        bool compressed = (info[1] & 1) != 0;
+        // Find the padding marker: last 0 bit in info[1..71]
+        int K = -1;
+        for (int j = 71; j >= 1; j--) {
+            if ((info[j] & 1) == 0) { K = j; break; }
+        }
+        if (K <= 1 || K - 2 <= 0) return "[data]";
+        if (compressed) {
+            return "[data compressed]";
+        }
+        std::string text = huffDecode(info + 2, K - 2);
+        return text.empty() ? "[data]" : text;
+    }
 
     switch (packed_flag) {
 
