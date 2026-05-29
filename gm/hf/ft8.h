@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <zmq.hpp>
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
@@ -56,6 +58,10 @@ private:
     std::mutex     zmq_mutex_;
     FILE*          timing_log_;
     std::function<void(const char*, float, float, double)> broadcast_callback_;
+
+    // Dedup for continuous-scan stdout prints: key=(text|freq_bucket) → last print time.
+    // Suppresses re-printing the same decode within 20 seconds.
+    std::unordered_map<std::string, double> cont_dedup_;
 };
 
 }

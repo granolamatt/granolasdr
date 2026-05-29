@@ -2,6 +2,26 @@
 
 Updated 2026-05-27. Deferred items from prior plan reviews. None are blocked — each waits on a natural predecessor.
 
+## JS8 Normal decode (Phase 10)
+
+Plan: PLAN_JS8_PHASE10.md (2026-05-27). Architecture: JS8Cuda reads from FT8Cuda's shared mag
+ring; no second RFFT or ring allocation needed. Three phases:
+
+- **Phase 1 (core)**: JS8ScanCuda (Costas {4,2,5,6,1,3,0}), JS8LdpcCuda (M=87 H-matrix),
+  JS8Cuda (ring consumer), gm/hf/js8 (CRC-12 + message decode + ZMQ 5581). ~1,800 lines.
+  **Primary risk**: H-matrix transcription from JS8Call Nm[87] — cross-check with reference decoder.
+  **Fix needed**: change `ring_write_idx` from `uint64_t` to `std::atomic<uint64_t>` in FT8Cuda
+  (latent race that JS8Cuda would expose; existing contWorker also has this race).
+
+- **Phase 2 (cherry-pick)**: Dashboard JS8 conversation panel — `broadcastJS8()` SSE + HTML panel.
+  ~160 lines. Independent of Phase 3.
+
+- **Phase 3 (cherry-pick)**: PSKReporter JS8 spots — psk_uploader.py subscribes to port 5581,
+  mode field parameterized. ~70 lines. Independent of Phase 2.
+
+**Note on FT4**: FT4 previously slated as Phase 10; superseded by JS8 (more traffic, larger
+user base, conversational protocol adds dashboard value). FT4 becomes Phase 11 or later.
+
 ## GPU LDPC post-ship items
 
 From /plan-ceo-review (2026-05-27), Phases 7–9 CEO plan — **FT8_GPU_CAND_MAX reduction and cascade timeout detection are in active Phase 7 plan**. Items below are the remaining deferred sub-items.

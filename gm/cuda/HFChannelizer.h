@@ -148,6 +148,22 @@ private:
 
     zmq::context_t audio_zmq_ctx;
     zmq::socket_t* audio_sockets[NUM_SINKS];
+
+    // Recording state — writes channelizer output blocks to a binary file.
+    static const int RECORD_RING = 4;
+    std::atomic<bool>            recording_{false};
+    FILE*                        record_fp_{nullptr};
+    std::complex<float>*         record_pinned_{nullptr};
+    std::atomic<uint64_t>        record_produce_{0};
+    std::atomic<uint64_t>        record_consume_{0};
+    std::thread                  record_thread_;
+    void recordWorker();
+
+public:
+    // Open filename and start writing channelizer output blocks.  Safe to call
+    // after start().  Stop with stopRecording() or object destruction.
+    void startRecording(const std::string& filename);
+    void stopRecording();
 };
 }
 }

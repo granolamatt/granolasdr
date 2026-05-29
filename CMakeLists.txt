@@ -42,11 +42,16 @@ set(GM_CUDA_SOURCES
     "gm/cuda/FT8ScanCuda.cu"
     "gm/cuda/FT8SoftCuda.cu"
     "gm/cuda/FT8LdpcCuda.cu"
+    "gm/cuda/JS8ScanCuda.cu"
+    "gm/cuda/JS8LdpcCuda.cu"
+    "gm/cuda/JS8SoftCuda.cu"
     "gm/cuda/WaterfallKernel.cu"
     "gm/cuda/OverlapSave.cc"
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"
+    "gm/cuda/FileChannelizer.cc"
     "gm/cuda/FT8Cuda.cc"
+    "gm/cuda/JS8Cuda.cc"
     "ft8_lib/fft/kiss_fft.c"
     )
 
@@ -65,6 +70,7 @@ set(GM_SOURCES
     "gm/zmqcode/zmqserver.cc"
     "gm/zmqcode/zmqworker.cc"
     "gm/hf/ft8.cc"
+    "gm/hf/js8.cc"
     "gm/zmqcode/ZMQPub.cc")
 
 set(GM_LIBS ${LIBLOC} ${LIBLOG} sddc ${LIBUSB} zmq)
@@ -91,6 +97,9 @@ target_link_libraries(test_ldpc_sign gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/
 
 add_executable(test_ldpc_captures test/test_ldpc_captures.c)
 target_link_libraries(test_ldpc_captures ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
+
+add_executable(test_js8_wav test/test_js8_wav.cc ft8_lib/fft/kiss_fft.c)
+target_link_libraries(test_js8_wav gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
 
 
 #adb push cudatest /data/local/develop/

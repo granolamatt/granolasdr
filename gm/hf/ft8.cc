@@ -599,6 +599,15 @@ namespace hf {
             float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
             float snr      = (float)r.score[i] - 26.0f;
 
+            // Dedup: print once per 20 s per (text, freq-100Hz bucket).
+            std::string dedup_key = std::string(text) + "|" +
+                                    std::to_string((int)(freq_hz / 100));
+            double& last = cont_dedup_[dedup_key];
+            if (r.timestamp - last >= 20.0) {
+                printf("[FT8 CONT] %s  freq=%.0f Hz  snr=%+.1f  offset=%+.3fs\n",
+                       text, (double)freq_hz, (double)snr, (double)time_sec);
+                last = r.timestamp;
+            }
             publishDecoded(text, freq_hz, snr, r.timestamp, time_sec);
             window_decode_count.fetch_add(1, std::memory_order_relaxed);
         }

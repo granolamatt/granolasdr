@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-FT8 → PSKReporter uploader.
-Subscribes to ZMQ PUB socket on tcp://localhost:5580, buffers decoded messages,
-and uploads to PSKReporter every UPLOAD_INTERVAL_SEC seconds.
+FT8 + JS8 → PSKReporter uploader.
+Subscribes to ZMQ PUB sockets (default: 5580 FT8 and 5590 JS8), buffers decoded
+messages, and uploads to PSKReporter every UPLOAD_INTERVAL_SEC seconds.
 
 Packet format: https://pskreporter.info/pskdev.html
 
 Usage:
     python3 psk_uploader.py --call W1AW --grid DM78
     python3 psk_uploader.py --call W1AW --grid DM78 --test   # verify at pskreporter.info/analyze.html
+    python3 psk_uploader.py --call W1AW --grid DM78 --port 5580  # FT8 only
 """
 
 import argparse
@@ -95,7 +96,7 @@ def _sender_block(reports: list[dict]) -> bytes:
             struct.pack(">I", int(r["freq"])) +
             struct.pack(">b", snr) +
             struct.pack(">b", 0) +          # iMD — not measured, send 0
-            _str("FT8") +
+            _str(r.get("mode", "FT8")) +
             struct.pack(">B", 1) +          # informationSource=1 (auto extracted)
             struct.pack(">I", int(r["unix"]))
         )
@@ -131,7 +132,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--call", required=True, help="Your callsign (receiver)")
     ap.add_argument("--grid", required=True, help="Your Maidenhead grid (e.g. DM78)")
-    ap.add_argument("--port", type=int, default=5580, help="ZMQ port (default 5580)")
+    ap.add_argument("--port", type=int, action="append", metavar="PORT",
+                    help="ZMQ port to subscribe to (default: 5580 5590; may be repeated)")
     ap.add_argument("--rig", default=DEFAULT_RIG, help=f"Receiver hardware (default: {DEFAULT_RIG})")
     ap.add_argument("--test", action="store_true",
                     help="Send to port 14739 (packet analyzer) instead of 4739")
@@ -139,10 +141,11 @@ def main():
                     help="Send one dummy packet immediately to port 14739 and exit")
     args = ap.parse_args()
 
-    rx_call   = args.call.upper()
-    rx_grid   = args.grid.upper()
-    rx_rig    = args.rig
-    psk_port  = TEST_PORT if args.test else PSK_PORT
+    rx_call    = args.call.upper()
+    rx_grid    = args.grid.upper()
+    rx_rig     = args.rig
+    psk_port   = TEST_PORT if args.test else PSK_PORT
+    zmq_ports  = args.port if args.port else [5580, 5590]
     session_id = random.randint(1, 0xFFFFFFFF)
     seq = 0
     packets_sent = 0
@@ -152,35 +155,43 @@ def main():
         print("[psk] TEST MODE — check results at https://pskreporter.info/analyze.html")
 
     if args.send_test_packet:
-        dummy = [{"call": rx_call, "freq": 14074000, "snr": -10, "unix": int(time.time())}]
+        dummy = [{"call": rx_call, "freq": 14074000, "snr": -10, "unix": int(time.time()),
+                  "mode": "FT8"}]
         upload(rx_call, rx_grid, rx_rig, dummy, seq=0, session_id=session_id,
                include_templates=True, host=PSK_HOST, port=TEST_PORT)
         print("[psk] Dummy packet sent. Check https://pskreporter.info/analyze.html")
         return
 
     ctx = zmq.Context()
-    sock = ctx.socket(zmq.SUB)
-    sock.connect(f"tcp://localhost:{args.port}")
-    sock.setsockopt_string(zmq.SUBSCRIBE, "")
-    sock.setsockopt(zmq.RCVTIMEO, 1000)
+    poller = zmq.Poller()
+    socks = []
+    for port in zmq_ports:
+        s = ctx.socket(zmq.SUB)
+        s.connect(f"tcp://localhost:{port}")
+        s.setsockopt_string(zmq.SUBSCRIBE, "")
+        poller.register(s, zmq.POLLIN)
+        socks.append(s)
 
     print(f"[psk] receiver {rx_call} / {rx_grid}  rig: {rx_rig}")
     print(f"[psk] session_id=0x{session_id:08X}")
-    print(f"[psk] ZMQ tcp://localhost:{args.port} → {PSK_HOST}:{psk_port}")
+    print(f"[psk] ZMQ ports: {zmq_ports} → {PSK_HOST}:{psk_port}")
     print(f"[psk] uploading every {UPLOAD_INTERVAL_SEC}s")
 
     pending: list[dict] = []
     last_upload = time.time()
 
     while True:
-        try:
-            raw = sock.recv_string()
-            msg = json.loads(raw)
-            if not msg.get("call") or msg["call"].startswith("Error"):
-                continue
-            pending.append(msg)
-        except zmq.Again:
-            pass
+        ready = dict(poller.poll(timeout=1000))
+        for s in socks:
+            if ready.get(s) == zmq.POLLIN:
+                try:
+                    raw = s.recv_string(zmq.NOBLOCK)
+                    msg = json.loads(raw)
+                    if not msg.get("call") or msg["call"].startswith("Error"):
+                        continue
+                    pending.append(msg)
+                except (zmq.Again, json.JSONDecodeError):
+                    pass
 
         if time.time() - last_upload >= UPLOAD_INTERVAL_SEC and pending:
             # Send templates in first 3 packets and then once per hour

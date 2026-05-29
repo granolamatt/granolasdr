@@ -89,6 +89,13 @@ public:
     // Start the continuous-path worker thread.
     void startContinuousScan();
 
+    // Ring buffer accessors for JS8Cuda (reads FT8Cuda's shared mag ring).
+    const uint8_t*  getRingPtr()        const { return magFT8_ring_d; }
+    uint64_t        getRingWriteIdx()   const { return ring_write_idx.load(std::memory_order_acquire); }
+    int             getRingBlocks()     const { return RING_BLOCKS; }
+    cudaEvent_t     getRingReadyEvent() const { return ring_ready; }
+    int             getRingNumBins()    const { return (int)rfft_length; }
+
 private:
     std::string tag_;             // label for timing/decode output ("EPOCH", "CONT", ...)
     cudaStream_t stream;
@@ -105,7 +112,7 @@ private:
 
     std::ofstream fs;
     int buffer_number;
-    uint64_t ring_write_idx;
+    std::atomic<uint64_t> ring_write_idx;
     uint64_t last_trigger_second;
     std::thread last_snapshot_thread;
 
