@@ -28,8 +28,7 @@ static void runProxy() {
 
 template<typename Channelizer>
 static void runPipeline(Channelizer& epochbuffer,
-                        float min_score, bool use_gpu_ldpc,
-                        bool enable_js8) {
+                        float min_score, bool enable_js8) {
 
     // RAII order: MagBlock owns ring memory; FT8Cuda/JS8Cuda hold const refs.
     // C++ destroys in reverse declaration order (scanners before ring).
@@ -39,7 +38,7 @@ static void runPipeline(Channelizer& epochbuffer,
     gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
     ft8channel.start();
 
-    gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel, kProxyXSubPort, use_gpu_ldpc);
+    gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort);
     ft8channel.setDecodeCallback([&ft8](gm::cuda::ContScanResult& r) {
         ft8.decodeAndPublishContinuous(r);
     });
@@ -67,7 +66,6 @@ static void runPipeline(Channelizer& epochbuffer,
 
 int main(int argc, char* argv[]) {
 
-    bool        use_gpu_ldpc   = false;
     bool        enable_js8     = false;
     std::string ctrl_host      = "127.0.0.1";
     int         ctrl_port      = 8080;
@@ -76,9 +74,7 @@ int main(int argc, char* argv[]) {
     std::string playback_file;
 
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--gpu-ldpc") == 0) {
-            use_gpu_ldpc = true;
-        } else if (strcmp(argv[i], "--control-host") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--control-host") == 0 && i + 1 < argc) {
             ctrl_host = argv[++i];
         } else if (strcmp(argv[i], "--control-port") == 0 && i + 1 < argc) {
             ctrl_port = std::stoi(argv[++i]);
@@ -100,7 +96,7 @@ int main(int argc, char* argv[]) {
     if (!playback_file.empty()) {
         gm::cuda::FileChannelizer epochbuffer(playback_file);
         epochbuffer.start();
-        runPipeline(epochbuffer, min_score, use_gpu_ldpc, enable_js8);
+        runPipeline(epochbuffer, min_score, enable_js8);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -112,7 +108,7 @@ int main(int argc, char* argv[]) {
             epochbuffer.startRecording(record_file);
         }
 
-        runPipeline(epochbuffer, min_score, use_gpu_ldpc, enable_js8);
+        runPipeline(epochbuffer, min_score, enable_js8);
     }
 
     return 0;

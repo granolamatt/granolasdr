@@ -13,26 +13,11 @@
 #include <zmq.hpp>
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
-#include "gm/cuda/FT8LdpcCuda.h"
 #include "gm/Thread.h"
-#include "gm/buffer/BufferPosition.h"
 #include "gm/buffer/DeviceRingBuffer.h"
 
 namespace gm {
 namespace cuda {
-
-// Per-epoch GPU candidate scan results, indexed by decode slot (0..BUFFERS-1).
-struct GpuScanResult {
-    uint32_t              count;
-    std::vector<int32_t>  fo;
-    std::vector<uint8_t>  to;
-    std::vector<uint8_t>  ts;
-    std::vector<uint8_t>  fs;
-    std::vector<int16_t>  score;
-    std::vector<float>    log174;   // FTX_LDPC_N floats per candidate
-    std::vector<uint8_t>  x_hat;   // FTX_LDPC_N bits per candidate (GPU LDPC output)
-    std::vector<bool>     parity;  // parity check result per candidate
-};
 
 // Per-slot continuous scan candidate cap.
 static const uint32_t CONT_CAND_MAX = 1000;
@@ -72,63 +57,18 @@ public:
     void run();
     void stop() { setRunning(false); }
 
-    gm::buffer::BufferPosition<uint8_t>* getBuffer() { return &rt8BufferPosition_; }
-
-    const GpuScanResult& getGpuScanResult(int slot) const { return gpu_results_[slot]; }
-
     void setDecodeCallback(std::function<void(ContScanResult&)> cb);
     void startContinuousScan();
-
-    // Called by the cont-scan decode path when a message decodes successfully.
-    // First call sets the epoch phase so subsequent epoch scans align properly.
-    void reportDecoded(uint64_t signal_block);
 
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
     std::string tag_;
     float       min_score_;
 
-    static constexpr int BUFFERS          = 2;
     static constexpr int CONTINUOUS_SLOTS = 8;
-    static constexpr int EPOCH_BLOCKS     = 94; // ≈15s at 6.25 Hz; ring-position epoch trigger
     int cont_stride_{6};
 
-    cudaStream_t scan_stream_{};
-    cudaStream_t transfer_stream_{};
-    cudaStream_t ldpc_stream_{};
     cudaStream_t cont_scan_stream_{};
-    cudaEvent_t  scan_done_{};
-    cudaEvent_t  ldpc_done_{};
-
-    gm::buffer::BufferPosition<uint8_t> rt8BufferPosition_;
-
-    // Soft LLR buffers (epoch path)
-    float*    log174_d_{nullptr};
-    float*    log174_{nullptr};
-
-    // GPU LDPC output (epoch path)
-    uint8_t* x_hat_d_{nullptr};
-    bool*    parity_d_{nullptr};
-
-    // GPU candidate buffers (epoch path)
-    int32_t*  gpu_cand_fo_d_{nullptr};
-    uint8_t*  gpu_cand_to_d_{nullptr};
-    uint8_t*  gpu_cand_ts_d_{nullptr};
-    uint8_t*  gpu_cand_fs_d_{nullptr};
-    int16_t*  gpu_cand_score_d_{nullptr};
-    uint32_t* gpu_cand_count_d_{nullptr};
-
-    uint8_t* magFT8_dummy_{nullptr};  // 1-byte pinned dummy for rt8BufferPosition_
-
-    GpuScanResult gpu_results_[BUFFERS];
-
-    int  buffer_number_{0};
-    int  consecutive_timeouts_{0};
-
-    // Epoch snapshot state
-    uint64_t     last_epoch_wi_{0};     // ring write_idx at last epoch trigger
-    std::atomic<int> epoch_phase_{-1}; // FT8 epoch start phase (mod EPOCH_BLOCKS); -1 = unlearned
-    std::thread  last_snapshot_thread_;
 
     // Continuous scan state
     ContScanResult cont_slots_[CONTINUOUS_SLOTS];
@@ -147,7 +87,6 @@ private:
     void freeContSlots();
     void contWorker();
     void launchContScan(uint64_t wi);
-    void launchEpochScan(uint64_t wi, double seconds);
 };
 
 } // namespace cuda
