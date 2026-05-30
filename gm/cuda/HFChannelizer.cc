@@ -7,7 +7,6 @@
 #include <cstring>
 
 #include "gm/cuda/HFChannelizer.h"
-#include "gm/cuda/FileChannelizer.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/buffer/BufferPosition.h"
 #include "gm/rx888/rx888.h"
@@ -139,8 +138,6 @@ ctrl_port_(ctrl_port) {
 }
 
 HFChannelizer::~HFChannelizer() {
-    if (recording_.load()) stopRecording();
-    if (record_pinned_) { cudaFreeHost(record_pinned_); record_pinned_ = nullptr; }
     if (audio_thread.joinable()) audio_thread.join();
     for (int i = 0; i < NUM_SINKS; i++) {
         delete audio_sockets[i];
@@ -234,25 +231,6 @@ int HFChannelizer::doCopy(uint64_t now) {
         cuda_check_error(cudaMemcpyAsync(&demodData_d[(buffer_number % BUFFERS) * fft_length / 2],
             &channelData_d[fft_length/4],
             fft_length / 2 * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
-
-        // Recording: async D2H copy → pinned ring, signal record thread via stream callback.
-        if (recording_.load(std::memory_order_acquire)) {
-            uint64_t rp = record_produce_.load(std::memory_order_relaxed);
-            uint64_t rc = record_consume_.load(std::memory_order_acquire);
-            if (rp - rc < (uint64_t)RECORD_RING) {
-                uint64_t slot = rp % (uint64_t)RECORD_RING;
-                cuda_check_error(cudaMemcpyAsync(
-                    record_pinned_ + slot * (fft_length / 2),
-                    &channelData_d[fft_length / 4],
-                    (fft_length / 2) * sizeof(std::complex<float>),
-                    cudaMemcpyDeviceToHost, stream));
-                static std::atomic<uint64_t>* s_record_produce = &record_produce_;
-                cudaStreamAddCallback(stream,
-                    [](cudaStream_t, cudaError_t, void*) {
-                        s_record_produce->fetch_add(1, std::memory_order_release);
-                    }, nullptr, 0);
-            }
-        }
 
         cudaStreamAddCallback(stream,
         [](cudaStream_t mstream, cudaError_t status, void *data) {
@@ -429,63 +407,15 @@ void HFChannelizer::controlWorker() {
     svr.listen(ctrl_host_.c_str(), ctrl_port_);
 }
 
-void HFChannelizer::startRecording(const std::string& filename) {
-    if (recording_.load()) {
-        printf("HFChannelizer: already recording\n");
-        return;
-    }
-    record_fp_ = fopen(filename.c_str(), "wb");
-    if (!record_fp_) {
-        perror(("HFChannelizer: cannot open " + filename).c_str());
-        return;
-    }
-
-    if (!record_pinned_) {
-        size_t bytes = (size_t)RECORD_RING * (fft_length / 2) * sizeof(std::complex<float>);
-        cuda_check_error(cudaHostAlloc((void**)&record_pinned_, bytes, cudaHostAllocDefault));
-    }
-
-    gm::cuda::ChannelizerFileHeader hdr{};
-    hdr.magic            = gm::cuda::kChannelizerFileMagic;
-    hdr.version          = 1;
-    hdr.block_samples    = fft_length / 2;
-    hdr.reserved         = 0;
-    // block_interval_ns: NLARGE new samples per block at rx_samplerate
-    hdr.block_interval_ns = (uint64_t)(
+gm::buffer::BufferFileParams HFChannelizer::getBufferFileParams() const {
+    gm::buffer::BufferFileParams p;
+    p.block_samples     = fft_length / 2;
+    p.block_interval_ns = (uint64_t)(
         (double)gm::rx888::rx888::NLARGE / gm::rx888::rx888::rx_samplerate * 1e9);
-    hdr.sample_rate_hz   = (uint32_t)(
-        ((double)fft_length / 2.0) * 1e9 / (double)hdr.block_interval_ns);
-    hdr.rx_sample_rate   = gm::rx888::rx888::rx_samplerate;
-    fwrite(&hdr, sizeof(hdr), 1, record_fp_);
-
-    record_produce_.store(0, std::memory_order_relaxed);
-    record_consume_.store(0, std::memory_order_relaxed);
-    recording_.store(true, std::memory_order_release);
-    record_thread_ = std::thread(&HFChannelizer::recordWorker, this);
-    printf("HFChannelizer: recording to %s  (block=%u samples, %.3f ms each)\n",
-           filename.c_str(), fft_length / 2, (double)hdr.block_interval_ns / 1e6);
-}
-
-void HFChannelizer::stopRecording() {
-    recording_.store(false, std::memory_order_release);
-    if (record_thread_.joinable()) record_thread_.join();
-    if (record_fp_) { fclose(record_fp_); record_fp_ = nullptr; }
-    printf("HFChannelizer: recording stopped\n");
-}
-
-void HFChannelizer::recordWorker() {
-    const size_t block_bytes = (fft_length / 2) * sizeof(std::complex<float>);
-    while (recording_.load(std::memory_order_acquire) ||
-           record_produce_.load(std::memory_order_acquire) > record_consume_.load(std::memory_order_relaxed)) {
-        if (record_produce_.load(std::memory_order_acquire) <= record_consume_.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-            continue;
-        }
-        uint64_t slot = record_consume_.load(std::memory_order_relaxed) % (uint64_t)RECORD_RING;
-        fwrite(record_pinned_ + slot * (fft_length / 2), block_bytes, 1, record_fp_);
-        record_consume_.fetch_add(1, std::memory_order_release);
-    }
-    fflush(record_fp_);
+    p.sample_rate_hz    = (uint32_t)(
+        ((double)(fft_length / 2)) * 1e9 / (double)p.block_interval_ns);
+    p.rx_sample_rate    = gm::rx888::rx888::rx_samplerate;
+    return p;
 }
 
 void HFChannelizer::run() {

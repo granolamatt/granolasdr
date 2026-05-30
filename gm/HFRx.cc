@@ -1,17 +1,18 @@
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
+#include <complex>
 #include <thread>
 #include <zmq.hpp>
 
 #include "gm/rx888/rx888.h"
 #include "gm/cuda/HFChannelizer.h"
-#include "gm/cuda/FileChannelizer.h"
 #include "gm/cuda/MagBlock.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8Cuda.h"
 #include "gm/hf/ft8.h"
 #include "gm/hf/js8.h"
+#include "gm/buffer/BufferFile.h"
 
 static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
@@ -26,13 +27,12 @@ static void runProxy() {
     zmq_proxy(xsub.handle(), xpub.handle(), nullptr);
 }
 
-template<typename Channelizer>
-static void runPipeline(Channelizer& epochbuffer,
+static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         float min_score, bool enable_js8) {
 
     // RAII order: MagBlock owns ring memory; FT8Cuda/JS8Cuda hold const refs.
     // C++ destroys in reverse declaration order (scanners before ring).
-    gm::cuda::MagBlock magblock(epochbuffer.getBuffer(), kProxyXSubPort);
+    gm::cuda::MagBlock magblock(&buf, kProxyXSubPort);
     magblock.start();
 
     gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
@@ -85,21 +85,24 @@ int main(int argc, char* argv[]) {
            kProxyXSubPort, kProxyXPubPort);
 
     if (!playback_file.empty()) {
-        gm::cuda::FileChannelizer epochbuffer(playback_file);
-        epochbuffer.start();
-        runPipeline(epochbuffer, min_score, enable_js8);
+        gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
+        playback.start();
+        runPipeline(*playback.getBuffer(), min_score, enable_js8);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
 
-        gm::cuda::HFChannelizer epochbuffer(mydsp.getRxBufferPosition(), ctrl_host, ctrl_port);
-        epochbuffer.start();
+        gm::cuda::HFChannelizer channelizer(mydsp.getRxBufferPosition(), ctrl_host, ctrl_port);
+        channelizer.start();
 
+        std::unique_ptr<gm::buffer::BufferFile<std::complex<float>>> recorder;
         if (!record_file.empty()) {
-            epochbuffer.startRecording(record_file);
+            recorder = std::make_unique<gm::buffer::BufferFile<std::complex<float>>>(
+                channelizer.getBuffer(), record_file, channelizer.getBufferFileParams());
+            recorder->start();
         }
 
-        runPipeline(epochbuffer, min_score, enable_js8);
+        runPipeline(*channelizer.getBuffer(), min_score, enable_js8);
     }
 
     return 0;
