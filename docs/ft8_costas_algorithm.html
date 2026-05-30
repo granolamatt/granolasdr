@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FT8 Costas Sync Scan — CUDA Kernel Diagram</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --orange: #f0883e;
+    --red: #f85149;
+    --purple: #a371f7;
+    --costas-bg: #1f3a5f;
+    --costas-tone: #58a6ff;
+    --data-bg: #1a2a1a;
+    --data-text: #3fb950;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px;
+    padding: 24px;
+    min-width: 1100px;
+  }
+  h1 { font-size: 22px; color: var(--accent); margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 15px; color: var(--accent); margin-bottom: 14px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .row { display: flex; gap: 20px; margin-bottom: 20px; }
+  .row .section { flex: 1; margin-bottom: 0; }
+
+  /* ── 1. FT8 Frame Timeline ── */
+  .frame { display: flex; align-items: stretch; gap: 2px; overflow-x: auto; padding-bottom: 4px; }
+  .sym {
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    min-width: 16px; flex: 1;
+  }
+  .sym-bar {
+    width: 100%; border-radius: 3px 3px 0 0;
+    position: relative;
+  }
+  .sym-label {
+    font-size: 9px; color: var(--muted); margin-top: 3px;
+    writing-mode: vertical-rl; transform: rotate(180deg); height: 28px;
+  }
+  .costas-bar { background: var(--costas-bg); border: 1px solid var(--costas-tone); }
+  .data-bar   { background: var(--data-bg);   border: 1px solid #2a3a2a; }
+  .costas-tone-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--costas-tone);
+    margin: 0 auto 2px;
+  }
+  .frame-legend { display: flex; gap: 20px; margin-top: 10px; font-size: 12px; }
+  .frame-legend span { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
+  /* ── 2. Costas Pattern Grid ── */
+  .costas-grid-wrap { display: flex; gap: 24px; align-items: flex-start; }
+  .grid-container { position: relative; }
+  .costas-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 40px);
+    grid-template-rows: repeat(8, 28px);
+    gap: 2px;
+  }
+  .cell {
+    border-radius: 3px; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600;
+  }
+  .cell-empty  { background: #1c2128; border: 1px solid var(--border); color: var(--muted); }
+  .cell-tone   { background: var(--costas-bg); border: 2px solid var(--costas-tone); color: var(--costas-tone); }
+  .cell-freq-n { background: #2d1f00; border: 1px dashed var(--yellow); color: var(--yellow); }
+  .cell-time-n { background: #1f0e2d; border: 1px dashed var(--purple); color: var(--purple); }
+  .cell-both-n { background: #2a1f2d; border: 1px dashed #c084fc; color: #c084fc; }
+  .axis-label  { font-size: 11px; color: var(--muted); text-align: center; margin-top: 6px; }
+  .freq-axis   { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 11px; color: var(--muted); padding-right: 6px; text-align: center; }
+  .freq-nums {
+    display: grid; grid-template-rows: repeat(8, 28px); gap: 2px;
+    font-size: 10px; color: var(--muted); text-align: right; padding-right: 4px;
+  }
+  .freq-nums div { display: flex; align-items: center; justify-content: flex-end; }
+  .sym-nums {
+    display: grid; grid-template-columns: repeat(7, 40px); gap: 2px;
+    font-size: 10px; color: var(--muted); text-align: center; margin-bottom: 4px;
+  }
+  .sym-nums div { display: flex; align-items: center; justify-content: center; }
+  .costas-info { flex: 1; }
+  .costas-info p { color: var(--muted); font-size: 13px; line-height: 1.7; margin-bottom: 10px; }
+  .code-block {
+    background: #1c2128; border: 1px solid var(--border);
+    border-radius: 6px; padding: 12px; font-family: monospace;
+    font-size: 12px; margin-bottom: 10px; line-height: 1.8;
+  }
+  .kw { color: #ff7b72; }
+  .num { color: #79c0ff; }
+  .cmt { color: var(--muted); font-style: italic; }
+
+  /* ── 3. Score Computation ── */
+  .score-diagram { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; }
+  .score-grid-wrap { display: flex; gap: 6px; }
+  .score-grid {
+    display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(5, 36px); gap: 3px;
+  }
+  .sc { border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-direction: column; gap: 1px; }
+  .sc-empty  { background: #1c2128; border: 1px solid var(--border); }
+  .sc-focus  { background: #1f3a5f; border: 2px solid var(--costas-tone); color: var(--costas-tone); }
+  .sc-fn     { background: #2d1f00; border: 1px dashed var(--yellow); color: var(--yellow); }
+  .sc-tn     { background: #1f0e2d; border: 1px dashed var(--purple); color: var(--purple); }
+  .sc-label  { font-size: 9px; font-weight: 400; }
+  .score-legend { margin-top: 12px; }
+  .score-legend p { font-size: 12px; color: var(--muted); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+  .formula-box {
+    background: #1c2128; border: 1px solid var(--border);
+    border-radius: 6px; padding: 14px; font-family: monospace; font-size: 13px;
+    flex: 1; min-width: 320px;
+  }
+  .formula-box .step { margin-bottom: 10px; color: var(--text); line-height: 1.7; }
+  .formula-box .step .label { color: var(--accent); font-weight: 600; margin-right: 8px; }
+  .formula-box .step .expr  { color: var(--costas-tone); }
+  .formula-box .step .note  { color: var(--muted); font-size: 11px; display: block; margin-left: 80px; }
+  .highlight-y { color: var(--yellow); }
+  .highlight-p { color: var(--purple); }
+  .highlight-g { color: var(--green); }
+
+  /* ── 4. SMEM Layout ── */
+  .smem-diagram { overflow-x: auto; }
+  .smem-grid {
+    display: grid; gap: 2px;
+    grid-template-columns: repeat(22, 1fr);
+    min-width: 880px;
+  }
+  .smem-cell {
+    height: 26px; border-radius: 3px; display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 600;
+  }
+  .smem-hdr   { background: transparent; color: var(--muted); font-size: 10px; }
+  .smem-tone  { background: var(--costas-bg); border: 1px solid var(--costas-tone); color: var(--costas-tone); }
+  .smem-other { background: #1c2128; border: 1px solid var(--border); color: var(--muted); }
+  .smem-dots  { background: transparent; color: var(--muted); font-size: 16px; display: flex; align-items: center; justify-content: center; }
+  .smem-row-label { font-size: 11px; color: var(--muted); display: flex; align-items: center; padding-right: 4px; white-space: nowrap; }
+
+  /* ── 5. Pipeline ── */
+  .pipeline { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+  .pipe-step {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 12px 16px; font-size: 12px; min-width: 130px;
+  }
+  .pipe-step .ps-title { font-weight: 700; color: var(--accent); margin-bottom: 4px; }
+  .pipe-step .ps-body  { color: var(--muted); line-height: 1.5; }
+  .pipe-arrow { color: var(--muted); font-size: 20px; padding: 0 8px; }
+
+  /* ── Grid dims callout ── */
+  .dims-box { display: flex; gap: 16px; flex-wrap: wrap; }
+  .dim-card {
+    background: #1c2128; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; font-size: 12px;
+    line-height: 1.7;
+  }
+  .dim-card .dc-title { color: var(--accent); font-weight: 700; margin-bottom: 4px; }
+  .dim-card .dc-val   { font-family: monospace; color: var(--costas-tone); }
+  .dim-card .dc-note  { color: var(--muted); }
+
+  .tag {
+    display: inline-block; padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; margin-right: 4px;
+  }
+  .tag-c { background: #1f3a5f; color: var(--costas-tone); border: 1px solid var(--costas-tone); }
+  .tag-d { background: var(--data-bg); color: var(--green); border: 1px solid #2a4a2a; }
+  .tag-s { background: #2d1f00; color: var(--yellow); border: 1px solid var(--yellow); }
+</style>
+</head>
+<body>
+
+<h1>ft8SyncScanKernel — Costas Sync Algorithm</h1>
+<p class="subtitle">GPU Costas array correlation for FT8 sync detection &nbsp;·&nbsp; <code>gm/cuda/FT8ScanCuda.cu</code></p>
+
+<!-- ──────────────────────── SECTION 1: FT8 Frame ──────────────────────── -->
+<div class="section">
+  <h2>1 &nbsp;FT8 Frame Structure (79 symbols)</h2>
+  <div class="frame" id="frame"></div>
+  <div class="frame-legend">
+    <span><span class="dot" style="background:#1f3a5f;border:1px solid #58a6ff"></span>Costas sync symbol (with tone dot = expected bin)</span>
+    <span><span class="dot" style="background:#1a2a1a;border:1px solid #2a3a2a"></span>Data / message symbol</span>
+  </div>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px;">
+    Three identical Costas groups at symbol positions <strong style="color:var(--costas-tone)">0–6</strong>,
+    <strong style="color:var(--costas-tone)">36–42</strong>, and <strong style="color:var(--costas-tone)">72–78</strong>.
+    The kernel indexes them as <code>block_abs = time_off + 36×m + k</code> (m = 0,1,2 &nbsp;·&nbsp; k = 0..6).
+  </p>
+</div>
+
+<!-- ──────────────────────── SECTION 2: Costas Pattern ──────────────────────── -->
+<div class="section">
+  <h2>2 &nbsp;Costas Tone Pattern — <code>kCostas[7] = {3, 1, 4, 0, 6, 5, 2}</code></h2>
+  <div class="costas-grid-wrap">
+    <div style="display:flex;gap:0;align-items:flex-start;">
+      <div>
+        <div style="height:36px;"></div><!-- spacer for sym-nums row -->
+        <div class="freq-nums" id="freq-nums"></div>
+      </div>
+      <div>
+        <div class="sym-nums" id="sym-nums"></div>
+        <div class="costas-grid" id="costas-grid"></div>
+        <div class="axis-label">Symbol index k →</div>
+      </div>
+    </div>
+    <div class="costas-info">
+      <p>Each Costas symbol <em>k</em> transmits on a single 8-FSK tone bin <code>sm = kCostas[k]</code> (0–7 within the 8-tone group). The pattern forms a Costas array — no two symbols share a row, column, or diagonal, making it easy to distinguish from noise even at low SNR.</p>
+
+      <div class="code-block">
+<span class="kw">static __constant__</span> uint8_t kCostas[<span class="num">7</span>] = {<span class="num">3, 1, 4, 0, 6, 5, 2</span>}; <span class="cmt">// tone bin per symbol</span><br>
+<br>
+<span class="cmt">// per symbol k:</span><br>
+<span class="kw">int</span> sm  = kCostas[k];           <span class="cmt">// expected freq bin (0–6)</span><br>
+<span class="kw">int</span> si  = (m<span class="num">*7</span>+k) * WINDOW + threadIdx.x; <span class="cmt">// smem base</span><br>
+<span class="kw">int</span> cur = smem[si + sm];        <span class="cmt">// magnitude at Costas bin</span>
+      </div>
+
+      <div class="score-legend">
+        <p><span class="swatch" style="background:#1f3a5f;border:1px solid var(--costas-tone)"></span> <strong style="color:var(--costas-tone)">Costas tone</strong> — expected Costas bin for symbol k</p>
+        <p><span class="swatch" style="background:#2d1f00;border:1px dashed var(--yellow)"></span> <strong style="color:var(--yellow)">Frequency neighbor</strong> — adjacent bin ±1 (contributes to score)</p>
+        <p><span class="swatch" style="background:transparent;border:1px solid var(--border)"></span> Empty — no energy expected here</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────────────────── SECTION 3: Score Computation ──────────────────────── -->
+<div class="section">
+  <h2>3 &nbsp;Score Computation — Differential Contrast</h2>
+  <div class="score-diagram">
+
+    <!-- mini time×freq grid showing one symbol with its neighbors -->
+    <div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;text-align:center;">Neighbors for one Costas symbol (time × freq)</p>
+      <div style="display:flex;gap:6px;align-items:flex-start;">
+        <div>
+          <div style="height:36px;"></div>
+          <div style="display:grid;grid-template-rows:repeat(5,36px);gap:3px;font-size:10px;color:var(--muted);text-align:right;padding-right:4px;">
+            <div style="display:flex;align-items:center;justify-content:flex-end;">sm+2</div>
+            <div style="display:flex;align-items:center;justify-content:flex-end;">sm+1</div>
+            <div style="display:flex;align-items:center;justify-content:flex-end;color:var(--costas-tone)">sm</div>
+            <div style="display:flex;align-items:center;justify-content:flex-end;">sm-1</div>
+            <div style="display:flex;align-items:center;justify-content:flex-end;">sm-2</div>
+          </div>
+        </div>
+        <div>
+          <div style="display:grid;grid-template-columns:repeat(3,60px);gap:3px;font-size:10px;color:var(--muted);text-align:center;margin-bottom:3px;">
+            <div>k-1</div><div style="color:var(--costas-tone)">k</div><div>k+1</div>
+          </div>
+          <div class="score-grid">
+            <!-- row sm+2 -->
+            <div class="sc sc-empty"></div>
+            <div class="sc sc-empty"><span style="font-size:9px;color:var(--muted)">no cmp</span></div>
+            <div class="sc sc-empty"></div>
+            <!-- row sm+1 -->
+            <div class="sc sc-empty"></div>
+            <div class="sc sc-fn"><span class="sc-label" style="color:var(--yellow)">freq+1</span></div>
+            <div class="sc sc-empty"></div>
+            <!-- row sm (Costas tone) -->
+            <div class="sc sc-tn"><span class="sc-label" style="color:var(--purple)">time-1</span></div>
+            <div class="sc sc-focus">cur<br><span class="sc-label">kCostas[k]</span></div>
+            <div class="sc sc-tn"><span class="sc-label" style="color:var(--purple)">time+1</span></div>
+            <!-- row sm-1 -->
+            <div class="sc sc-empty"></div>
+            <div class="sc sc-fn"><span class="sc-label" style="color:var(--yellow)">freq-1</span></div>
+            <div class="sc sc-empty"></div>
+            <!-- row sm-2 -->
+            <div class="sc sc-empty"></div>
+            <div class="sc sc-empty"><span style="font-size:9px;color:var(--muted)">no cmp</span></div>
+            <div class="sc sc-empty"></div>
+          </div>
+          <div style="text-align:center;font-size:10px;color:var(--muted);margin-top:4px;">symbol index k →</div>
+        </div>
+      </div>
+      <div class="score-legend" style="margin-top:12px;">
+        <p><span class="swatch" style="background:#1f3a5f;border:1px solid var(--costas-tone)"></span><strong style="color:var(--costas-tone)">cur</strong> — magnitude at Costas tone bin</p>
+        <p><span class="swatch" style="background:#2d1f00;border:1px dashed var(--yellow)"></span><strong style="color:var(--yellow)">freq ±1</strong> — adjacent frequency bins</p>
+        <p><span class="swatch" style="background:#1f0e2d;border:1px dashed var(--purple)"></span><strong style="color:var(--purple)">time ±1</strong> — adjacent symbols (same Costas group)</p>
+      </div>
+    </div>
+
+    <!-- Formula -->
+    <div class="formula-box">
+      <div class="step">
+        <span class="label">For each of 21 symbols</span> (m=0..2, k=0..6):
+      </div>
+      <div class="step">
+        <span class="label">sm &nbsp;=</span><span class="expr">kCostas[k]</span>
+        <span class="note">expected tone bin within 8-FSK group</span>
+      </div>
+      <div class="step">
+        <span class="label">cur =</span><span class="expr">smem[slot + sm]</span>
+        <span class="note">magnitude at expected Costas bin</span>
+      </div>
+      <div class="step">
+        <span class="label">score +=</span>
+        <span class="highlight-y">(sm&gt;0) cur − smem[slot + sm−1]</span> &nbsp; <span style="color:var(--muted)">// freq below</span>
+        <span class="note">+= <span class="highlight-y">(sm&lt;7) cur − smem[slot + sm+1]</span> &nbsp;&nbsp;&nbsp; // freq above</span>
+        <span class="note">+= <span class="highlight-p">(k&gt;0) cur − smem[prev_slot + sm]</span> &nbsp; // time back</span>
+        <span class="note">+= <span class="highlight-p">(k&lt;6) cur − smem[next_slot + sm]</span> &nbsp; // time fwd</span>
+      </div>
+      <div class="step">
+        <span class="label">score /=</span><span class="expr">num_avg</span>
+        <span class="note">normalize by number of valid comparisons</span>
+      </div>
+      <div class="step" style="background:#1f3a5f;padding:8px;border-radius:4px;">
+        <span class="label" style="color:var(--green)">Emit if</span>
+        <span class="expr">score ≥ min_score</span>
+        <span class="note" style="color:var(--muted)">→ write (fo, time_off, time_sub, freq_sub, score) via atomicAdd</span>
+      </div>
+      <div style="margin-top:12px;font-size:12px;color:var(--muted);line-height:1.7;">
+        <strong style="color:var(--text)">Intuition:</strong> Score measures how much the expected Costas tone
+        <em>stands out</em> from its immediate frequency and temporal neighbors.
+        A clean signal gives large positive differences; noise gives near-zero.
+        Dividing by <code>num_avg</code> normalizes partial Costas groups at the
+        frame edges.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────────────────── SECTION 4: Shared Memory ──────────────────────── -->
+<div class="section">
+  <h2>4 &nbsp;Shared Memory Layout — 21 × WINDOW bytes</h2>
+  <div class="smem-diagram">
+    <div style="display:grid;grid-template-columns:110px 1fr;gap:4px;min-width:880px;" id="smem-container"></div>
+  </div>
+  <p style="color:var(--muted);font-size:12px;margin-top:12px;">
+    <code>WINDOW = blockDim.x + 8 = 264</code> bytes per slot (only first ~11 shown here; total is 264).
+    The <span style="color:var(--costas-tone)">highlighted cell</span> is the Costas tone bin for that slot.
+    Threads load cooperatively in stride-<code>blockDim.x</code> pattern so all loads are contiguous (coalesced).
+    Score computation then reads entirely from smem — no further global memory accesses.
+  </p>
+</div>
+
+<!-- ──────────────────────── SECTION 5: Grid dims ──────────────────────── -->
+<div class="section">
+  <h2>5 &nbsp;CUDA Grid Dimensions</h2>
+  <div class="dims-box">
+    <div class="dim-card">
+      <div class="dc-title">blockDim</div>
+      <div class="dc-val">256 &nbsp;threads</div>
+      <div class="dc-note">one thread = one freq_offset (fo)</div>
+    </div>
+    <div class="dim-card">
+      <div class="dc-title">gridDim.x</div>
+      <div class="dc-val">ceil(num_bins / 256)</div>
+      <div class="dc-note">sweeps all frequency bins</div>
+    </div>
+    <div class="dim-card">
+      <div class="dc-title">gridDim.y</div>
+      <div class="dc-val">30 × time_osr × freq_osr</div>
+      <div class="dc-note">= 480 for osr=4 &nbsp;·&nbsp; sub (slow) × time_off (fast)</div>
+    </div>
+    <div class="dim-card">
+      <div class="dc-title">smem per block</div>
+      <div class="dc-val">21 × 264 = 5544 bytes</div>
+      <div class="dc-note">21 Costas slots × WINDOW</div>
+    </div>
+    <div class="dim-card">
+      <div class="dc-title">blockIdx.y decode</div>
+      <div class="dc-val">sub = combo / 30</div>
+      <div class="dc-note">time_off = combo % 30 &nbsp;·&nbsp; sub = time_sub×freq_osr + freq_sub</div>
+    </div>
+  </div>
+  <p style="color:var(--muted);font-size:12px;margin-top:14px;">
+    <strong style="color:var(--text)">L2 reuse:</strong>
+    Adjacent <code>blockIdx.y</code> values with the same <code>sub</code> (same sub-sample offset)
+    access nearly identical ring-buffer rows — ~86% slot overlap — giving significant cache reuse
+    between blocks co-scheduled on the same SM.
+  </p>
+</div>
+
+<!-- ──────────────────────── SECTION 6: Pipeline ──────────────────────── -->
+<div class="section">
+  <h2>6 &nbsp;Kernel Execution Pipeline</h2>
+  <div class="pipeline">
+    <div class="pipe-step">
+      <div class="ps-title">① Load smem</div>
+      <div class="ps-body">Coalesced cooperative load of 21×WINDOW mag bytes from ring buffer into shared memory</div>
+    </div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step">
+      <div class="ps-title">② __syncthreads()</div>
+      <div class="ps-body">All threads wait; smem fully populated before any score read</div>
+    </div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step">
+      <div class="ps-title">③ Score loop</div>
+      <div class="ps-body">3 Costas groups × 7 symbols; accumulate differential contrasts from smem only</div>
+    </div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step">
+      <div class="ps-title">④ Normalize</div>
+      <div class="ps-body"><code>score /= num_avg</code><br>skip if below min_score</div>
+    </div>
+    <div class="pipe-arrow">→</div>
+    <div class="pipe-step">
+      <div class="ps-title">⑤ Emit candidate</div>
+      <div class="ps-body"><code>atomicAdd(cand_count)</code> → write (fo, to, ts, fs, score) to candidate arrays</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Build FT8 frame ──
+const kCostas = [3, 1, 4, 0, 6, 5, 2];
+const frameEl = document.getElementById('frame');
+const costas_positions = new Set([...Array(7).keys()].map(i=>i).concat([...Array(7).keys()].map(i=>i+36)).concat([...Array(7).keys()].map(i=>i+72)));
+
+for (let i = 0; i < 79; i++) {
+  const sym = document.createElement('div');
+  sym.className = 'sym';
+  const isC = costas_positions.has(i);
+  // height represents "full height" for costas, shorter for data
+  const bar = document.createElement('div');
+  bar.className = 'sym-bar ' + (isC ? 'costas-bar' : 'data-bar');
+  const h = isC ? 64 : 32;
+  bar.style.height = h + 'px';
+  if (isC) {
+    // place a tone dot
+    const dot = document.createElement('div');
+    dot.className = 'costas-tone-dot';
+    bar.appendChild(dot);
+  }
+  sym.appendChild(bar);
+  const lbl = document.createElement('div');
+  lbl.className = 'sym-label';
+  if (i === 0 || i === 36 || i === 72) lbl.textContent = 'C' + ([0,36,72].indexOf(i)+1);
+  else if (i === 7) lbl.textContent = 'data';
+  else if (i === 43) lbl.textContent = 'data';
+  else lbl.textContent = '';
+  sym.appendChild(lbl);
+  frameEl.appendChild(sym);
+}
+
+// ── Build Costas pattern grid ──
+const grid = document.getElementById('costas-grid');
+const freqNums = document.getElementById('freq-nums');
+const symNums = document.getElementById('sym-nums');
+
+// sym nums header row
+for (let k = 0; k < 7; k++) {
+  const d = document.createElement('div');
+  d.textContent = 'k=' + k;
+  symNums.appendChild(d);
+}
+
+// freq nums (7 down to 0)
+for (let f = 7; f >= 0; f--) {
+  const d = document.createElement('div');
+  d.textContent = f;
+  if (kCostas.includes(f)) {
+    // check if any k has this
+  }
+  freqNums.appendChild(d);
+}
+
+// grid cells: rows = freq (7..0), cols = k (0..6)
+for (let f = 7; f >= 0; f--) {
+  for (let k = 0; k < 7; k++) {
+    const cell = document.createElement('div');
+    const expectedF = kCostas[k];
+    if (expectedF === f) {
+      cell.className = 'cell cell-tone';
+      cell.textContent = f;
+    } else if (Math.abs(expectedF - f) === 1) {
+      cell.className = 'cell cell-freq-n';
+      cell.textContent = '±1';
+    } else {
+      cell.className = 'cell cell-empty';
+    }
+    grid.appendChild(cell);
+  }
+}
+
+// ── Build smem layout ──
+const smemContainer = document.getElementById('smem-container');
+const WINDOW_SHOW = 10; // show first 10 + ellipsis
+
+// header row
+const hdrLabel = document.createElement('div');
+hdrLabel.style.cssText = 'font-size:11px;color:var(--muted);padding:4px 0;';
+hdrLabel.textContent = 'smem slot';
+smemContainer.appendChild(hdrLabel);
+
+const hdrCells = document.createElement('div');
+hdrCells.style.cssText = 'display:grid;grid-template-columns:repeat(' + (WINDOW_SHOW+1) + ',1fr);gap:2px;';
+for (let i = 0; i < WINDOW_SHOW; i++) {
+  const c = document.createElement('div');
+  c.className = 'smem-cell smem-hdr';
+  c.textContent = 'fo+' + i;
+  hdrCells.appendChild(c);
+}
+const dotsHdr = document.createElement('div');
+dotsHdr.className = 'smem-cell smem-hdr';
+dotsHdr.textContent = '···';
+hdrCells.appendChild(dotsHdr);
+smemContainer.appendChild(hdrCells);
+
+// rows for each of the 21 slots
+for (let slot = 0; slot < 21; slot++) {
+  const m = Math.floor(slot / 7);
+  const k = slot % 7;
+  const toneBin = kCostas[k];
+
+  const rowLabel = document.createElement('div');
+  rowLabel.className = 'smem-row-label';
+  rowLabel.innerHTML = `<span style="color:var(--muted)">m=${m} k=${k}</span>&nbsp;<span style="color:var(--accent);font-size:10px;">sm=${toneBin}</span>`;
+  smemContainer.appendChild(rowLabel);
+
+  const rowCells = document.createElement('div');
+  rowCells.style.cssText = 'display:grid;grid-template-columns:repeat(' + (WINDOW_SHOW+1) + ',1fr);gap:2px;';
+
+  for (let fo = 0; fo < WINDOW_SHOW; fo++) {
+    const c = document.createElement('div');
+    if (fo === toneBin) {
+      c.className = 'smem-cell smem-tone';
+      c.textContent = 'sm';
+    } else if (fo === toneBin - 1 || fo === toneBin + 1) {
+      c.className = 'smem-cell';
+      c.style.cssText = 'height:26px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;background:#2d1f00;border:1px dashed var(--yellow);color:var(--yellow);';
+      c.textContent = '±1';
+    } else {
+      c.className = 'smem-cell smem-other';
+      c.textContent = '·';
+    }
+    rowCells.appendChild(c);
+  }
+  const dots = document.createElement('div');
+  dots.className = 'smem-cell smem-dots';
+  dots.textContent = '···';
+  rowCells.appendChild(dots);
+  smemContainer.appendChild(rowCells);
+}
+</script>
+</body>
+</html>
