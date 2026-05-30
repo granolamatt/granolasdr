@@ -1,8 +1,10 @@
 #pragma once
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <cuda_runtime.h>
+#include <zmq.hpp>
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8ScanCuda.h"
 
@@ -19,17 +21,11 @@ namespace cuda {
 // decode, CRC-12, message extract, and ZMQ publish.
 class JS8Cuda {
 public:
-    explicit JS8Cuda(FT8Cuda* ft8, float min_score = 5.0f);
+    explicit JS8Cuda(FT8Cuda* ft8, float min_score = 5.0f, int zmq_port = 0);
     ~JS8Cuda();
 
     void setDecodeCallback(std::function<void(ContScanResult&)> cb) {
         decode_callback_ = std::move(cb);
-    }
-
-    // Callback invoked after each scan slot completes: (scan_ms, 0.0f, n_candidates).
-    // Mirrors FT8Cuda::setTimingCallback for dashboard wiring.
-    void setTimingCallback(std::function<void(float, float, uint32_t)> cb) {
-        timing_callback_ = std::move(cb);
     }
 
     void start();
@@ -62,11 +58,14 @@ private:
     std::thread scan_thread_;
     std::thread worker_thread_;
 
-    std::function<void(ContScanResult&)>        decode_callback_;
-    std::function<void(float, float, uint32_t)> timing_callback_;
+    std::function<void(ContScanResult&)> decode_callback_;
 
     // Dispatch timestamp per slot (steady_clock ns), set by scanLoop, read by workerLoop.
     int64_t slot_dispatch_ns_[CONTINUOUS_SLOTS]{};
+
+    zmq::context_t zmq_ctx_;
+    zmq::socket_t  zmq_pub_;
+    std::mutex     zmq_mu_;
 
     void allocSlots();
     void freeSlots();

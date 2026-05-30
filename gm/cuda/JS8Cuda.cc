@@ -9,9 +9,11 @@
 namespace gm {
 namespace cuda {
 
-JS8Cuda::JS8Cuda(FT8Cuda* ft8, float min_score)
-    : ft8_(ft8), min_score_(min_score)
+JS8Cuda::JS8Cuda(FT8Cuda* ft8, float min_score, int zmq_port)
+    : ft8_(ft8), min_score_(min_score), zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
+    if (zmq_port > 0)
+        zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
     cudaStreamCreate(&js8_scan_stream_);
 
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
@@ -205,7 +207,15 @@ void JS8Cuda::workerLoop()
                         fprintf(stderr, "[JS8] decode_callback threw\n");
                     }
                 }
-                if (timing_callback_) timing_callback_(scan_ms, 0.0f, n);
+                {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "{\"scan_ms\":%.1f,\"n\":%u}", scan_ms, n);
+                    std::lock_guard<std::mutex> lk(zmq_mu_);
+                    zmq::message_t t("js8/timing", 10);
+                    zmq::message_t d(buf, strlen(buf));
+                    zmq_pub_.send(t, zmq::send_flags::sndmore);
+                    zmq_pub_.send(d, zmq::send_flags::none);
+                }
             } else if (ri % 60 == 0) {
                 fprintf(stderr, "[JS8] alive: %lu scans, 0 candidates\n", (unsigned long)ri);
             }

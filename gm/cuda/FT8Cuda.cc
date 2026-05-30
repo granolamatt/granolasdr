@@ -28,7 +28,7 @@
 namespace gm {
 namespace cuda {
 
-FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, float min_score, const std::string& tag) :
+FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, float min_score, const std::string& tag, int zmq_port) :
 tag_(tag),
 inPos(inP),
 buff_pos{0},
@@ -57,7 +57,11 @@ audio_ft8_bin(0),
 audio_ft8_bin_10m(0),
 audio_sample_rate(0),
 audioBins_host(NULL),
-audioBins_host_10m(NULL) {
+audioBins_host_10m(NULL),
+zmq_ctx_(1),
+zmq_pub_(zmq_ctx_, ZMQ_PUB) {
+    if (zmq_port > 0)
+        zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
     inShape = inPos->getShape();
     inData_d = (std::complex<float>*)inPos->getBuffer();
 
@@ -238,12 +242,27 @@ FT8Cuda::~FT8Cuda() {
     cudaStreamDestroy(waterfall_stream);
 }
 
+void FT8Cuda::pubJson(const char* topic, const char* json) {
+    std::lock_guard<std::mutex> lk(zmq_mu_);
+    zmq::message_t t(topic, strlen(topic));
+    zmq::message_t d(json,  strlen(json));
+    zmq_pub_.send(t, zmq::send_flags::sndmore);
+    zmq_pub_.send(d, zmq::send_flags::none);
+}
+
+void FT8Cuda::pubBin(const char* topic, const void* data, size_t len) {
+    std::lock_guard<std::mutex> lk(zmq_mu_);
+    zmq::message_t t(topic, strlen(topic));
+    zmq::message_t d(data, len);
+    zmq_pub_.send(t, zmq::send_flags::sndmore);
+    zmq_pub_.send(d, zmq::send_flags::none);
+}
+
 int FT8Cuda::doCopy(uint64_t now) {
     try {
         // Non-blocking poll: if the previous waterfall frame is ready, deliver it.
-        if (waterfall_callback_ && waterfall_ready &&
-            cudaEventQuery(waterfall_ready) == cudaSuccess) {
-            waterfall_callback_(waterfall_host, WATERFALL_BINS);
+        if (waterfall_ready && cudaEventQuery(waterfall_ready) == cudaSuccess) {
+            pubBin("waterfall", waterfall_host, WATERFALL_BINS);
         }
 
         size_t length = inShape[1];
@@ -311,7 +330,7 @@ int FT8Cuda::doCopy(uint64_t now) {
             cudaEventRecord(ring_ready, stream);
 
             // Waterfall decimation: wait for ring_ready then decimate the just-written slot.
-            if (waterfall_callback_) {
+            if (waterfall_d) {
                 cudaStreamWaitEvent(waterfall_stream, ring_ready, 0);
                 const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
                 const uint8_t* slot_base = &magFT8_ring_d[
@@ -501,8 +520,13 @@ int FT8Cuda::doCopy(uint64_t now) {
 
                     fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=%.1fms n=%u ldpc_ok=%d\n",
                             tag_.c_str(), scan_ms, ldpc_ms, n, (int)ldpc_ok);
-                    if (timing_callback_)
-                        timing_callback_((float)scan_ms, (float)ldpc_ms, n);
+                    {
+                        char buf[128];
+                        snprintf(buf, sizeof(buf),
+                            "{\"scan_ms\":%.1f,\"ldpc_ms\":%.1f,\"n\":%u}",
+                            (float)scan_ms, (float)ldpc_ms, n);
+                        pubJson("ft8/timing", buf);
+                    }
 
                     // Snapshot audio rings immediately after GPU work (before doCopy can overwrite).
                     std::vector<std::complex<float>> audio_snap, audio_snap_10m;
