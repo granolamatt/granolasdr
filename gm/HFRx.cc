@@ -7,6 +7,7 @@
 #include "gm/rx888/rx888.h"
 #include "gm/cuda/HFChannelizer.h"
 #include "gm/cuda/FileChannelizer.h"
+#include "gm/cuda/MagBlock.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8Cuda.h"
 #include "gm/hf/ft8.h"
@@ -27,10 +28,15 @@ static void runProxy() {
 
 template<typename Channelizer>
 static void runPipeline(Channelizer& epochbuffer,
-                        bool enable_corpus, float min_score, bool use_gpu_ldpc,
+                        float min_score, bool use_gpu_ldpc,
                         bool enable_js8) {
 
-    gm::cuda::FT8Cuda ft8channel(epochbuffer.getBuffer(), enable_corpus, min_score, "EPOCH", kProxyXSubPort);
+    // RAII order: MagBlock owns ring memory; FT8Cuda/JS8Cuda hold const refs.
+    // C++ destroys in reverse declaration order (scanners before ring).
+    gm::cuda::MagBlock magblock(epochbuffer.getBuffer(), kProxyXSubPort);
+    magblock.start();
+
+    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
     ft8channel.start();
 
     gm::hf::FT8 ft8(ft8channel.getBuffer(), &ft8channel, kProxyXSubPort, use_gpu_ldpc);
@@ -45,7 +51,8 @@ static void runPipeline(Channelizer& epochbuffer,
     std::unique_ptr<gm::cuda::JS8Cuda> js8channel;
     if (enable_js8) {
         js8_obj    = std::make_unique<gm::hf::JS8>(kProxyXSubPort);
-        js8channel = std::make_unique<gm::cuda::JS8Cuda>(&ft8channel, min_score, kProxyXSubPort);
+        js8channel = std::make_unique<gm::cuda::JS8Cuda>(
+            magblock.getRing(), min_score, kProxyXSubPort);
         js8channel->setDecodeCallback([&js8_obj](gm::cuda::ContScanResult& r) {
             js8_obj->decodeAndPublishContinuous(r);
         });
@@ -60,7 +67,6 @@ static void runPipeline(Channelizer& epochbuffer,
 
 int main(int argc, char* argv[]) {
 
-    bool        enable_corpus  = false;
     bool        use_gpu_ldpc   = false;
     bool        enable_js8     = false;
     std::string ctrl_host      = "127.0.0.1";
@@ -70,9 +76,7 @@ int main(int argc, char* argv[]) {
     std::string playback_file;
 
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--jtdx") == 0) {
-            enable_corpus = true;
-        } else if (strcmp(argv[i], "--gpu-ldpc") == 0) {
+        if (strcmp(argv[i], "--gpu-ldpc") == 0) {
             use_gpu_ldpc = true;
         } else if (strcmp(argv[i], "--control-host") == 0 && i + 1 < argc) {
             ctrl_host = argv[++i];
@@ -96,7 +100,7 @@ int main(int argc, char* argv[]) {
     if (!playback_file.empty()) {
         gm::cuda::FileChannelizer epochbuffer(playback_file);
         epochbuffer.start();
-        runPipeline(epochbuffer, enable_corpus, min_score, use_gpu_ldpc, enable_js8);
+        runPipeline(epochbuffer, min_score, use_gpu_ldpc, enable_js8);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -108,7 +112,7 @@ int main(int argc, char* argv[]) {
             epochbuffer.startRecording(record_file);
         }
 
-        runPipeline(epochbuffer, enable_corpus, min_score, use_gpu_ldpc, enable_js8);
+        runPipeline(epochbuffer, min_score, use_gpu_ldpc, enable_js8);
     }
 
     return 0;

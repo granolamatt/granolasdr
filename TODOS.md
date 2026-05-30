@@ -2,55 +2,57 @@
 
 Updated 2026-05-30.
 
-## Flow graph refactor (next major phase)
+## Phase 11: Flow graph refactor (ready to implement)
 
-The target architecture (see ARCHITECTURE.md) requires two new primitives.
-These should be built before adding new decoders so future work lands on
-clean foundations.
+See CEO plan: `~/.gstack/projects/granolamatt-granolasdr/ceo-plans/2026-05-30-phase11-magblock.md`
 
 ### DeviceRingBuffer<T, N>
 
-Replace the five ad-hoc ring accessors on `FT8Cuda` (`getRingPtr`,
-`getRingWriteIdx`, `getRingBlocks`, `getRingReadyEvent`, `getRingNumBins`)
-with a single typed struct:
+Replace the five ad-hoc ring accessors on `FT8Cuda` with a single typed struct.
+Lives in `gm/buffer/DeviceRingBuffer.h`.
+
+**Confirmed slot size** (from FT8Cuda.cc line 154):
+`slot_bytes = FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length * sizeof(T)`
 
 ```cpp
 template<typename T, int N>
 struct DeviceRingBuffer {
-    T*                    base_d;      // device allocation: N * slot_elems
-    size_t                slot_elems;
+    T*                    base_d;       // device allocation: N * slot_bytes
+    size_t                slot_bytes;   // FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length
+    size_t                num_bins;     // rfft_length (for scan functions)
     std::atomic<uint64_t> write_idx{0};
     cudaEvent_t           ready;
 
-    T* slot(uint64_t idx) const { return base_d + (idx % N) * slot_elems; }
+    T* slot(uint64_t idx) const {
+        return base_d + (idx % N) * (slot_bytes / sizeof(T));
+    }
 };
 ```
 
-- Lives in `gm/buffer/DeviceRingBuffer.h`
-- `FT8Cuda` constructs one and exposes `const DeviceRingBuffer<uint8_t, 200>& getRing()`
-- `JS8Cuda` takes `const DeviceRingBuffer<uint8_t, 200>&` instead of `FT8Cuda*`
-- Breaks the JS8Cuda → FT8Cuda compile-time dependency
-
 ### MagBlock
 
-Extract the magnitude computation out of `FT8Cuda` into a standalone block:
+Extract magnitude computation out of `FT8Cuda` into a standalone block.
+Owns: RFFT, |·|² kernel, ring write, waterfall → ZMQ.
+Constructor takes: `BufferPosition<complex<float>>*` + zmq_port.
+Exposes: `const DeviceRingBuffer<uint8_t, 200>& getRing()`.
 
-```
-input:  DeviceBuffer<complex<float>>     (HFChannelizer output, rfft_length bins)
-output: DeviceRingBuffer<uint8_t, 200>   (shared read-only by all scanners)
-```
+`FT8Cuda` becomes a pure scanner: takes `const DeviceRingBuffer<uint8_t,200>&`.
+`JS8Cuda` also takes `const DeviceRingBuffer<uint8_t,200>&` (drops FT8Cuda* dep).
 
-Moves these responsibilities out of `FT8Cuda`:
-- Per-block RFFT on channelizer output
-- `|·|²` magnitude + uint8 decimation kernel
-- Ring slot write + `cudaEventRecord(ready)`
-- Waterfall decimation kernel → ZMQ "waterfall" publish
+**Note:** `enable_corpus` / `--jtdx` path removed in Phase 11. See Phase 12.
 
-`FT8Cuda` becomes a pure scanner: takes a `DeviceRingBuffer` input, runs the
-Costas scan, emits `ContScanResult` for the CPU decode stage.
+### Phase 11 test gate
+Run `--playback /tmp/js8test.dat --js8` before and after.
+FT8 + JS8 decode counts must match exactly (deterministic input).
 
-Build order: `DeviceRingBuffer` first (header only, no GPU code), then
-`MagBlock` extraction, then update `FT8Cuda` and `JS8Cuda` constructors.
+## Phase 12: Follow-on work (after Phase 11 ships)
+
+- **Corpus re-enable**: MagBlock exposes `demodFT8_d` callback so FT8Cuda corpus
+  path (`--jtdx`) can be restored without a second RFFT
+- **CUDA error checking**: add `cudaGetLastError()` checks to FT8Cuda + JS8Cuda
+  kernel launches (MagBlock already has this from Phase 11)
+- **Wideband waterfall resolution fix** (see below)
+- **QP-ADMM vs BP baseline** (see below)
 
 ## Wideband waterfall resolution
 

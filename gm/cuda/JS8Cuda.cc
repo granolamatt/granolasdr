@@ -9,8 +9,9 @@
 namespace gm {
 namespace cuda {
 
-JS8Cuda::JS8Cuda(FT8Cuda* ft8, float min_score, int zmq_port)
-    : ft8_(ft8), min_score_(min_score), zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
+JS8Cuda::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
+                 float min_score, int zmq_port)
+    : ring_(ring), min_score_(min_score), zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
@@ -106,15 +107,14 @@ void JS8Cuda::stop()
 
 void JS8Cuda::scanLoop()
 {
-    const int RING_BLOCKS    = ft8_->getRingBlocks();
-    const int num_bins       = ft8_->getRingNumBins();
-    constexpr int STRIDE     = 6;
-    constexpr int CAP_BLOCKS = FT8_CAPTURE_BLOCKS;
+    constexpr int RING_BLOCKS = 200;
+    constexpr int STRIDE      = 6;
+    constexpr int CAP_BLOCKS  = FT8_CAPTURE_BLOCKS;
 
     uint64_t last_triggered = 0;
 
     while (running_.load(std::memory_order_acquire)) {
-        uint64_t wi = ft8_->getRingWriteIdx();
+        uint64_t wi = ring_.write_idx.load(std::memory_order_acquire);
 
         if (wi < (uint64_t)CAP_BLOCKS || wi <= last_triggered ||
             wi % STRIDE != 0) {
@@ -131,25 +131,24 @@ void JS8Cuda::scanLoop()
 
         last_triggered = wi;
 
-        ContScanResult& slot  = cont_slots_[cw % CONTINUOUS_SLOTS];
-        int snap_start        = (int)((wi - CAP_BLOCKS) % RING_BLOCKS);
-        const uint8_t* ring   = ft8_->getRingPtr();
+        ContScanResult& slot = cont_slots_[cw % CONTINUOUS_SLOTS];
+        int snap_start       = (int)((wi - CAP_BLOCKS) % RING_BLOCKS);
 
-        cudaStreamWaitEvent(js8_scan_stream_, ft8_->getRingReadyEvent(), 0);
+        cudaStreamWaitEvent(js8_scan_stream_, ring_.ready, 0);
 
         js8_gpu_scan(
-            ring, snap_start, RING_BLOCKS,
+            ring_.base_d, snap_start, RING_BLOCKS,
             slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
             slot.score_d, slot.count_d, CAND_MAX,
-            num_bins, CAP_BLOCKS,
+            (int)ring_.num_bins, CAP_BLOCKS,
             FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
             js8_scan_stream_);
 
         js8_soft_symbols(
-            ring, snap_start, RING_BLOCKS,
+            ring_.base_d, snap_start, RING_BLOCKS,
             slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
             slot.count_d, slot.log174_d,
-            num_bins, CAP_BLOCKS,
+            (int)ring_.num_bins, CAP_BLOCKS,
             FT8_TIME_OSR, FT8_FREQ_OSR, (int)CAND_MAX,
             js8_scan_stream_);
 

@@ -1,248 +1,111 @@
 #include <unistd.h>
-#include <iostream>
-#include <thread>
+#include <cmath>
 #include <cstring>
-#include <cuda.h>
-#include <complex>
+#include <cstdio>
 #include <chrono>
 #include <algorithm>
-#include <cmath>
-#include <ctime>
-#include <sys/stat.h>
+#include <thread>
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
 #include "gm/cuda/FT8LdpcCuda.h"
-#include "gm/cuda/WaterfallKernel.h"
 #include "gm/cuda/HostCuda.h"
-#include "ft8_lib/ft8/constants.h"
-#include "gm/buffer/BufferPosition.h"
-#include "gm/rx888/rx888.h"
 #include "gm/hf/ft8_capture.h"
-#include "gm/hf/hf_bands.h"
-
-#include "ft8_lib/common/monitor.h"
-#include "ft8_lib/common/wave.h"
-#include "ft8_lib/fft/kiss_fft.h"
+#include "ft8_lib/ft8/constants.h"
 
 namespace gm {
 namespace cuda {
 
-FT8Cuda::FT8Cuda(gm::buffer::BufferPosition<std::complex<float>>* inP, bool corpus, float min_score, const std::string& tag, int zmq_port) :
-tag_(tag),
-inPos(inP),
-buff_pos{0},
-ring_write_idx(0),
-last_trigger_second(0),
-demodData_d(NULL),
-demodFT8_d(NULL),
-demodShift_d(NULL),
-magFT8_d(NULL),
-magFT8(NULL),
-magFT8_ring_d(NULL),
-log174_d(NULL),
-log174(NULL),
-x_hat_d(NULL),
-parity_d(NULL),
-gpu_cand_fo_d(NULL),
-gpu_cand_to_d(NULL),
-gpu_cand_ts_d(NULL),
-gpu_cand_fs_d(NULL),
-gpu_cand_score_d(NULL),
-gpu_cand_count_d(NULL),
-buffer_number(0),
-enable_corpus(corpus),
-min_score(min_score),
-audio_ft8_bin(0),
-audio_ft8_bin_10m(0),
-audio_sample_rate(0),
-audioBins_host(NULL),
-audioBins_host_10m(NULL),
-zmq_ctx_(1),
-zmq_pub_(zmq_ctx_, ZMQ_PUB) {
+FT8Cuda::FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
+                 float min_score, const std::string& tag, int zmq_port)
+    : ring_(ring)
+    , tag_(tag)
+    , min_score_(min_score)
+    , zmq_ctx_(1)
+    , zmq_pub_(zmq_ctx_, ZMQ_PUB)
+{
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
-    inShape = inPos->getShape();
-    inData_d = (std::complex<float>*)inPos->getBuffer();
 
-    try {
-        cuda_check_error(cudaSetDevice(0));
-        cuda_check_error(cudaStreamCreate(&stream));
-        cuda_check_error(cudaStreamCreate(&scan_stream));
-        cuda_check_error(cudaStreamCreate(&transfer_stream));
-        cuda_check_error(cudaStreamCreate(&cont_scan_stream));
-        {
-            // LDPC stream: low priority, non-blocking so it doesn't inherit
-            // the default stream's implicit sync with other streams.
-            int lo_pri, hi_pri;
-            cudaDeviceGetStreamPriorityRange(&lo_pri, &hi_pri);
-            cuda_check_error(cudaStreamCreateWithPriority(
-                &ldpc_stream, cudaStreamNonBlocking, lo_pri));
-        }
-        cuda_check_error(cudaEventCreateWithFlags(&scan_done,      cudaEventDisableTiming));
-        cuda_check_error(cudaEventCreateWithFlags(&ring_ready,     cudaEventDisableTiming));
-        cuda_check_error(cudaEventCreateWithFlags(&ldpc_done,      cudaEventDisableTiming));
-        cuda_check_error(cudaEventCreateWithFlags(&cont_ring_ready, cudaEventDisableTiming));
-        cuda_check_error(cudaStreamCreate(&waterfall_stream));
-        cuda_check_error(cudaEventCreateWithFlags(&waterfall_ready, cudaEventDisableTiming));
+    cuda_check_error(cudaSetDevice(0));
 
-        cuda_h = gm::cuda::device::HostCuda(stream);
-        rfft_length = 1048576; // 2^20; 6553600 Hz composite / 6.25 Hz/bin
-
-        // Compute FT8 FFT bins for 20m (14.074 MHz) and 10m (28.074 MHz) dials.
-        // Chain: wb_bin = round(freq * 1400000 / 140e6) = round(freq / 100)
-        //        ifft_bin = (sum of bw[0..band-1]) + (wb_bin - wb_start_band)
-        //        ft8_bin  = round(ifft_bin * rfft_length / 65536)
-        {
-            const int kWbFftSize = 1400000;
-            const int kIfftSize  = 65536;
-
-            // 20m: kHFBands index 5
-            {
-                int wb_bin = (int)roundf(14074000.0f * kWbFftSize / 140000000.0f);
-                int ifft_start = 0;
-                for (int i = 0; i < 5; ++i) ifft_start += (int)kHFBands[i].bw;
-                int ifft_bin  = ifft_start + (wb_bin - (int)kHFBands[5].wb_start);
-                audio_ft8_bin = (int)roundf((float)ifft_bin * rfft_length / kIfftSize);
-                audio_sample_rate = (int)roundf(6553600.0f * FT8_AUDIO_BINS / rfft_length);
-                printf("20m audio: wb_bin=%d ifft_bin=%d ft8_bin=%d audio_rate=%d Hz\n",
-                       wb_bin, ifft_bin, audio_ft8_bin, audio_sample_rate);
-            }
-
-            // 10m: kHFBands index 9
-            {
-                int wb_bin = (int)roundf(28074000.0f * kWbFftSize / 140000000.0f);
-                int ifft_start = 0;
-                for (int i = 0; i < 9; ++i) ifft_start += (int)kHFBands[i].bw;
-                int ifft_bin  = ifft_start + (wb_bin - (int)kHFBands[9].wb_start);
-                audio_ft8_bin_10m = (int)roundf((float)ifft_bin * rfft_length / kIfftSize);
-                printf("10m audio: wb_bin=%d ifft_bin=%d ft8_bin=%d\n",
-                       wb_bin, ifft_bin, audio_ft8_bin_10m);
-            }
-        }
-
-        // Pinned audio rings for corpus capture (enabled with --jtdx): one each for 20m and 10m.
-        if (enable_corpus) {
-            const size_t audio_ring_bytes =
-                (size_t)AUDIO_RING_SLOTS * FT8_AUDIO_BINS * sizeof(std::complex<float>);
-            cuda_check_error(cudaHostAlloc((void**)&audioBins_host,
-                                           audio_ring_bytes, cudaHostAllocDefault));
-            cuda_check_error(cudaHostAlloc((void**)&audioBins_host_10m,
-                                           audio_ring_bytes, cudaHostAllocDefault));
-            printf("Corpus audio rings: %.1f MB pinned (20m + 10m)\n",
-                   (double)audio_ring_bytes * 2 / 1e6);
-        }
-
-        // 1-byte dummy keeps magFT8 non-null so rt8BufferPosition pointer stays valid.
-        // The waterfall D2H is gone (Phase 4); this pointer is never written after init.
-        cuda_check_error(cudaHostAlloc((void**)&magFT8, 1, cudaHostAllocDefault));
-        memset(magFT8, 0, 1);
-        rt8BufferPosition.setBuffer(magFT8, {BUFFERS, 1});
-
-        // Two so we can use it as a buffer also
-        cuda_check_error(cudaMalloc((void**)&demodData_d, 4*rfft_length*sizeof(std::complex<float>) + 1024));
-        printf("Total rfft length is %u\n", rfft_length);
-
-        cuda_check_error(cudaMalloc((void**)&demodFT8_d, FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length*sizeof(std::complex<float>) + 1024));
-        cuda_check_error(cudaMalloc((void**)&magFT8_d, FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length*sizeof(uint8_t) + 1024));
-        cuda_check_error(cudaMalloc((void**)&demodShift_d, rfft_length*sizeof(std::complex<float>) + 1024));
-        if (!demodShift_d) {
-            fprintf(stderr, "FT8Cuda: cudaMalloc failed for demodShift_d — out of GPU memory\n");
-            exit(1);
-        }
-
-        // Device-side mag ring: RING_BLOCKS slots, wraps independently of FT8_CAPTURE_BLOCKS.
-        const size_t dev_ring_bytes =
-            (size_t)RING_BLOCKS * FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
-        cuda_check_error(cudaMalloc((void**)&magFT8_ring_d, dev_ring_bytes));
-        cuda_check_error(cudaMemset(magFT8_ring_d, 0, dev_ring_bytes));
-        printf("GPU mag ring: %.1f MB\n", (double)dev_ring_bytes / 1e6);
-
-        // Soft symbol LLR output: FT8_GPU_CAND_MAX × 174 floats each on device and pinned host.
-        const size_t log174_bytes = (size_t)FT8_GPU_CAND_MAX * FTX_LDPC_N * sizeof(float);
-        cuda_check_error(cudaMalloc((void**)&log174_d, log174_bytes));
-        cuda_check_error(cudaHostAlloc((void**)&log174, log174_bytes, cudaHostAllocDefault));
-        printf("log174 alloc: %.0f MB device + %.0f MB pinned\n",
-               (double)log174_bytes / 1.0e6, (double)log174_bytes / 1.0e6);
-
-        // Candidate output buffers for GPU scan.
-        cuda_check_error(cudaMalloc((void**)&gpu_cand_fo_d,    FT8_GPU_CAND_MAX * sizeof(int32_t)));
-        cuda_check_error(cudaMalloc((void**)&gpu_cand_to_d,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&gpu_cand_ts_d,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&gpu_cand_fs_d,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&gpu_cand_score_d, FT8_GPU_CAND_MAX * sizeof(int16_t)));
-        cuda_check_error(cudaMalloc((void**)&gpu_cand_count_d, sizeof(uint32_t)));
-
-        // GPU LDPC output buffers: FT8_LDPC_BATCH candidates × 174 bits each.
-        cuda_check_error(cudaMalloc((void**)&x_hat_d,
-            (size_t)FT8_LDPC_BATCH * FTX_LDPC_N * sizeof(uint8_t)));
-        cuda_check_error(cudaMalloc((void**)&parity_d,
-            (size_t)FT8_LDPC_BATCH * sizeof(bool)));
-
-        // Waterfall decimation buffers: WATERFALL_BINS bytes each.
-        cuda_check_error(cudaMalloc((void**)&waterfall_d, WATERFALL_BINS));
-        cuda_check_error(cudaHostAlloc((void**)&waterfall_host, WATERFALL_BINS, cudaHostAllocDefault));
-
-        allocContSlots();
-
-        // Copy FT8 H-matrix into __constant__ memory.
-        ft8_ldpc_init_constants();
-
-        // Now for the sub channels
-        cufftResult fftRes = cufftPlan1d(&rplan, rfft_length, CUFFT_C2C, 1);
-        if (fftRes) {
-            printf("Error: exit for now\n");
-        }
-        fftRes = cufftSetStream(rplan, stream);
-        if (fftRes) {
-            printf("Error: exit for now\n");
-        }
-
-    } catch (thrust::system_error &e) {
-        std::cerr << "CUDA error after cudaSetDevice: " << e.what() << std::endl;
+    // Scan streams
+    cuda_check_error(cudaStreamCreate(&scan_stream_));
+    cuda_check_error(cudaStreamCreate(&transfer_stream_));
+    cuda_check_error(cudaStreamCreate(&cont_scan_stream_));
+    {
+        int lo_pri, hi_pri;
+        cudaDeviceGetStreamPriorityRange(&lo_pri, &hi_pri);
+        cuda_check_error(cudaStreamCreateWithPriority(
+            &ldpc_stream_, cudaStreamNonBlocking, lo_pri));
     }
+
+    cuda_check_error(cudaEventCreateWithFlags(&scan_done_, cudaEventDisableTiming));
+    cuda_check_error(cudaEventCreateWithFlags(&ldpc_done_, cudaEventDisableTiming));
+
+    // Soft LLR buffers (epoch path)
+    const size_t log174_bytes = (size_t)FT8_GPU_CAND_MAX * FTX_LDPC_N * sizeof(float);
+    cuda_check_error(cudaMalloc((void**)&log174_d_, log174_bytes));
+    cuda_check_error(cudaHostAlloc((void**)&log174_, log174_bytes, cudaHostAllocDefault));
+    printf("log174 alloc: %.0f MB device + %.0f MB pinned\n",
+           (double)log174_bytes / 1.0e6, (double)log174_bytes / 1.0e6);
+
+    // GPU candidate buffers (epoch path)
+    cuda_check_error(cudaMalloc((void**)&gpu_cand_fo_d_,    FT8_GPU_CAND_MAX * sizeof(int32_t)));
+    cuda_check_error(cudaMalloc((void**)&gpu_cand_to_d_,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
+    cuda_check_error(cudaMalloc((void**)&gpu_cand_ts_d_,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
+    cuda_check_error(cudaMalloc((void**)&gpu_cand_fs_d_,    FT8_GPU_CAND_MAX * sizeof(uint8_t)));
+    cuda_check_error(cudaMalloc((void**)&gpu_cand_score_d_, FT8_GPU_CAND_MAX * sizeof(int16_t)));
+    cuda_check_error(cudaMalloc((void**)&gpu_cand_count_d_, sizeof(uint32_t)));
+
+    // GPU LDPC output buffers
+    cuda_check_error(cudaMalloc((void**)&x_hat_d_,
+        (size_t)FT8_LDPC_BATCH * FTX_LDPC_N * sizeof(uint8_t)));
+    cuda_check_error(cudaMalloc((void**)&parity_d_,
+        (size_t)FT8_LDPC_BATCH * sizeof(bool)));
+
+    // 1-byte dummy keeps rt8BufferPosition_ pointer non-null
+    cuda_check_error(cudaHostAlloc((void**)&magFT8_dummy_, 1, cudaHostAllocDefault));
+    memset(magFT8_dummy_, 0, 1);
+    rt8BufferPosition_.setBuffer(magFT8_dummy_, {BUFFERS, 1});
+
+    ft8_ldpc_init_constants();
+    allocContSlots();
+
+    printf("FT8: time_osr=%d freq_osr=%d num_bins=%zu (GPU LLR mode)\n",
+           FT8_TIME_OSR, FT8_FREQ_OSR, ring_.num_bins);
+    printf("FT8 ZMQ publisher -> tcp://localhost:%d  topic=ft8/decode\n", zmq_port);
 }
 
-FT8Cuda::~FT8Cuda() {
-    cont_scan_active.store(false, std::memory_order_release);
-    if (cont_worker_thread.joinable()) cont_worker_thread.join();
-    if (last_snapshot_thread.joinable()) last_snapshot_thread.join();
-    if (demodData_d) cudaFree(demodData_d);
-    if (demodFT8_d) cudaFree(demodFT8_d);
-    if (demodShift_d) cudaFree(demodShift_d);
-    if (magFT8_d) cudaFree(magFT8_d);
-    if (magFT8_ring_d) cudaFree(magFT8_ring_d);
-    if (log174_d) cudaFree(log174_d);
-    if (log174) cudaFreeHost(log174);
-    if (gpu_cand_fo_d) cudaFree(gpu_cand_fo_d);
-    if (gpu_cand_to_d) cudaFree(gpu_cand_to_d);
-    if (gpu_cand_ts_d) cudaFree(gpu_cand_ts_d);
-    if (gpu_cand_fs_d) cudaFree(gpu_cand_fs_d);
-    if (gpu_cand_score_d) cudaFree(gpu_cand_score_d);
-    if (gpu_cand_count_d) cudaFree(gpu_cand_count_d);
-    if (x_hat_d) cudaFree(x_hat_d);
-    if (parity_d) cudaFree(parity_d);
-    if (magFT8) cudaFreeHost(magFT8);
-    if (audioBins_host) cudaFreeHost(audioBins_host);
-    if (audioBins_host_10m) cudaFreeHost(audioBins_host_10m);
-    if (waterfall_d) cudaFree(waterfall_d);
-    if (waterfall_host) cudaFreeHost(waterfall_host);
+FT8Cuda::~FT8Cuda()
+{
+    cont_scan_active_.store(false, std::memory_order_release);
+    if (cont_worker_thread_.joinable()) cont_worker_thread_.join();
+    if (last_snapshot_thread_.joinable()) last_snapshot_thread_.join();
+
+    if (log174_d_)          cudaFree(log174_d_);
+    if (log174_)            cudaFreeHost(log174_);
+    if (gpu_cand_fo_d_)     cudaFree(gpu_cand_fo_d_);
+    if (gpu_cand_to_d_)     cudaFree(gpu_cand_to_d_);
+    if (gpu_cand_ts_d_)     cudaFree(gpu_cand_ts_d_);
+    if (gpu_cand_fs_d_)     cudaFree(gpu_cand_fs_d_);
+    if (gpu_cand_score_d_)  cudaFree(gpu_cand_score_d_);
+    if (gpu_cand_count_d_)  cudaFree(gpu_cand_count_d_);
+    if (x_hat_d_)           cudaFree(x_hat_d_);
+    if (parity_d_)          cudaFree(parity_d_);
+    if (magFT8_dummy_)      cudaFreeHost(magFT8_dummy_);
     freeContSlots();
-    cufftDestroy(rplan);
-    cudaEventDestroy(scan_done);
-    cudaEventDestroy(ring_ready);
-    cudaEventDestroy(ldpc_done);
-    cudaEventDestroy(cont_ring_ready);
-    cudaEventDestroy(waterfall_ready);
-    cudaStreamDestroy(stream);
-    cudaStreamDestroy(scan_stream);
-    cudaStreamDestroy(transfer_stream);
-    cudaStreamDestroy(ldpc_stream);
-    cudaStreamDestroy(cont_scan_stream);
-    cudaStreamDestroy(waterfall_stream);
+
+    cudaEventDestroy(scan_done_);
+    cudaEventDestroy(ldpc_done_);
+    cudaStreamDestroy(scan_stream_);
+    cudaStreamDestroy(transfer_stream_);
+    cudaStreamDestroy(ldpc_stream_);
+    cudaStreamDestroy(cont_scan_stream_);
 }
 
-void FT8Cuda::pubJson(const char* topic, const char* json) {
+void FT8Cuda::pubJson(const char* topic, const char* json)
+{
     std::lock_guard<std::mutex> lk(zmq_mu_);
     zmq::message_t t(topic, strlen(topic));
     zmq::message_t d(json,  strlen(json));
@@ -250,427 +113,270 @@ void FT8Cuda::pubJson(const char* topic, const char* json) {
     zmq_pub_.send(d, zmq::send_flags::none);
 }
 
-void FT8Cuda::pubBin(const char* topic, const void* data, size_t len) {
-    std::lock_guard<std::mutex> lk(zmq_mu_);
-    zmq::message_t t(topic, strlen(topic));
-    zmq::message_t d(data, len);
-    zmq_pub_.send(t, zmq::send_flags::sndmore);
-    zmq_pub_.send(d, zmq::send_flags::none);
+void FT8Cuda::setDecodeCallback(std::function<void(ContScanResult&)> cb)
+{
+    decode_callback_ = std::move(cb);
 }
 
-int FT8Cuda::doCopy(uint64_t now) {
-    try {
-        // Non-blocking poll: if the previous waterfall frame is ready, deliver it.
-        if (waterfall_ready && cudaEventQuery(waterfall_ready) == cudaSuccess) {
-            pubBin("waterfall", waterfall_host, WATERFALL_BINS);
-        }
+void FT8Cuda::startContinuousScan()
+{
+    cont_scan_active_.store(true, std::memory_order_release);
+    cont_worker_thread_ = std::thread([this]() { contWorker(); });
+}
 
-        size_t length = inShape[1];
-
-        cudaMemcpyAsync(&demodData_d[buff_pos], &inData_d[length * (now % inShape[0])],
-                        length * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream);
-        buff_pos += length;
-
-        if (buff_pos > 2*rfft_length) {
-            auto nowsec = std::chrono::system_clock::now();
-            auto duration = nowsec.time_since_epoch();
-            double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(duration).count();
-            uint64_t trigger = (uint64_t)(seconds) % 15;
-            lastsecond = seconds;
-
-            for (int t = 0; t < FT8_TIME_OSR; t++) {
-                for (int f = 0; f < FT8_FREQ_OSR; f++) {
-                    std::complex<float>* input = &demodData_d[t * rfft_length / FT8_TIME_OSR];
-                    if (f > 0) {
-                        cuda_h.freqShift(input, demodShift_d, rfft_length,
-                                         f * 6.25f / FT8_FREQ_OSR);
-                        input = demodShift_d;
-                    }
-                    cufftResult rval = cufftExecC2C(rplan,
-                        (cufftComplex *)input,
-                        (cufftComplex *)&demodFT8_d[(t * FT8_FREQ_OSR + f) * rfft_length],
-                        CUFFT_FORWARD);
-                    if (rval) {
-                        printf("Error in fft (t=%d f=%d)\n", t, f);
-                        return 0;
-                    }
-                }
-            }
-            buff_pos -= rfft_length;
-            cuda_check_error(cudaMemcpyAsync(&demodData_d[0],
-                &demodData_d[rfft_length],
-                buff_pos * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
-
-            // Compute magnitude and append to device ring.
-            const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
-            cuda_h.magKernel(&demodFT8_d[0], &magFT8_d[0], FT8_TIME_OSR*FT8_FREQ_OSR*rfft_length);
-            cuda_check_error(cudaMemcpyAsync(
-                &magFT8_ring_d[(ring_write_idx % RING_BLOCKS) * block_bytes],
-                &magFT8_d[0],
-                block_bytes * sizeof(uint8_t), cudaMemcpyDeviceToDevice, stream));
-
-            // Corpus: async D2H of 1920 complex bins at 20m and 10m dial frequencies (sub=0 FFT).
-            if (enable_corpus) {
-                uint64_t audio_slot = ring_write_idx % (uint64_t)AUDIO_RING_SLOTS;
-                cuda_check_error(cudaMemcpyAsync(
-                    &audioBins_host[audio_slot * FT8_AUDIO_BINS],
-                    &demodFT8_d[audio_ft8_bin],
-                    FT8_AUDIO_BINS * sizeof(std::complex<float>),
-                    cudaMemcpyDeviceToHost, stream));
-                cuda_check_error(cudaMemcpyAsync(
-                    &audioBins_host_10m[audio_slot * FT8_AUDIO_BINS],
-                    &demodFT8_d[audio_ft8_bin_10m],
-                    FT8_AUDIO_BINS * sizeof(std::complex<float>),
-                    cudaMemcpyDeviceToHost, stream));
-            }
-
-            ring_write_idx++;
-
-            // Commit all device ring writes; both epoch and continuous paths wait on this.
-            cudaEventRecord(ring_ready, stream);
-
-            // Waterfall decimation: wait for ring_ready then decimate the just-written slot.
-            if (waterfall_d) {
-                cudaStreamWaitEvent(waterfall_stream, ring_ready, 0);
-                const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length;
-                const uint8_t* slot_base = &magFT8_ring_d[
-                    ((ring_write_idx - 1) % RING_BLOCKS) * block_bytes];
-                ft8_waterfall_decimate(slot_base, waterfall_d,
-                                       (int)rfft_length, WATERFALL_BINS, waterfall_stream);
-                cudaMemcpyAsync(waterfall_host, waterfall_d, WATERFALL_BINS,
-                                cudaMemcpyDeviceToHost, waterfall_stream);
-                cudaEventRecord(waterfall_ready, waterfall_stream);
-            }
-
-            // Continuous Costas scan: run every cont_stride blocks (~1/sec at stride=6).
-            if (cont_scan_active.load(std::memory_order_acquire) &&
-                ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS &&
-                ring_write_idx % cont_stride == 0) {
-                uint64_t wi = cont_write_idx.load(std::memory_order_relaxed);
-                uint64_t ri = cont_read_idx.load(std::memory_order_acquire);
-                if (wi - ri >= (uint64_t)CONTINUOUS_SLOTS) {
-                    fprintf(stderr, "[CONT] slots full, dropping block %lu\n",
-                            (unsigned long)ring_write_idx);
-                } else {
-                    ContScanResult& slot = cont_slots[wi % CONTINUOUS_SLOTS];
-                    uint64_t cont_snap   = ring_write_idx - FT8_CAPTURE_BLOCKS;
-                    int dev_cont_snap    = (int)(cont_snap % RING_BLOCKS);
-
-                    cudaStreamWaitEvent(cont_scan_stream, ring_ready, 0);
-
-                    ft8_gpu_scan(
-                        magFT8_ring_d,
-                        dev_cont_snap, RING_BLOCKS,
-                        slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
-                        slot.score_d, slot.count_d, CONT_CAND_MAX,
-                        (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                        FT8_TIME_OSR, FT8_FREQ_OSR, min_score,
-                        cont_scan_stream);
-
-                    ft8_soft_symbols(
-                        magFT8_ring_d,
-                        dev_cont_snap, RING_BLOCKS,
-                        slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
-                        slot.count_d, slot.log174_d,
-                        (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                        FT8_TIME_OSR, FT8_FREQ_OSR, CONT_CAND_MAX,
-                        cont_scan_stream);
-
-                    cudaMemcpyAsync(slot.count,  slot.count_d,  sizeof(uint32_t),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.fo,     slot.fo_d,     CONT_CAND_MAX * sizeof(int32_t),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.to,     slot.to_d,     CONT_CAND_MAX * sizeof(uint8_t),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.ts,     slot.ts_d,     CONT_CAND_MAX * sizeof(uint8_t),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.fs,     slot.fs_d,     CONT_CAND_MAX * sizeof(uint8_t),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.score,  slot.score_d,  CONT_CAND_MAX * sizeof(int16_t),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-                    cudaMemcpyAsync(slot.log174, slot.log174_d,
-                                   (size_t)CONT_CAND_MAX * FTX_LDPC_N * sizeof(float),
-                                   cudaMemcpyDeviceToHost, cont_scan_stream);
-
-                    cudaEventRecord(slot.event, cont_scan_stream);
-                    slot.timestamp = lastsecond;
-                    slot.dispatched.store(true, std::memory_order_release);
-                    cont_write_idx.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-
-            // On trigger: snapshot the last FT8_CAPTURE_BLOCKS blocks into a decode slot.
-            // Background thread does the ring→slot copy so doCopy never blocks.
-            uint64_t trigger_second = (uint64_t)(seconds);
-            bool gotime = (trigger == 14 &&
-                           (seconds - trunc(seconds)) > 0.7 &&
-                           trigger_second != last_trigger_second &&
-                           ring_write_idx >= (uint64_t)FT8_CAPTURE_BLOCKS);
-            if (gotime) {
-                last_trigger_second = trigger_second;
-                {
-                    static uint64_t s_prev_ring = 0;
-                    static double   s_prev_sec  = 0.0;
-                    if (s_prev_sec > 0.0) {
-                        double dt = seconds - s_prev_sec;
-                        double rate = (double)(ring_write_idx - s_prev_ring) / dt;
-                        printf("TIMING: epoch=%.3f mod15=%.3f ring=%llu blocks/s=%.2f (nominal 6.25)\n",
-                               seconds, fmod(seconds, 15.0), (unsigned long long)ring_write_idx, rate);
-                    }
-                    s_prev_ring = ring_write_idx;
-                    s_prev_sec  = seconds;
-                }
-                printf("Processing buffer %u\n", buffer_number);
-
-                int decode_slot = buffer_number % BUFFERS;
-                uint64_t snap_start = ring_write_idx - FT8_CAPTURE_BLOCKS;
-                int next_buf = buffer_number + 1;
-                int dev_snap_start = (int)(snap_start % RING_BLOCKS);
-
-                cudaStreamWaitEvent(scan_stream,    ring_ready, 0);
-                cudaStreamWaitEvent(transfer_stream, ring_ready, 0);
-
-                // Launch epoch Costas scan on scan_stream.
-                ft8_gpu_scan(
-                    magFT8_ring_d,
-                    dev_snap_start, RING_BLOCKS,
-                    gpu_cand_fo_d, gpu_cand_to_d, gpu_cand_ts_d, gpu_cand_fs_d,
-                    gpu_cand_score_d, gpu_cand_count_d, FT8_GPU_CAND_MAX,
-                    (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                    FT8_TIME_OSR, FT8_FREQ_OSR, min_score,
-                    scan_stream);
-
-                // Soft symbols kernel runs after Costas scan on the same stream.
-                // scan_done fires after both kernels complete.
-                ft8_soft_symbols(
-                    magFT8_ring_d,
-                    dev_snap_start, RING_BLOCKS,
-                    gpu_cand_fo_d, gpu_cand_to_d, gpu_cand_ts_d, gpu_cand_fs_d,
-                    gpu_cand_count_d, log174_d,
-                    (int)rfft_length, FT8_CAPTURE_BLOCKS,
-                    FT8_TIME_OSR, FT8_FREQ_OSR,
-                    FT8_GPU_CAND_MAX,
-                    scan_stream);
-                cudaEventRecord(scan_done, scan_stream);
-                // LDPC dispatch is handled inside the snapshot thread so the
-                // main audio loop never blocks on a GPU event.
-
-                if (last_snapshot_thread.joinable())
-                    last_snapshot_thread.join();
-
-                double snap_seconds = seconds;
-                last_snapshot_thread = std::thread([this, decode_slot, next_buf, snap_start, snap_seconds]() {
-                    // Wait for the scan to finish on this thread (not the main loop thread).
-                    // Then dispatch LDPC with the actual candidate count so we don't flood
-                    // the GPU scheduler with hundreds of thousands of empty blocks.
-                    auto t_thread_start = std::chrono::steady_clock::now();
-                    cudaEventSynchronize(scan_done);
-                    auto t_scan_done = std::chrono::steady_clock::now();
-                    double scan_ms = std::chrono::duration<double, std::milli>(t_scan_done - t_thread_start).count();
-
-                    uint32_t n = 0;
-                    cudaMemcpy(&n, gpu_cand_count_d, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-                    uint32_t n_raw = n;
-                    n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
-                    if (n_raw > FT8_GPU_CAND_MAX)
-                        fprintf(stderr, "[EPOCH] WARNING: candidate count %u clamped to %u\n",
-                                n_raw, (uint32_t)FT8_GPU_CAND_MAX);
-
-                    bool ldpc_launched = (n > 0);
-                    if (ldpc_launched) {
-                        ft8_bp_decode_batch(n, log174_d, x_hat_d, parity_d, ldpc_stream);
-                        cudaEventRecord(ldpc_done, ldpc_stream);
-                    }
-
-                    bool ldpc_ok = false;
-                    double ldpc_ms = 0.0;
-                    if (ldpc_launched) {
-                        auto t_ldpc_start = std::chrono::steady_clock::now();
-                        auto deadline = t_ldpc_start + std::chrono::milliseconds(500);
-                        cudaError_t ev;
-                        while ((ev = cudaEventQuery(ldpc_done)) == cudaErrorNotReady) {
-                            if (std::chrono::steady_clock::now() >= deadline) {
-                                ldpc_ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - t_ldpc_start).count();
-                                fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=TIMEOUT(%.1fms) n=%u\n",
-                                        tag_.c_str(), scan_ms, ldpc_ms, n);
-                                fprintf(stderr, "[EPOCH] ldpc_done timeout — skipping LDPC results\n");
-                                goto ldpc_timeout;
-                            }
-                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        }
-                        ldpc_ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - t_ldpc_start).count();
-                        if (ev != cudaSuccess)
-                            fprintf(stderr, "[EPOCH] CUDA ldpc_done error: %s\n", cudaGetErrorString(ev));
-                        else
-                            ldpc_ok = true;
-                        ldpc_timeout:;
-                    }
-
-                    // Cascade timeout detection.
-                    bool timed_out = ldpc_launched && !ldpc_ok;
-                    if (timed_out) {
-                        if (++consecutive_timeouts_ > 2)
-                            fprintf(stderr, "[EPOCH] WARNING: %d consecutive LDPC timeouts\n",
-                                    consecutive_timeouts_);
-                    } else if (ldpc_ok || !ldpc_launched) {
-                        consecutive_timeouts_ = 0;
-                    }
-
-                    fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=%.1fms n=%u ldpc_ok=%d\n",
-                            tag_.c_str(), scan_ms, ldpc_ms, n, (int)ldpc_ok);
-                    {
-                        char buf[128];
-                        snprintf(buf, sizeof(buf),
-                            "{\"scan_ms\":%.1f,\"ldpc_ms\":%.1f,\"n\":%u}",
-                            (float)scan_ms, (float)ldpc_ms, n);
-                        pubJson("ft8/timing", buf);
-                    }
-
-                    // Snapshot audio rings immediately after GPU work (before doCopy can overwrite).
-                    std::vector<std::complex<float>> audio_snap, audio_snap_10m;
-                    if (enable_corpus) {
-                        const size_t snap_bins = (size_t)FT8_CAPTURE_BLOCKS * FT8_AUDIO_BINS;
-                        audio_snap.resize(snap_bins);
-                        audio_snap_10m.resize(snap_bins);
-                        for (int b = 0; b < FT8_CAPTURE_BLOCKS; ++b) {
-                            uint64_t slot = (snap_start + b) % (uint64_t)AUDIO_RING_SLOTS;
-                            memcpy(&audio_snap[(size_t)b * FT8_AUDIO_BINS],
-                                   &audioBins_host[slot * FT8_AUDIO_BINS],
-                                   FT8_AUDIO_BINS * sizeof(std::complex<float>));
-                            memcpy(&audio_snap_10m[(size_t)b * FT8_AUDIO_BINS],
-                                   &audioBins_host_10m[slot * FT8_AUDIO_BINS],
-                                   FT8_AUDIO_BINS * sizeof(std::complex<float>));
-                        }
-                    }
-
-                    // n is already set from the D2H above
-
-                    GpuScanResult& res = gpu_results[decode_slot];
-                    res.count = n;
-                    if (n > 0) {
-                        res.fo.resize(n);
-                        res.to.resize(n);
-                        res.ts.resize(n);
-                        res.fs.resize(n);
-                        res.score.resize(n);
-                        res.log174.resize((size_t)n * FTX_LDPC_N);
-                        cudaMemcpy(res.fo.data(),    gpu_cand_fo_d,    n * sizeof(int32_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(res.to.data(),    gpu_cand_to_d,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(res.ts.data(),    gpu_cand_ts_d,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(res.fs.data(),    gpu_cand_fs_d,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(res.score.data(), gpu_cand_score_d, n * sizeof(int16_t), cudaMemcpyDeviceToHost);
-                        cudaMemcpy(log174, log174_d, (size_t)n * FTX_LDPC_N * sizeof(float), cudaMemcpyDeviceToHost);
-                        memcpy(res.log174.data(), log174, (size_t)n * FTX_LDPC_N * sizeof(float));
-
-                        if (ldpc_ok) {
-                            res.x_hat.resize((size_t)n * FTX_LDPC_N);
-                            res.parity.resize(n);
-                            cudaMemcpy(res.x_hat.data(), x_hat_d,
-                                (size_t)n * FTX_LDPC_N * sizeof(uint8_t), cudaMemcpyDeviceToHost);
-                            // bool* device → std::vector<bool>: copy via staging array
-                            std::vector<bool> par_tmp(n);
-                            bool* par_stage = new bool[n];
-                            cudaMemcpy(par_stage, parity_d, n * sizeof(bool), cudaMemcpyDeviceToHost);
-                            for (uint32_t i = 0; i < n; ++i) par_tmp[i] = par_stage[i];
-                            delete[] par_stage;
-                            res.parity = std::move(par_tmp);
-                        } else {
-                            res.x_hat.clear();
-                            res.parity.clear();
-                        }
-                    } else {
-                        res.log174.clear();
-                        res.x_hat.clear();
-                        res.parity.clear();
-                    }
-
-                    // Signal ft8.cc: GPU scan + soft LLRs (and LDPC if ldpc_ok) are ready.
-                    rt8BufferPosition.setPosition(next_buf, 1);
-
-                    // Corpus WAV write: IFFT each block's 1920 bins → real PCM → save_wav.
-                    if (enable_corpus && !audio_snap.empty()) {
-                        mkdir("ft8_corpus", 0755);
-                        time_t t = (time_t)snap_seconds;
-                        struct tm* tm_info = gmtime(&t);
-                        int total_samples = FT8_CAPTURE_BLOCKS * FT8_AUDIO_BINS;
-
-                        kiss_fft_cfg cfg = kiss_fft_alloc(FT8_AUDIO_BINS, 1, NULL, NULL);
-                        kiss_fft_cpx in_buf[FT8_AUDIO_BINS], out_buf[FT8_AUDIO_BINS];
-
-                        auto write_band_wav = [&](const std::vector<std::complex<float>>& snap,
-                                                  const char* band_prefix) {
-                            std::vector<float> pcm(total_samples);
-                            for (int b = 0; b < FT8_CAPTURE_BLOCKS; ++b) {
-                                const std::complex<float>* src = &snap[(size_t)b * FT8_AUDIO_BINS];
-                                for (int k = 0; k < FT8_AUDIO_BINS; ++k) {
-                                    in_buf[k].r = src[k].real();
-                                    in_buf[k].i = src[k].imag();
-                                }
-                                kiss_fft(cfg, in_buf, out_buf);
-                                for (int k = 0; k < FT8_AUDIO_BINS; ++k)
-                                    pcm[(size_t)b * FT8_AUDIO_BINS + k] = out_buf[k].r / FT8_AUDIO_BINS;
-                            }
-                            float peak = 1e-10f;
-                            for (float v : pcm) if (fabsf(v) > peak) peak = fabsf(v);
-                            for (float& v : pcm) v /= peak;
-
-                            char path[256];
-                            snprintf(path, sizeof(path),
-                                     "ft8_corpus/%s_%04d%02d%02d_%02d%02d%02d.wav",
-                                     band_prefix,
-                                     tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
-                                     tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
-                            if (save_wav(pcm.data(), total_samples, audio_sample_rate, path) == 0)
-                                printf("Corpus: saved %s (%d samples @ %d Hz)\n",
-                                       path, total_samples, audio_sample_rate);
-                            else
-                                fprintf(stderr, "Corpus: save_wav failed for %s\n", path);
-                        };
-
-                        write_band_wav(audio_snap,     "20m");
-                        write_band_wav(audio_snap_10m, "10m");
-                        kiss_fft_free(cfg);
-                    }
-                });
-
-                buffer_number++;
-            }
-
-            lastepoch = seconds;
-        }
-
-        return 1;
-    } catch (thrust::system_error &e) {
-        std::cerr << "CUDA error after cudaCopy: " << e.what() << std::endl;
+void FT8Cuda::launchContScan(uint64_t wi)
+{
+    uint64_t cw = cont_write_idx_.load(std::memory_order_relaxed);
+    uint64_t ri = cont_read_idx_.load(std::memory_order_acquire);
+    if (cw - ri >= (uint64_t)CONTINUOUS_SLOTS) {
+        fprintf(stderr, "[CONT] slots full, dropping block %llu\n",
+                (unsigned long long)wi);
+        return;
     }
-    return 0;
+
+    ContScanResult& slot = cont_slots_[cw % CONTINUOUS_SLOTS];
+    uint64_t cont_snap   = wi - FT8_CAPTURE_BLOCKS;
+    int dev_cont_snap    = (int)(cont_snap % 200);
+
+    cudaStreamWaitEvent(cont_scan_stream_, ring_.ready, 0);
+
+    ft8_gpu_scan(
+        ring_.base_d,
+        dev_cont_snap, 200,
+        slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
+        slot.score_d, slot.count_d, CONT_CAND_MAX,
+        (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
+        FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
+        cont_scan_stream_);
+
+    ft8_soft_symbols(
+        ring_.base_d,
+        dev_cont_snap, 200,
+        slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
+        slot.count_d, slot.log174_d,
+        (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
+        FT8_TIME_OSR, FT8_FREQ_OSR, CONT_CAND_MAX,
+        cont_scan_stream_);
+
+    cudaMemcpyAsync(slot.count,  slot.count_d,  sizeof(uint32_t),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+    cudaMemcpyAsync(slot.fo,     slot.fo_d,     CONT_CAND_MAX * sizeof(int32_t),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+    cudaMemcpyAsync(slot.to,     slot.to_d,     CONT_CAND_MAX * sizeof(uint8_t),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+    cudaMemcpyAsync(slot.ts,     slot.ts_d,     CONT_CAND_MAX * sizeof(uint8_t),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+    cudaMemcpyAsync(slot.fs,     slot.fs_d,     CONT_CAND_MAX * sizeof(uint8_t),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+    cudaMemcpyAsync(slot.score,  slot.score_d,  CONT_CAND_MAX * sizeof(int16_t),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+    cudaMemcpyAsync(slot.log174, slot.log174_d,
+                   (size_t)CONT_CAND_MAX * FTX_LDPC_N * sizeof(float),
+                   cudaMemcpyDeviceToHost, cont_scan_stream_);
+
+    cudaEventRecord(slot.event, cont_scan_stream_);
+    slot.timestamp = std::chrono::duration_cast<std::chrono::duration<double>>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    slot.dispatched.store(true, std::memory_order_release);
+    cont_write_idx_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void FT8Cuda::run() {
-    uint64_t now = inPos->getNow(1) + 1;
+void FT8Cuda::launchEpochScan(uint64_t wi, double seconds)
+{
+    static uint64_t s_prev_ring = 0;
+    static double   s_prev_sec  = 0.0;
+    if (s_prev_sec > 0.0) {
+        double dt   = seconds - s_prev_sec;
+        double rate = (double)(wi - s_prev_ring) / dt;
+        printf("TIMING: epoch=%.3f mod15=%.3f ring=%llu blocks/s=%.2f (nominal 6.25)\n",
+               seconds, fmod(seconds, 15.0), (unsigned long long)wi, rate);
+    }
+    s_prev_ring = wi;
+    s_prev_sec  = seconds;
 
-    while(isRunning()) {
-        uint64_t next = inPos->getPosition(now+1, 1);
-        while(now < next) {
-            uint64_t length = next - now;
-            if (length > 4) {
-                std::cerr << "Error Falling Behind in FT8Cuda Copy, Dropping Data" << std::endl;
-                now = next;
-                break;
-            }
-            int numCopied = doCopy(now);
-            if (!numCopied) exit(-200);
-	        now += numCopied;
+    printf("Processing buffer %u\n", buffer_number_);
+
+    int      decode_slot    = buffer_number_ % BUFFERS;
+    uint64_t snap_start     = wi - FT8_CAPTURE_BLOCKS;
+    int      next_buf       = buffer_number_ + 1;
+    int      dev_snap_start = (int)(snap_start % 200);
+
+    cudaStreamWaitEvent(scan_stream_,     ring_.ready, 0);
+    cudaStreamWaitEvent(transfer_stream_, ring_.ready, 0);
+
+    ft8_gpu_scan(
+        ring_.base_d,
+        dev_snap_start, 200,
+        gpu_cand_fo_d_, gpu_cand_to_d_, gpu_cand_ts_d_, gpu_cand_fs_d_,
+        gpu_cand_score_d_, gpu_cand_count_d_, FT8_GPU_CAND_MAX,
+        (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
+        FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
+        scan_stream_);
+
+    ft8_soft_symbols(
+        ring_.base_d,
+        dev_snap_start, 200,
+        gpu_cand_fo_d_, gpu_cand_to_d_, gpu_cand_ts_d_, gpu_cand_fs_d_,
+        gpu_cand_count_d_, log174_d_,
+        (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
+        FT8_TIME_OSR, FT8_FREQ_OSR, FT8_GPU_CAND_MAX,
+        scan_stream_);
+
+    cudaEventRecord(scan_done_, scan_stream_);
+
+    if (last_snapshot_thread_.joinable())
+        last_snapshot_thread_.join();
+
+    double snap_seconds = seconds;
+    last_snapshot_thread_ = std::thread([this, decode_slot, next_buf, snap_seconds]() {
+        auto t_thread_start = std::chrono::steady_clock::now();
+        cudaEventSynchronize(scan_done_);
+        auto t_scan_done = std::chrono::steady_clock::now();
+        double scan_ms = std::chrono::duration<double, std::milli>(
+            t_scan_done - t_thread_start).count();
+
+        uint32_t n = 0;
+        cudaMemcpy(&n, gpu_cand_count_d_, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        uint32_t n_raw = n;
+        n = std::min(n, (uint32_t)FT8_GPU_CAND_MAX);
+        if (n_raw > FT8_GPU_CAND_MAX)
+            fprintf(stderr, "[EPOCH] WARNING: candidate count %u clamped to %u\n",
+                    n_raw, (uint32_t)FT8_GPU_CAND_MAX);
+
+        bool ldpc_launched = (n > 0);
+        if (ldpc_launched) {
+            ft8_bp_decode_batch(n, log174_d_, x_hat_d_, parity_d_, ldpc_stream_);
+            cudaEventRecord(ldpc_done_, ldpc_stream_);
         }
+
+        bool   ldpc_ok = false;
+        double ldpc_ms = 0.0;
+        if (ldpc_launched) {
+            auto t_ldpc_start = std::chrono::steady_clock::now();
+            auto deadline     = t_ldpc_start + std::chrono::milliseconds(500);
+            cudaError_t ev;
+            while ((ev = cudaEventQuery(ldpc_done_)) == cudaErrorNotReady) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    ldpc_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t_ldpc_start).count();
+                    fprintf(stderr,
+                            "[EPOCH TIMING][%s] scan=%.1fms ldpc=TIMEOUT(%.1fms) n=%u\n",
+                            tag_.c_str(), scan_ms, ldpc_ms, n);
+                    goto ldpc_timeout;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            ldpc_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_ldpc_start).count();
+            if (ev != cudaSuccess)
+                fprintf(stderr, "[EPOCH] CUDA ldpc_done error: %s\n",
+                        cudaGetErrorString(ev));
+            else
+                ldpc_ok = true;
+            ldpc_timeout:;
+        }
+
+        bool timed_out = ldpc_launched && !ldpc_ok;
+        if (timed_out) {
+            if (++consecutive_timeouts_ > 2)
+                fprintf(stderr, "[EPOCH] WARNING: %d consecutive LDPC timeouts\n",
+                        consecutive_timeouts_);
+        } else {
+            consecutive_timeouts_ = 0;
+        }
+
+        fprintf(stderr, "[EPOCH TIMING][%s] scan=%.1fms ldpc=%.1fms n=%u ldpc_ok=%d\n",
+                tag_.c_str(), scan_ms, ldpc_ms, n, (int)ldpc_ok);
+        {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "{\"scan_ms\":%.1f,\"ldpc_ms\":%.1f,\"n\":%u}",
+                     (float)scan_ms, (float)ldpc_ms, n);
+            pubJson("ft8/timing", buf);
+        }
+
+        GpuScanResult& res = gpu_results_[decode_slot];
+        res.count = n;
+        if (n > 0) {
+            res.fo.resize(n); res.to.resize(n);
+            res.ts.resize(n); res.fs.resize(n);
+            res.score.resize(n);
+            res.log174.resize((size_t)n * FTX_LDPC_N);
+            cudaMemcpy(res.fo.data(),    gpu_cand_fo_d_,    n * sizeof(int32_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(res.to.data(),    gpu_cand_to_d_,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(res.ts.data(),    gpu_cand_ts_d_,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(res.fs.data(),    gpu_cand_fs_d_,    n * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(res.score.data(), gpu_cand_score_d_, n * sizeof(int16_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(log174_, log174_d_,
+                       (size_t)n * FTX_LDPC_N * sizeof(float), cudaMemcpyDeviceToHost);
+            memcpy(res.log174.data(), log174_,
+                   (size_t)n * FTX_LDPC_N * sizeof(float));
+
+            if (ldpc_ok) {
+                res.x_hat.resize((size_t)n * FTX_LDPC_N);
+                res.parity.resize(n);
+                cudaMemcpy(res.x_hat.data(), x_hat_d_,
+                           (size_t)n * FTX_LDPC_N * sizeof(uint8_t),
+                           cudaMemcpyDeviceToHost);
+                bool* par_stage = new bool[n];
+                cudaMemcpy(par_stage, parity_d_, n * sizeof(bool),
+                           cudaMemcpyDeviceToHost);
+                for (uint32_t i = 0; i < n; ++i) res.parity[i] = par_stage[i];
+                delete[] par_stage;
+            } else {
+                res.x_hat.clear();
+                res.parity.clear();
+            }
+        } else {
+            res.log174.clear();
+            res.x_hat.clear();
+            res.parity.clear();
+        }
+
+        rt8BufferPosition_.setPosition(next_buf, 1);
+    });
+
+    buffer_number_++;
+}
+
+void FT8Cuda::run()
+{
+    uint64_t last_cont_scan     = 0;
+
+    while (isRunning()) {
+        uint64_t wi = ring_.write_idx.load(std::memory_order_acquire);
+
+        // Continuous Costas scan: fire every cont_stride_ ring blocks.
+        if (cont_scan_active_.load(std::memory_order_acquire) &&
+            wi >= (uint64_t)FT8_CAPTURE_BLOCKS &&
+            wi > last_cont_scan &&
+            wi % (uint64_t)cont_stride_ == 0) {
+            last_cont_scan = wi;
+            launchContScan(wi);
+        }
+
+        // Epoch trigger: wall-clock mod-15 == 14, fractional part > 0.7.
+        auto nowsec = std::chrono::system_clock::now();
+        double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(
+            nowsec.time_since_epoch()).count();
+        uint64_t trig_mod = (uint64_t)(seconds) % 15;
+        if (trig_mod == 14 &&
+            (seconds - std::trunc(seconds)) > 0.7 &&
+            (uint64_t)(seconds) != last_trigger_second_ &&
+            wi >= (uint64_t)FT8_CAPTURE_BLOCKS) {
+            last_trigger_second_ = (uint64_t)(seconds);
+            launchEpochScan(wi, seconds);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
-void FT8Cuda::allocContSlots() {
+void FT8Cuda::allocContSlots()
+{
     const size_t log174_bytes = (size_t)CONT_CAND_MAX * FTX_LDPC_N * sizeof(float);
     for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
-        ContScanResult& s = cont_slots[i];
+        ContScanResult& s = cont_slots_[i];
         cuda_check_error(cudaMalloc((void**)&s.count_d,  sizeof(uint32_t)));
         cuda_check_error(cudaMalloc((void**)&s.fo_d,     CONT_CAND_MAX * sizeof(int32_t)));
         cuda_check_error(cudaMalloc((void**)&s.to_d,     CONT_CAND_MAX * sizeof(uint8_t)));
@@ -688,13 +394,14 @@ void FT8Cuda::allocContSlots() {
         cuda_check_error(cudaEventCreateWithFlags(&s.event, cudaEventDisableTiming));
     }
     double mb = (double)CONTINUOUS_SLOTS * (log174_bytes + CONT_CAND_MAX * (4+1+1+1+2)) / 1e6;
-    printf("Continuous scan: %d slots × %.1f MB = %.1f MB device + %.1f MB pinned\n",
+    printf("Continuous scan: %d slots x %.1f MB = %.1f MB device + %.1f MB pinned\n",
            CONTINUOUS_SLOTS, mb / CONTINUOUS_SLOTS, mb, mb);
 }
 
-void FT8Cuda::freeContSlots() {
+void FT8Cuda::freeContSlots()
+{
     for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
-        ContScanResult& s = cont_slots[i];
+        ContScanResult& s = cont_slots_[i];
         if (s.count_d)  cudaFree(s.count_d);
         if (s.fo_d)     cudaFree(s.fo_d);
         if (s.to_d)     cudaFree(s.to_d);
@@ -713,50 +420,42 @@ void FT8Cuda::freeContSlots() {
     }
 }
 
-void FT8Cuda::setDecodeCallback(std::function<void(ContScanResult&)> cb) {
-    decode_callback = std::move(cb);
-}
-
-void FT8Cuda::startContinuousScan() {
-    cont_scan_active.store(true, std::memory_order_release);
-    cont_worker_thread = std::thread([this]() { contWorker(); });
-}
-
-void FT8Cuda::contWorker() {
+void FT8Cuda::contWorker()
+{
     uint64_t ri = 0;
-    while (cont_scan_active.load(std::memory_order_acquire)) {
-        uint64_t wi = cont_write_idx.load(std::memory_order_acquire);
+    while (cont_scan_active_.load(std::memory_order_acquire)) {
+        uint64_t wi = cont_write_idx_.load(std::memory_order_acquire);
         if (ri == wi) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-        ContScanResult& slot = cont_slots[ri % CONTINUOUS_SLOTS];
-        while (!slot.dispatched.load(std::memory_order_acquire)) {
+        ContScanResult& slot = cont_slots_[ri % CONTINUOUS_SLOTS];
+        while (!slot.dispatched.load(std::memory_order_acquire))
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        // Poll for GPU + D2H completion with 1ms sleep — no CPU spin.
+
         cudaError_t ev;
-        while ((ev = cudaEventQuery(slot.event)) == cudaErrorNotReady) {
+        while ((ev = cudaEventQuery(slot.event)) == cudaErrorNotReady)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+
         if (ev != cudaSuccess) {
-            fprintf(stderr, "[CONT] CUDA event error at slot %lu: %s\n",
-                    (unsigned long)(ri % CONTINUOUS_SLOTS), cudaGetErrorString(ev));
+            fprintf(stderr, "[CONT] CUDA event error at slot %llu: %s\n",
+                    (unsigned long long)(ri % CONTINUOUS_SLOTS),
+                    cudaGetErrorString(ev));
         } else {
             uint32_t n = std::min(*slot.count, CONT_CAND_MAX);
-            if (n > 0 && decode_callback) {
+            if (n > 0 && decode_callback_) {
                 *slot.count = n;
                 try {
-                    decode_callback(slot);
+                    decode_callback_(slot);
                 } catch (...) {
                     fprintf(stderr, "[CONT] decode_callback threw\n");
                 }
             }
         }
         slot.dispatched.store(false, std::memory_order_release);
-        cont_read_idx.store(++ri, std::memory_order_release);
+        cont_read_idx_.store(++ri, std::memory_order_release);
     }
 }
 
-}
-}
+} // namespace cuda
+} // namespace gm

@@ -50,6 +50,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/CopyBuffer.cc"
     "gm/cuda/HFChannelizer.cc"
     "gm/cuda/FileChannelizer.cc"
+    "gm/cuda/MagBlock.cc"
     "gm/cuda/FT8Cuda.cc"
     "gm/cuda/JS8Cuda.cc"
     "ft8_lib/fft/kiss_fft.c"

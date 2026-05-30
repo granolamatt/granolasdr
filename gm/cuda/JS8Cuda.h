@@ -7,21 +7,19 @@
 #include <zmq.hpp>
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8ScanCuda.h"
+#include "gm/buffer/DeviceRingBuffer.h"
 
 namespace gm {
 namespace cuda {
 
 // JS8 Normal decode orchestrator.
 //
-// Reads from FT8Cuda's shared mag ring — no second RFFT or ring allocation.
+// Reads from the shared mag ring (DeviceRingBuffer) — no second RFFT.
 // Runs its own cont scan loop (stride=6, ~1/sec) on a separate CUDA stream.
-// For each scan batch with passing candidates, decode_callback is invoked
-// from the worker thread with a ContScanResult containing pinned-host LLRs
-// (log174) and candidate positions.  The callback (js8.cc) performs CPU BP
-// decode, CRC-12, message extract, and ZMQ publish.
 class JS8Cuda {
 public:
-    explicit JS8Cuda(FT8Cuda* ft8, float min_score = 5.0f, int zmq_port = 0);
+    explicit JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
+                     float min_score = 5.0f, int zmq_port = 0);
     ~JS8Cuda();
 
     void setDecodeCallback(std::function<void(ContScanResult&)> cb) {
@@ -32,7 +30,7 @@ public:
     void stop();
 
 private:
-    FT8Cuda* ft8_;
+    const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
     float    min_score_;
 
     cudaStream_t js8_scan_stream_{};
