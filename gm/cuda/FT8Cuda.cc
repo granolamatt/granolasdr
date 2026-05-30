@@ -118,6 +118,19 @@ void FT8Cuda::setDecodeCallback(std::function<void(ContScanResult&)> cb)
     decode_callback_ = std::move(cb);
 }
 
+void FT8Cuda::reportDecoded(uint64_t signal_block)
+{
+    // Only learn once; use compare-and-swap so concurrent calls are safe.
+    int expected = -1;
+    int phase = (int)(signal_block % (uint64_t)EPOCH_BLOCKS);
+    if (epoch_phase_.compare_exchange_strong(expected, phase,
+                                             std::memory_order_release,
+                                             std::memory_order_relaxed)) {
+        printf("[FT8] Epoch phase learned from decoded signal: %d (ring block %llu)\n",
+               phase, (unsigned long long)signal_block);
+    }
+}
+
 void FT8Cuda::startContinuousScan()
 {
     cont_scan_active_.store(true, std::memory_order_release);
@@ -137,6 +150,7 @@ void FT8Cuda::launchContScan(uint64_t wi)
     ContScanResult& slot = cont_slots_[cw % CONTINUOUS_SLOTS];
     uint64_t cont_snap   = wi - FT8_CAPTURE_BLOCKS;
     int dev_cont_snap    = (int)(cont_snap % 200);
+    slot.snap_start      = cont_snap;
 
     cudaStreamWaitEvent(cont_scan_stream_, ring_.ready, 0);
 
@@ -355,17 +369,31 @@ void FT8Cuda::run()
             launchContScan(wi);
         }
 
-        // Epoch trigger: wall-clock mod-15 == 14, fractional part > 0.7.
-        auto nowsec = std::chrono::system_clock::now();
-        double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(
-            nowsec.time_since_epoch()).count();
-        uint64_t trig_mod = (uint64_t)(seconds) % 15;
-        if (trig_mod == 14 &&
-            (seconds - std::trunc(seconds)) > 0.7 &&
-            (uint64_t)(seconds) != last_trigger_second_ &&
-            wi >= (uint64_t)FT8_CAPTURE_BLOCKS) {
-            last_trigger_second_ = (uint64_t)(seconds);
-            launchEpochScan(wi, seconds);
+        // Epoch trigger: adaptive alignment with actual FT8 epoch boundaries.
+        // Once epoch_phase_ is learned from the first cont-scan signal, fire when
+        // the scan window places the epoch boundary at time_off ≈ 14 (matching
+        // Phase 10 wall-clock behavior).  Before phase is known, fall back to
+        // ring-position spacing so the first loop still attempts scans.
+        if (wi >= (uint64_t)FT8_CAPTURE_BLOCKS) {
+            uint64_t snap = wi - (uint64_t)FT8_CAPTURE_BLOCKS;
+            bool should_fire = false;
+            int phase = epoch_phase_.load(std::memory_order_acquire);
+            if (phase >= 0) {
+                // Target snap such that signal (at snap+phase or snap+phase±N*EPOCH_BLOCKS)
+                // falls at time_off ≈ 14:  snap ≡ (phase - 14 + EPOCH_BLOCKS) % EPOCH_BLOCKS
+                int target = (phase - 14 + (int)EPOCH_BLOCKS) % (int)EPOCH_BLOCKS;
+                should_fire = ((int)(snap % (uint64_t)EPOCH_BLOCKS) == target &&
+                               wi >= last_epoch_wi_ + (uint64_t)(EPOCH_BLOCKS - 2));
+            } else {
+                should_fire = (wi >= last_epoch_wi_ + (uint64_t)EPOCH_BLOCKS);
+            }
+            if (should_fire) {
+                last_epoch_wi_ = wi;
+                auto nowsec = std::chrono::system_clock::now();
+                double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(
+                    nowsec.time_since_epoch()).count();
+                launchEpochScan(wi, seconds);
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

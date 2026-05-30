@@ -56,6 +56,7 @@ struct ContScanResult {
     float*    log174{nullptr};
 
     double      timestamp{0.0};
+    uint64_t    snap_start{0};  // ring block index at window start (set by launchContScan)
     cudaEvent_t event{};
     std::atomic<bool> dispatched{false};
 };
@@ -78,6 +79,10 @@ public:
     void setDecodeCallback(std::function<void(ContScanResult&)> cb);
     void startContinuousScan();
 
+    // Called by the cont-scan decode path when a message decodes successfully.
+    // First call sets the epoch phase so subsequent epoch scans align properly.
+    void reportDecoded(uint64_t signal_block);
+
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
     std::string tag_;
@@ -85,6 +90,7 @@ private:
 
     static constexpr int BUFFERS          = 2;
     static constexpr int CONTINUOUS_SLOTS = 8;
+    static constexpr int EPOCH_BLOCKS     = 94; // ≈15s at 6.25 Hz; ring-position epoch trigger
     int cont_stride_{6};
 
     cudaStream_t scan_stream_{};
@@ -120,7 +126,8 @@ private:
     int  consecutive_timeouts_{0};
 
     // Epoch snapshot state
-    uint64_t     last_trigger_second_{0};
+    uint64_t     last_epoch_wi_{0};     // ring write_idx at last epoch trigger
+    std::atomic<int> epoch_phase_{-1}; // FT8 epoch start phase (mod EPOCH_BLOCKS); -1 = unlearned
     std::thread  last_snapshot_thread_;
 
     // Continuous scan state

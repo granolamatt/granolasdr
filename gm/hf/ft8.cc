@@ -549,6 +549,10 @@ namespace hf {
             ftx_message_rc_t rc = ftx_message_decode(&msg, &cont_hash_if, text);
             if (rc != FTX_MESSAGE_RC_OK) continue;
 
+            // Inform epoch scan of where this real signal is so it can align its triggers.
+            if (ft8cuda)
+                ft8cuda->reportDecoded(r.snap_start + (uint64_t)r.to[i]);
+
             float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
             float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
             float snr      = (float)r.score[i] - 26.0f;
