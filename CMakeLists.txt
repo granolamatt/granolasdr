@@ -69,6 +69,7 @@ set(GM_SOURCES
     "gm/rx888/rx888.cc"
     "gm/zmqcode/zmqserver.cc"
     "gm/zmqcode/zmqworker.cc"
+    "gm/hf/band_map.cc"
     "gm/hf/ft8.cc"
     "gm/hf/js8.cc"
     "gm/hf/jsc.cc"

@@ -316,11 +316,12 @@ void HFChannelizer::broadcastWaterfall(const uint8_t* data, int len) {
     for (auto& q : ws_queues_) q->push(frame);
 }
 
-void HFChannelizer::broadcastDecode(const char* call, float freq_hz, float snr, double unix_time) {
-    char buf[256];
+void HFChannelizer::broadcastDecode(const char* call, float freq_hz, float snr, double unix_time,
+                                    const char* mode) {
+    char buf[288];
     int len = snprintf(buf, sizeof(buf),
-        "data: {\"type\":\"decode\",\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f}\n\n",
-        call, (double)freq_hz, (double)snr, unix_time);
+        "data: {\"type\":\"decode\",\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"mode\":\"%s\"}\n\n",
+        call, (double)freq_hz, (double)snr, unix_time, mode);
     std::string frame(buf, len);
     std::lock_guard<std::mutex> lk(sse_mutex_);
     for (auto& q : sse_queues_) q->push(frame);
@@ -331,6 +332,16 @@ void HFChannelizer::broadcastTiming(float scan_ms, float ldpc_ms, uint32_t n) {
     int len = snprintf(buf, sizeof(buf),
         "data: {\"type\":\"timing\",\"scan_ms\":%.1f,\"ldpc_ms\":%.1f,\"n\":%u}\n\n",
         (double)scan_ms, (double)ldpc_ms, (unsigned)n);
+    std::string frame(buf, len);
+    std::lock_guard<std::mutex> lk(sse_mutex_);
+    for (auto& q : sse_queues_) q->push(frame);
+}
+
+void HFChannelizer::broadcastJS8Timing(float scan_ms, uint32_t n) {
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf),
+        "data: {\"type\":\"js8timing\",\"scan_ms\":%.1f,\"n\":%u}\n\n",
+        (double)scan_ms, (unsigned)n);
     std::string frame(buf, len);
     std::lock_guard<std::mutex> lk(sse_mutex_);
     for (auto& q : sse_queues_) q->push(frame);

@@ -39,6 +39,12 @@
   .dc-snr { color: #7ec8e3; display: inline-block; width: 52px; }
   .dc-freq { color: #aaa; display: inline-block; width: 72px; }
   .dc-band { color: #666; display: inline-block; width: 36px; }
+  .dc-mode-js8 { color: #e8a040; font-size: 0.85em; display: inline-block; width: 32px; }
+  .dc-mode-ft8 { color: #555;    font-size: 0.85em; display: inline-block; width: 32px; }
+  /* JS8 timing row */
+  .timing-row-label { font-size: 0.75em; color: #555; margin-top: 10px; margin-bottom: 4px; }
+  .timing-val-sm { font-size: 1.1em; color: #c8a060; }
+  .timing-lbl-sm { font-size: 0.7em; color: #555; }
   /* status bar */
   .status-bar { font-size: 0.75em; color: #555; margin-top: 16px; display: flex; gap: 20px; }
   #sse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #555; margin-right: 4px; }
@@ -52,6 +58,7 @@
   <!-- GPU timing -->
   <div class="panel">
     <h2>GPU timing</h2>
+    <div class="timing-row-label">FT8</div>
     <div class="timing-row">
       <div>
         <div class="timing-val" id="t-scan">—</div>
@@ -64,6 +71,17 @@
       <div>
         <div class="timing-val" id="t-cands">—</div>
         <div class="timing-lbl">candidates</div>
+      </div>
+    </div>
+    <div class="timing-row-label" id="js8-timing-row" style="display:none">JS8</div>
+    <div class="timing-row" id="js8-timing-vals" style="display:none">
+      <div>
+        <div class="timing-val-sm" id="t-js8-scan">—</div>
+        <div class="timing-lbl-sm">scan ms</div>
+      </div>
+      <div>
+        <div class="timing-val-sm" id="t-js8-cands">—</div>
+        <div class="timing-lbl-sm">candidates</div>
       </div>
     </div>
   </div>
@@ -171,8 +189,13 @@ function prependDecode(ev, band) {
   const snrStr = (ev.snr >= 0 ? '+' : '') + ev.snr.toFixed(1);
   const freqStr = (ev.freq / 1e6).toFixed(4);
   const t = new Date(ev.unix * 1000).toISOString().substr(11, 8);
+  const isJs8 = ev.mode === 'JS8';
+  const modeHtml = isJs8
+    ? `<span class="dc-mode-js8">JS8</span>`
+    : `<span class="dc-mode-ft8">FT8</span>`;
+  const callStyle = isJs8 ? ' style="color:#e8a040"' : '';
   const li = document.createElement('li');
-  li.innerHTML = `<span class="dc-snr">${snrStr} dB</span><span class="dc-freq">${freqStr} MHz</span><span class="dc-band">${band}</span> ${escHtml(ev.call)} <span style="color:#555">${t}</span>`;
+  li.innerHTML = `${modeHtml}<span class="dc-snr">${snrStr} dB</span><span class="dc-freq">${freqStr} MHz</span><span class="dc-band">${band}</span> <span${callStyle}>${escHtml(ev.call)}</span> <span style="color:#555">${t}</span>`;
   ul.insertBefore(li, ul.firstChild);
   while (ul.children.length > 200) ul.removeChild(ul.lastChild);
 }
@@ -181,6 +204,13 @@ function updateTiming(ev) {
   document.getElementById('t-scan').textContent = ev.scan_ms.toFixed(1);
   document.getElementById('t-ldpc').textContent = ev.ldpc_ms.toFixed(1);
   document.getElementById('t-cands').textContent = ev.n;
+}
+
+function updateJS8Timing(ev) {
+  document.getElementById('js8-timing-row').style.display = '';
+  document.getElementById('js8-timing-vals').style.display = '';
+  document.getElementById('t-js8-scan').textContent = ev.scan_ms.toFixed(1);
+  document.getElementById('t-js8-cands').textContent = ev.n;
 }
 
 function escHtml(s) {
@@ -199,6 +229,7 @@ function connectSSE() {
     try { ev = JSON.parse(e.data); } catch(_) { return; }
     if (ev.type === 'decode') addDecode(ev);
     else if (ev.type === 'timing') updateTiming(ev);
+    else if (ev.type === 'js8timing') updateJS8Timing(ev);
   };
 }
 

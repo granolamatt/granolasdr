@@ -162,6 +162,8 @@ void JS8Cuda::scanLoop()
                         cudaMemcpyDeviceToHost, js8_scan_stream_);
 
         cudaEventRecord(slot.event, js8_scan_stream_);
+        slot_dispatch_ns_[cw % CONTINUOUS_SLOTS] =
+            std::chrono::steady_clock::now().time_since_epoch().count();
         slot.dispatched.store(true, std::memory_order_release);
         cont_write_idx_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -188,9 +190,13 @@ void JS8Cuda::workerLoop()
         }
 
         if (ev == cudaSuccess) {
+            int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            int64_t dispatch_ns = slot_dispatch_ns_[ri % CONTINUOUS_SLOTS];
+            float scan_ms = dispatch_ns ? (now_ns - dispatch_ns) * 1e-6f : 0.0f;
+
             uint32_t n = std::min(*slot.count, CAND_MAX);
             if (n > 0) {
-                fprintf(stderr, "[JS8] scan: %u candidates\n", n);
+                fprintf(stderr, "[JS8] scan: %u candidates  %.1f ms\n", n, (double)scan_ms);
                 if (decode_callback_) {
                     *slot.count = n;
                     try {
@@ -199,6 +205,7 @@ void JS8Cuda::workerLoop()
                         fprintf(stderr, "[JS8] decode_callback threw\n");
                     }
                 }
+                if (timing_callback_) timing_callback_(scan_ms, 0.0f, n);
             } else if (ri % 60 == 0) {
                 fprintf(stderr, "[JS8] alive: %lu scans, 0 candidates\n", (unsigned long)ri);
             }

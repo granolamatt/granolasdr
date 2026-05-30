@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -10,45 +9,10 @@
 #include "gm/hf/js8.h"
 #include "gm/hf/jsc.h"
 #include "gm/hf/ft8_capture.h"
-#include "gm/hf/hf_bands.h"
+#include "gm/hf/band_map.h"
 #include "ft8_lib/ft8/constants.h"
 #include "gm/cuda/FT8Cuda.h"       // ContScanResult, CONT_CAND_MAX
 #include "gm/cuda/JS8LdpcCuda.h"   // js8_ldpc_decode_cpu
-
-// ---- Composite-to-RF frequency conversion (copy of ft8.cc helper) ----------
-static const int kBandMapSize_js8 = kNumHFBands;
-static struct { int ifft_start; int ifft_end; int wb_start; } kBandMap_js8[kNumHFBands];
-static bool kBandMapInit_js8 = false;
-
-static void init_band_map_js8() {
-    if (kBandMapInit_js8) return;
-    int offset = 0;
-    for (int i = 0; i < kNumHFBands; ++i) {
-        kBandMap_js8[i].ifft_start = offset;
-        kBandMap_js8[i].ifft_end   = offset + (int)kHFBands[i].bw;
-        kBandMap_js8[i].wb_start   = (int)kHFBands[i].wb_start;
-        offset += (int)kHFBands[i].bw;
-    }
-    kBandMapInit_js8 = true;
-}
-
-static const int kIfftSize_js8        = 65536;
-static const int kFt8FftSize_js8      = 1048576;
-static const int kWidebandFftSize_js8 = 1400000;
-static const float kWbSampleRate_js8  = 140000000.0f;
-
-static float js8_composite_bin_to_rf_hz(int freq_offset) {
-    init_band_map_js8();
-    int ifft_bin = (int)roundf((float)freq_offset * kIfftSize_js8 / kFt8FftSize_js8);
-    if (ifft_bin < 0) ifft_bin += kIfftSize_js8;
-    for (int i = 0; i < kBandMapSize_js8; ++i) {
-        if (ifft_bin >= kBandMap_js8[i].ifft_start && ifft_bin < kBandMap_js8[i].ifft_end) {
-            int wb_bin = kBandMap_js8[i].wb_start + (ifft_bin - kBandMap_js8[i].ifft_start);
-            return (float)wb_bin * kWbSampleRate_js8 / kWidebandFftSize_js8;
-        }
-    }
-    return (float)freq_offset;
-}
 
 // ---- CRC-12: poly 0xC06, augmented, XOR key 42 -----------------------------
 // Matches JS8Call's boost::augmented_crc<12,0xC06>(data,11) ^ 42.
@@ -520,7 +484,7 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
         if (!seen_this_epoch_.insert(dedup_key).second) continue;
 
-        float freq_hz  = js8_composite_bin_to_rf_hz(r.fo[i]);
+        float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
         float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
         float snr      = (float)r.score[i] - 26.0f;
 

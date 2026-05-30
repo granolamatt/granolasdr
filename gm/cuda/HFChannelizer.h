@@ -65,12 +65,15 @@ public:
     }
 
     // Push a decode event to all connected SSE clients.
-    // Called from FT8::publishDecoded (via broadcast_callback_ set in HFRx.cc).
-    void broadcastDecode(const char* call, float freq_hz, float snr, double unix_time);
+    // mode defaults to "FT8"; pass "JS8" for JS8 decodes.
+    void broadcastDecode(const char* call, float freq_hz, float snr, double unix_time,
+                         const char* mode = "FT8");
 
-    // Push a timing event to all connected SSE clients.
-    // Called from the timing_callback_ registered with FT8Cuda.
+    // Push FT8 timing to all SSE clients (type:"timing").
     void broadcastTiming(float scan_ms, float ldpc_ms, uint32_t n);
+
+    // Push JS8 scan timing to all SSE clients (type:"js8timing").
+    void broadcastJS8Timing(float scan_ms, uint32_t n);
 
 private:
     cudaStream_t stream;

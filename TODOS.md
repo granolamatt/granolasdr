@@ -10,21 +10,11 @@ decompressor, Huffman decoder, psk_uploader.py dual-port (5580/5590).
 
 Pending carry-overs:
 
-- **Dashboard JS8 panel**: `broadcastJS8()` SSE + HTML panel. `js8_obj->setBroadcastCallback()`
-  is not wired in HFRx.cc. ~160 lines. Independent of PSKReporter. Add before Phase 12.
-
-- **Dedup in decodeAndPublishContinuous()**: Continuous scan (~1/sec) re-publishes the same
-  15-second JS8 message up to ~15 times. Fix: `unordered_set<string>` keyed on `text|fo`,
-  cleared on JS8 epoch boundary (`floor(unix/15)` changes). ~8 lines in js8.cc + 2 members
-  in js8.h. Add `#include <unordered_set>`. **Fix before Phase 11.**
-
-- **DRY band map**: `js8_composite_bin_to_rf_hz()` in gm/hf/js8.cc is a near-copy of the
-  equivalent function in ft8.cc. Extract a shared `composite_bin_to_rf_hz()` in a new
-  `gm/hf/band_map.h`. ~30 lines refactor. **Fix before Phase 11.**
-
-- **Scan timing observability**: `JS8Cuda::scanLoop()` has no `scan_ms` instrumentation.
-  Add a `setTimingCallback` parallel to FT8Cuda's, wire to `epochbuffer.broadcastTiming()`.
-  **Add before Phase 11.**
+All pre-Phase-11 carry-overs shipped 2026-05-30:
+- Dashboard JS8 panel: `broadcastDecode(..., "JS8")` + mode coloring in decode list; JS8 timing row in GPU timing panel.
+- Dedup: `unordered_set` per epoch in `decodeAndPublishContinuous()`.
+- DRY band map: `gm/hf/band_map.cc` shared by ft8.cc and js8.cc.
+- Scan timing: `JS8Cuda::setTimingCallback` → `broadcastJS8Timing()` → SSE `type:"js8timing"`.
 
 ## GPU LDPC post-ship items
 

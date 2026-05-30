@@ -27,48 +27,7 @@
 #include "ft8_lib/ft8/debug.h"
 
 
-// ---- Composite-to-RF frequency conversion --------------------------------- //
-// The HFChannelizer packs HF bands into a 65536-bin composite IFFT, then
-// outputs 32768 complex samples at 6.5536 MS/s. The FT8 FFT (1048576 points) has
-// bin_hz = 6,553,600 / 1,048,576 = 6.25 Hz exactly. freq_offset is a bin in that
-// composite FFT, not an RF frequency. Convert it back using the HFChannelizer bin table.
-//
-// Mapping: composite_ifft_bin = round(freq_offset * IFFT_SIZE / FT8_FFT_SIZE)
-//          Then look up composite_ifft_bin in kBandMap to get the wideband bin,
-//          then rf_hz = wb_bin * 140e6 / 1400000 = wb_bin * 100.
-//
-// kBandMap is built at startup from kHFBands (gm/hf/hf_bands.h) — single source of truth.
-static const int kBandMapSize = kNumHFBands;
-static struct { int ifft_start; int ifft_end; int wb_start; } kBandMap[kNumHFBands];
-
-static void init_band_map() {
-    int offset = 0;
-    for (int i = 0; i < kNumHFBands; ++i) {
-        kBandMap[i].ifft_start = offset;
-        kBandMap[i].ifft_end   = offset + (int)kHFBands[i].bw;
-        kBandMap[i].wb_start   = (int)kHFBands[i].wb_start;
-        offset += (int)kHFBands[i].bw;
-    }
-}
-
-static const int kIfftSize        = 65536;
-static const int kFt8FftSize      = 1048576;
-static const int kWidebandFftSize = 1400000; // 2 * NLARGE
-static const float kWbSampleRate  = 140000000.0f;
-
-// Returns actual RF frequency in Hz, or the raw bin number if no band matches.
-static float composite_bin_to_rf_hz(int freq_offset) {
-    int ifft_bin = (int)roundf((float)freq_offset * kIfftSize / kFt8FftSize);
-    // Wrap negative-frequency half (bins >= kIfftSize/2 represent negative freqs)
-    if (ifft_bin < 0) ifft_bin += kIfftSize;
-    for (int i = 0; i < kBandMapSize; ++i) {
-        if (ifft_bin >= kBandMap[i].ifft_start && ifft_bin < kBandMap[i].ifft_end) {
-            int wb_bin = kBandMap[i].wb_start + (ifft_bin - kBandMap[i].ifft_start);
-            return (float)wb_bin * kWbSampleRate / kWidebandFftSize;
-        }
-    }
-    return (float)freq_offset; // fallback
-}
+#include "gm/hf/band_map.h"
 
 const int kMin_score = 5; // Minimum sync score threshold for candidates
 const int kMax_candidates = 2000;
@@ -409,11 +368,8 @@ void decode(const monitor_t* mon, double tm_slot_start, gm::hf::FT8* publisher,
             memcpy(&decoded[idx_hash], &message, sizeof(message));
             decoded_hashtable[idx_hash] = &decoded[idx_hash];
             ++num_decoded;
-            int ifft_bin = (int)roundf((float)(mon->min_bin + cand->freq_offset) * kIfftSize / kFt8FftSize);
-            if (ifft_bin < 0) ifft_bin += kIfftSize;
-            for (int bi = 0; bi < kBandMapSize; ++bi)
-                if (ifft_bin >= kBandMap[bi].ifft_start && ifft_bin < kBandMap[bi].ifft_end)
-                    { band_counts[bi]++; break; }
+            int bi = composite_bin_to_band_idx(mon->min_bin + cand->freq_offset);
+            if (bi >= 0) band_counts[bi]++;
 
             char text[FTX_MAX_MESSAGE_LENGTH];
             ftx_message_rc_t unpack_status = ftx_message_decode(&message, &hash_if, text);

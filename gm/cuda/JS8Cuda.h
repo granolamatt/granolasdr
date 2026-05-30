@@ -26,6 +26,12 @@ public:
         decode_callback_ = std::move(cb);
     }
 
+    // Callback invoked after each scan slot completes: (scan_ms, 0.0f, n_candidates).
+    // Mirrors FT8Cuda::setTimingCallback for dashboard wiring.
+    void setTimingCallback(std::function<void(float, float, uint32_t)> cb) {
+        timing_callback_ = std::move(cb);
+    }
+
     void start();
     void stop();
 
@@ -56,7 +62,11 @@ private:
     std::thread scan_thread_;
     std::thread worker_thread_;
 
-    std::function<void(ContScanResult&)> decode_callback_;
+    std::function<void(ContScanResult&)>        decode_callback_;
+    std::function<void(float, float, uint32_t)> timing_callback_;
+
+    // Dispatch timestamp per slot (steady_clock ns), set by scanLoop, read by workerLoop.
+    int64_t slot_dispatch_ns_[CONTINUOUS_SLOTS]{};
 
     void allocSlots();
     void freeSlots();

@@ -47,6 +47,12 @@ static void runPipeline(Channelizer& epochbuffer,
         js8channel->setDecodeCallback([&js8_obj](gm::cuda::ContScanResult& r) {
             js8_obj->decodeAndPublishContinuous(r);
         });
+        js8_obj->setBroadcastCallback([&epochbuffer](const char* call, float freq_hz, float snr, double unix_time) {
+            epochbuffer.broadcastDecode(call, freq_hz, snr, unix_time, "JS8");
+        });
+        js8channel->setTimingCallback([&epochbuffer](float scan_ms, float /*ldpc_ms*/, uint32_t n) {
+            epochbuffer.broadcastJS8Timing(scan_ms, n);
+        });
         js8channel->start();
     }
 
