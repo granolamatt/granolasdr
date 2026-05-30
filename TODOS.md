@@ -2,25 +2,29 @@
 
 Updated 2026-05-27. Deferred items from prior plan reviews. None are blocked — each waits on a natural predecessor.
 
-## JS8 Normal decode (Phase 10)
+## JS8 Normal decode (Phase 10) — shipped 2026-05-27
 
-Plan: PLAN_JS8_PHASE10.md (2026-05-27). Architecture: JS8Cuda reads from FT8Cuda's shared mag
-ring; no second RFFT or ring allocation needed. Three phases:
+Phase 10 core shipped: JS8ScanCuda (Costas {4,2,5,6,1,3,0}), JS8LdpcCuda (M=87), JS8Cuda
+(ring consumer, `--js8` flag), gm/hf/js8 (CRC-12, full frame decode, ZMQ 5590), JSC
+decompressor, Huffman decoder, psk_uploader.py dual-port (5580/5590).
 
-- **Phase 1 (core)**: JS8ScanCuda (Costas {4,2,5,6,1,3,0}), JS8LdpcCuda (M=87 H-matrix),
-  JS8Cuda (ring consumer), gm/hf/js8 (CRC-12 + message decode + ZMQ 5581). ~1,800 lines.
-  **Primary risk**: H-matrix transcription from JS8Call Nm[87] — cross-check with reference decoder.
-  **Fix needed**: change `ring_write_idx` from `uint64_t` to `std::atomic<uint64_t>` in FT8Cuda
-  (latent race that JS8Cuda would expose; existing contWorker also has this race).
+Pending carry-overs:
 
-- **Phase 2 (cherry-pick)**: Dashboard JS8 conversation panel — `broadcastJS8()` SSE + HTML panel.
-  ~160 lines. Independent of Phase 3.
+- **Dashboard JS8 panel**: `broadcastJS8()` SSE + HTML panel. `js8_obj->setBroadcastCallback()`
+  is not wired in HFRx.cc. ~160 lines. Independent of PSKReporter. Add before Phase 12.
 
-- **Phase 3 (cherry-pick)**: PSKReporter JS8 spots — psk_uploader.py subscribes to port 5581,
-  mode field parameterized. ~70 lines. Independent of Phase 2.
+- **Dedup in decodeAndPublishContinuous()**: Continuous scan (~1/sec) re-publishes the same
+  15-second JS8 message up to ~15 times. Fix: `unordered_set<string>` keyed on `text|fo`,
+  cleared on JS8 epoch boundary (`floor(unix/15)` changes). ~8 lines in js8.cc + 2 members
+  in js8.h. Add `#include <unordered_set>`. **Fix before Phase 11.**
 
-**Note on FT4**: FT4 previously slated as Phase 10; superseded by JS8 (more traffic, larger
-user base, conversational protocol adds dashboard value). FT4 becomes Phase 11 or later.
+- **DRY band map**: `js8_composite_bin_to_rf_hz()` in gm/hf/js8.cc is a near-copy of the
+  equivalent function in ft8.cc. Extract a shared `composite_bin_to_rf_hz()` in a new
+  `gm/hf/band_map.h`. ~30 lines refactor. **Fix before Phase 11.**
+
+- **Scan timing observability**: `JS8Cuda::scanLoop()` has no `scan_ms` instrumentation.
+  Add a `setTimingCallback` parallel to FT8Cuda's, wire to `epochbuffer.broadcastTiming()`.
+  **Add before Phase 11.**
 
 ## GPU LDPC post-ship items
 

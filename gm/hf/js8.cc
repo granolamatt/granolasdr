@@ -493,6 +493,13 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
     auto now = std::chrono::system_clock::now();
     double unix_now = std::chrono::duration<double>(now.time_since_epoch()).count();
 
+    // Clear dedup set when JS8 epoch (15 s) rolls over.
+    uint64_t epoch = (uint64_t)(unix_now / 15.0);
+    if (epoch != last_epoch_) {
+        seen_this_epoch_.clear();
+        last_epoch_ = epoch;
+    }
+
     uint8_t xhat[174];
 
     for (uint32_t i = 0; i < n; ++i) {
@@ -508,6 +515,10 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
 
         std::string from_call;
         std::string text = decodeJs8Message(info, &from_call);
+
+        // Suppress re-publishing the same message+frequency within one epoch.
+        std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
+        if (!seen_this_epoch_.insert(dedup_key).second) continue;
 
         float freq_hz  = js8_composite_bin_to_rf_hz(r.fo[i]);
         float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;

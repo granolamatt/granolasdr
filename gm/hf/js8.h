@@ -1,6 +1,8 @@
 #pragma once
 #include <functional>
 #include <mutex>
+#include <string>
+#include <unordered_set>
 #include <zmq.hpp>
 
 namespace gm { namespace cuda { struct ContScanResult; } }
@@ -33,6 +35,10 @@ private:
     zmq::socket_t  zmq_pub_;
     std::mutex     zmq_mutex_;
     std::function<void(const char*, float, float, double)> broadcast_callback_;
+
+    // Per-epoch dedup: cleared when JS8 epoch (floor(unix/15)) rolls over.
+    std::unordered_set<std::string> seen_this_epoch_;
+    uint64_t last_epoch_ = 0;
 };
 
 } // namespace hf
