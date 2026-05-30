@@ -1,18 +1,18 @@
 #pragma once
-#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_set>
 #include <zmq.hpp>
 
 namespace gm { namespace cuda { struct ContScanResult; } }
+namespace gm { namespace cuda { class JS8Cuda; } }
 
 namespace gm {
 namespace hf {
 
 class JS8 {
 public:
-    explicit JS8(int zmq_port = 5590);
+    JS8(gm::cuda::JS8Cuda* js8cuda, int zmq_port = 5590);
     ~JS8() = default;
 
     // Publish one decoded JS8 message; thread-safe.

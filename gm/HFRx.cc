@@ -39,23 +39,14 @@ static void runPipeline(Channelizer& epochbuffer,
     ft8channel.start();
 
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort);
-    ft8channel.setDecodeCallback([&ft8](gm::cuda::ContScanResult& r) {
-        ft8.decodeAndPublishContinuous(r);
-    });
-    ft8channel.startContinuousScan();
-
     ft8.start();
 
-    std::unique_ptr<gm::hf::JS8>       js8_obj;
     std::unique_ptr<gm::cuda::JS8Cuda> js8channel;
+    std::unique_ptr<gm::hf::JS8>       js8_obj;
     if (enable_js8) {
-        js8_obj    = std::make_unique<gm::hf::JS8>(kProxyXSubPort);
         js8channel = std::make_unique<gm::cuda::JS8Cuda>(
             magblock.getRing(), min_score, kProxyXSubPort);
-        js8channel->setDecodeCallback([&js8_obj](gm::cuda::ContScanResult& r) {
-            js8_obj->decodeAndPublishContinuous(r);
-        });
-        js8channel->start();
+        js8_obj = std::make_unique<gm::hf::JS8>(js8channel.get(), kProxyXSubPort);
     }
 
     while (true) {

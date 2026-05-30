@@ -110,6 +110,11 @@ namespace hf {
 
         hashtable_init();
 
+        ft8cuda_->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
+            decodeAndPublishContinuous(r);
+        });
+        ft8cuda_->startContinuousScan();
+
         if (zmq_port > 0) {
             std::string endpoint = "tcp://localhost:" + std::to_string(zmq_port);
             zmq_pub_.connect(endpoint);

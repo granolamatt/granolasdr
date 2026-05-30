@@ -12,6 +12,7 @@
 #include "gm/hf/band_map.h"
 #include "ft8_lib/ft8/constants.h"
 #include "gm/cuda/FT8Cuda.h"       // ContScanResult, CONT_CAND_MAX
+#include "gm/cuda/JS8Cuda.h"
 #include "gm/cuda/JS8LdpcCuda.h"   // js8_ldpc_decode_cpu
 
 // ---- CRC-12: poly 0xC06, augmented, XOR key 42 -----------------------------
@@ -401,7 +402,7 @@ static std::string decodeJs8Message(const uint8_t* info, std::string* from_call)
 namespace gm {
 namespace hf {
 
-JS8::JS8(int zmq_port)
+JS8::JS8(gm::cuda::JS8Cuda* js8cuda, int zmq_port)
     : zmq_port_(zmq_port),
       zmq_ctx_(1),
       zmq_pub_(zmq_ctx_, zmq::socket_type::pub)
@@ -412,6 +413,11 @@ JS8::JS8(int zmq_port)
         zmq_pub_.connect(endpoint);
         printf("[JS8] ZMQ publisher → %s  topic=js8/decode\n", endpoint);
     }
+
+    js8cuda->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
+        decodeAndPublishContinuous(r);
+    });
+    js8cuda->start();
 }
 
 void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
