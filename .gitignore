@@ -13,3 +13,4 @@ monitor.txt
 .gstack/
 __pycache__/
 CLAUDE.md
+ft8_timing.csv
