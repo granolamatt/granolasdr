@@ -1,51 +1,68 @@
 # TODOS
 
-Updated 2026-05-27. Deferred items from prior plan reviews. None are blocked — each waits on a natural predecessor.
+Updated 2026-05-30.
 
-## JS8 Normal decode (Phase 10) — shipped 2026-05-27
+## Flow graph refactor (next major phase)
 
-Phase 10 core shipped: JS8ScanCuda (Costas {4,2,5,6,1,3,0}), JS8LdpcCuda (M=87), JS8Cuda
-(ring consumer, `--js8` flag), gm/hf/js8 (CRC-12, full frame decode, ZMQ 5590), JSC
-decompressor, Huffman decoder, psk_uploader.py dual-port (5580/5590).
+The target architecture (see ARCHITECTURE.md) requires two new primitives.
+These should be built before adding new decoders so future work lands on
+clean foundations.
 
-Pending carry-overs:
+### DeviceRingBuffer<T, N>
 
-All pre-Phase-11 carry-overs shipped 2026-05-30:
-- Dashboard JS8 panel: `broadcastDecode(..., "JS8")` + mode coloring in decode list; JS8 timing row in GPU timing panel.
-- Dedup: `unordered_set` per epoch in `decodeAndPublishContinuous()`.
-- DRY band map: `gm/hf/band_map.cc` shared by ft8.cc and js8.cc.
-- Scan timing: `JS8Cuda::setTimingCallback` → `broadcastJS8Timing()` → SSE `type:"js8timing"`.
+Replace the five ad-hoc ring accessors on `FT8Cuda` (`getRingPtr`,
+`getRingWriteIdx`, `getRingBlocks`, `getRingReadyEvent`, `getRingNumBins`)
+with a single typed struct:
 
-## GPU LDPC post-ship items
+```cpp
+template<typename T, int N>
+struct DeviceRingBuffer {
+    T*                    base_d;      // device allocation: N * slot_elems
+    size_t                slot_elems;
+    std::atomic<uint64_t> write_idx{0};
+    cudaEvent_t           ready;
 
-From /plan-ceo-review (2026-05-27), Phases 7–9 CEO plan — **FT8_GPU_CAND_MAX reduction and cascade timeout detection are in active Phase 7 plan**. Items below are the remaining deferred sub-items.
+    T* slot(uint64_t idx) const { return base_d + (idx % N) * slot_elems; }
+};
+```
 
-- **QP-ADMM vs BP convergence baseline**: measure decode counts per epoch on D8 corpus WAV files
-  with both decoders at equal SNR. Target: QP-ADMM ≥ BP at FT8_GPU_CAND_MAX=500.
-  Gate: if QP-ADMM loses >2% decodes vs BP on real traffic, investigate rho/max_iter tuning first.
-  **Prerequisite**: --jtdx corpus WAV files. Add when WAV corpus exists.
+- Lives in `gm/buffer/DeviceRingBuffer.h`
+- `FT8Cuda` constructs one and exposes `const DeviceRingBuffer<uint8_t, 200>& getRing()`
+- `JS8Cuda` takes `const DeviceRingBuffer<uint8_t, 200>&` instead of `FT8Cuda*`
+- Breaks the JS8Cuda → FT8Cuda compile-time dependency
+
+### MagBlock
+
+Extract the magnitude computation out of `FT8Cuda` into a standalone block:
+
+```
+input:  DeviceBuffer<complex<float>>     (HFChannelizer output, rfft_length bins)
+output: DeviceRingBuffer<uint8_t, 200>   (shared read-only by all scanners)
+```
+
+Moves these responsibilities out of `FT8Cuda`:
+- Per-block RFFT on channelizer output
+- `|·|²` magnitude + uint8 decimation kernel
+- Ring slot write + `cudaEventRecord(ready)`
+- Waterfall decimation kernel → ZMQ "waterfall" publish
+
+`FT8Cuda` becomes a pure scanner: takes a `DeviceRingBuffer` input, runs the
+Costas scan, emits `ContScanResult` for the CPU decode stage.
+
+Build order: `DeviceRingBuffer` first (header only, no GPU code), then
+`MagBlock` extraction, then update `FT8Cuda` and `JS8Cuda` constructors.
 
 ## Wideband waterfall resolution
 
-Shipped in Phase 9 (2026-05-27) but resolution is too low to be useful.
-The 2048-bin output covers the full 0–70 MHz composite range, giving ~34 kHz/bin — bands
-are dots, not features. Options to consider:
+Shipped in Phase 9 but 2048 bins over 0–70 MHz gives ~34 kHz/bin — too coarse.
+Easiest fix: clamp the quadratic mapping to `[0, 30 MHz]` only by setting
+`rfft_bin_max = round(30e6 / 6.25)` before mapping to 2048 output bins.
+Gives ~7 kHz/bin across the amateur HF window with no canvas changes.
 
-- **Zoom to HF window only** (1–30 MHz): restrict the output bin mapping to the HF sub-range
-  of the composite spectrum, discarding everything above 30 MHz. Gives ~7 kHz/bin across 2048 bins.
-- **Per-band zoom windows**: add a selector to the dashboard that streams a 2048-bin slice centred
-  on a chosen 500 kHz window (e.g. 14.0–14.5 MHz). Would need a frequency parameter on the
-  WebSocket URL or a separate endpoint per zoom level.
-- **Increase output bins**: change WATERFALL_BINS from 2048 to a larger value (e.g. 8192) to
-  spread the quadratic mapping over more pixels. Canvas width would need to match.
+## QP-ADMM vs BP convergence baseline
 
-Easiest first step: restrict the quadratic mapping to [0, 30 MHz] only by clamping
-`rfft_bin_max = round(30000000 / 6.25)` and mapping `b → round(rfft_bin_max * (b/2047)²)`.
-
-## FT4 decode pipeline
-
-Second decode consumer alongside FT8, using the same Costas scan / LDPC family.
-- 7.5-second epoch (half of FT8); separate GPU scan parameters and epoch trigger
-- Reuse most of FT8Cuda machinery; add second ZMQ PUB on a different port; PSKReporter accepts FT4
-- L effort: ~400 lines across FT8Cuda.cc, a new FT4.cc, CMakeLists
-- **Prerequisite**: wideband waterfall (Phase 9) shipped. Planned as Phase 10.
+Measure decode counts per epoch on D8 corpus WAV files with both decoders
+at equal SNR. Target: QP-ADMM ≥ BP at FT8_GPU_CAND_MAX=500.
+Gate: if QP-ADMM loses >2% decodes vs BP on real traffic, investigate
+rho/max_iter tuning before enabling by default.
+Prerequisite: corpus WAV files captured with `--record`.
