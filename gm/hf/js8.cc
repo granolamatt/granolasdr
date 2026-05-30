@@ -408,9 +408,9 @@ JS8::JS8(int zmq_port)
 {
     if (zmq_port_ > 0) {
         char endpoint[64];
-        snprintf(endpoint, sizeof(endpoint), "tcp://*:%d", zmq_port_);
-        zmq_pub_.bind(endpoint);
-        printf("[JS8] ZMQ PUB bound on tcp://*:%d\n", zmq_port_);
+        snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", zmq_port_);
+        zmq_pub_.connect(endpoint);
+        printf("[JS8] ZMQ publisher → %s  topic=js8/decode\n", endpoint);
     }
 }
 
@@ -438,14 +438,13 @@ void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
     {
         std::lock_guard<std::mutex> lk(zmq_mutex_);
         if (zmq_port_ > 0) {
-            zmq::message_t zmsg(buf, len);
-            auto result = zmq_pub_.send(zmsg, zmq::send_flags::dontwait);
+            zmq::message_t topic("js8/decode", 10);
+            zmq::message_t payload(buf, len);
+            zmq_pub_.send(topic, zmq::send_flags::sndmore);
+            auto result = zmq_pub_.send(payload, zmq::send_flags::dontwait);
             if (!result)
                 fprintf(stderr, "[JS8] ZMQ send queue full, dropped: %s\n", text);
         }
-        if (broadcast_callback_)
-            broadcast_callback_(from_call && from_call[0] ? from_call : text,
-                                freq_hz, snr, unix_time);
     }
 }
 

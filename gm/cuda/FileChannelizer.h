@@ -44,12 +44,6 @@ public:
         return &hfBufferPosition;
     }
 
-    void setTimingCallback(std::function<void(float, float, uint32_t)>) {}
-    void broadcastTiming(float, float, uint32_t) {}
-    void broadcastJS8Timing(float, uint32_t) {}
-    void broadcastDecode(const char*, float, float, double, const char* = "FT8") {}
-    void broadcastWaterfall(const uint8_t*, int) {}
-
 private:
     static const int BUFFERS = 16;
 

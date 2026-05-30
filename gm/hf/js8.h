@@ -24,17 +24,11 @@ public:
     // Does CPU BP decode → CRC-12 → message extract → ZMQ publish.
     void decodeAndPublishContinuous(gm::cuda::ContScanResult& r);
 
-    // Optional SSE broadcast callback (same signature as FT8's).
-    void setBroadcastCallback(std::function<void(const char*, float, float, double)> cb) {
-        broadcast_callback_ = std::move(cb);
-    }
-
 private:
     int zmq_port_;
     zmq::context_t zmq_ctx_;
     zmq::socket_t  zmq_pub_;
     std::mutex     zmq_mutex_;
-    std::function<void(const char*, float, float, double)> broadcast_callback_;
 
     // Per-epoch dedup: cleared when JS8 epoch (floor(unix/15)) rolls over.
     std::unordered_set<std::string> seen_this_epoch_;

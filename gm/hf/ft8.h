@@ -40,12 +40,6 @@ public:
     // Called from contWorker via the FT8Cuda decode callback.
     void decodeAndPublishContinuous(gm::cuda::ContScanResult& r);
 
-    // Register callback invoked by publishDecoded for each decoded message.
-    // Used by HFRx.cc to wire SSE broadcast into HFChannelizer.
-    void setBroadcastCallback(std::function<void(const char*, float, float, double)> cb) {
-        broadcast_callback_ = std::move(cb);
-    }
-
 private:
     monitor_t mon;
     gm::buffer::BufferPosition<uint8_t>* inPos;
@@ -57,7 +51,6 @@ private:
     zmq::socket_t  zmq_pub;
     std::mutex     zmq_mutex_;
     FILE*          timing_log_;
-    std::function<void(const char*, float, float, double)> broadcast_callback_;
 
     // Dedup for continuous-scan stdout prints: key=(text|freq_bucket) → last print time.
     // Suppresses re-printing the same decode within 20 seconds.

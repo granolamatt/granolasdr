@@ -310,43 +310,6 @@ void HFChannelizer::audioWorker() {
     }
 }
 
-void HFChannelizer::broadcastWaterfall(const uint8_t* data, int len) {
-    std::string frame(reinterpret_cast<const char*>(data), len);
-    std::lock_guard<std::mutex> lk(ws_mutex_);
-    for (auto& q : ws_queues_) q->push(frame);
-}
-
-void HFChannelizer::broadcastDecode(const char* call, float freq_hz, float snr, double unix_time,
-                                    const char* mode) {
-    char buf[288];
-    int len = snprintf(buf, sizeof(buf),
-        "data: {\"type\":\"decode\",\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"mode\":\"%s\"}\n\n",
-        call, (double)freq_hz, (double)snr, unix_time, mode);
-    std::string frame(buf, len);
-    std::lock_guard<std::mutex> lk(sse_mutex_);
-    for (auto& q : sse_queues_) q->push(frame);
-}
-
-void HFChannelizer::broadcastTiming(float scan_ms, float ldpc_ms, uint32_t n) {
-    char buf[128];
-    int len = snprintf(buf, sizeof(buf),
-        "data: {\"type\":\"timing\",\"scan_ms\":%.1f,\"ldpc_ms\":%.1f,\"n\":%u}\n\n",
-        (double)scan_ms, (double)ldpc_ms, (unsigned)n);
-    std::string frame(buf, len);
-    std::lock_guard<std::mutex> lk(sse_mutex_);
-    for (auto& q : sse_queues_) q->push(frame);
-}
-
-void HFChannelizer::broadcastJS8Timing(float scan_ms, uint32_t n) {
-    char buf[128];
-    int len = snprintf(buf, sizeof(buf),
-        "data: {\"type\":\"js8timing\",\"scan_ms\":%.1f,\"n\":%u}\n\n",
-        (double)scan_ms, (unsigned)n);
-    std::string frame(buf, len);
-    std::lock_guard<std::mutex> lk(sse_mutex_);
-    for (auto& q : sse_queues_) q->push(frame);
-}
-
 void HFChannelizer::controlWorker() {
     using json = nlohmann::json;
     httplib::Server svr;
@@ -460,46 +423,6 @@ void HFChannelizer::controlWorker() {
         std::string html((std::istreambuf_iterator<char>(f)),
                           std::istreambuf_iterator<char>());
         res.set_content(html, "text/html");
-    });
-
-    svr.Get("/events", [this](const httplib::Request&, httplib::Response& res) {
-        res.set_header("Cache-Control", "no-cache");
-        res.set_header("Access-Control-Allow-Origin", "*");
-        auto q = std::make_shared<SseQueue>();
-        {
-            std::lock_guard<std::mutex> lk(sse_mutex_);
-            sse_queues_.push_back(q);
-        }
-        res.set_chunked_content_provider("text/event-stream",
-            [q](size_t, httplib::DataSink& sink) -> bool {
-                std::string frame = q->pop();
-                return sink.write(frame.data(), frame.size());
-            },
-            [this, q](bool) {
-                std::lock_guard<std::mutex> lk(sse_mutex_);
-                sse_queues_.erase(
-                    std::remove(sse_queues_.begin(), sse_queues_.end(), q),
-                    sse_queues_.end());
-            });
-    });
-
-    svr.WebSocket("/waterfall", [this](const httplib::Request&, httplib::ws::WebSocket& ws) {
-        auto q = std::make_shared<SseQueue>();
-        {
-            std::lock_guard<std::mutex> lk(ws_mutex_);
-            ws_queues_.push_back(q);
-        }
-        while (ws.is_open()) {
-            std::string frame = q->pop(); // blocks up to 15s
-            if (frame == ": keep-alive\n\n") continue; // heartbeat timeout, check is_open
-            if (!ws.send(frame.data(), frame.size())) break;
-        }
-        {
-            std::lock_guard<std::mutex> lk(ws_mutex_);
-            ws_queues_.erase(
-                std::remove(ws_queues_.begin(), ws_queues_.end(), q),
-                ws_queues_.end());
-        }
     });
 
     printf("Control server: http://%s:%d/\n", ctrl_host_.c_str(), ctrl_port_);

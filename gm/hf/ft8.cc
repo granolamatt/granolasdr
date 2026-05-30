@@ -483,13 +483,11 @@ namespace hf {
         load_monitor(&mon);
 
         if (zmq_port > 0) {
-            std::string endpoint = "tcp://*:" + std::to_string(zmq_port);
-            printf("FT8 ZMQ binding to %s ...\n", endpoint.c_str());
-            fflush(stdout);
-            zmq_pub.bind(endpoint);
-            printf("FT8 ZMQ publisher bound to %s\n", endpoint.c_str());
+            std::string endpoint = "tcp://localhost:" + std::to_string(zmq_port);
+            zmq_pub.connect(endpoint);
+            printf("FT8 ZMQ publisher → %s  topic=ft8/decode\n", endpoint.c_str());
         } else {
-            printf("FT8 ZMQ disabled (decode counts in stdout only)\n");
+            printf("FT8 ZMQ disabled (stdout only)\n");
         }
 
         timing_log_ = fopen("ft8_timing.csv", "a");
@@ -517,13 +515,13 @@ namespace hf {
         {
             std::lock_guard<std::mutex> lk(zmq_mutex_);
             if (zmq_port_ > 0) {
-                zmq::message_t msg(buf, len);
-                auto result = zmq_pub.send(msg, zmq::send_flags::dontwait);
+                zmq::message_t topic("ft8/decode", 10);
+                zmq::message_t payload(buf, len);
+                zmq_pub.send(topic, zmq::send_flags::sndmore);
+                auto result = zmq_pub.send(payload, zmq::send_flags::dontwait);
                 if (!result)
-                    fprintf(stderr, "ZMQ send: queue full, decode dropped for %s\n", callsign);
+                    fprintf(stderr, "[FT8] ZMQ send queue full, dropped: %s\n", callsign);
             }
-            if (broadcast_callback_)
-                broadcast_callback_(callsign, freq_hz, snr, unix_time);
         }
 
         if (timing_log_) {

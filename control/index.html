@@ -101,7 +101,7 @@
 <ul id="decode-list"></ul>
 
 <!-- wideband waterfall -->
-<h2>wideband waterfall <span id="wf-status" style="color:#555;font-size:0.8em">disconnected</span></h2>
+<h2>wideband waterfall</h2>
 <canvas id="waterfall" width="2048" height="200" style="width:100%;image-rendering:pixelated;display:block;border:1px solid #333;"></canvas>
 <div id="wf-bands" style="position:relative;height:16px;font-size:0.7em;color:#666;margin-bottom:8px;"></div>
 
@@ -110,7 +110,7 @@
 <div id="sinks"></div>
 
 <div class="status-bar">
-  <span><span id="sse-dot"></span>SSE <span id="sse-status">disconnected</span></span>
+  <span><span id="sse-dot"></span>WS bus <span id="sse-status">disconnected</span></span>
   <span>last poll: <span id="status-bar">—</span></span>
 </div>
 
@@ -217,19 +217,28 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// SSE connection
-function connectSSE() {
+// ZMQ bus WebSocket connection (ws_bridge.py on port 8765)
+function connectBus() {
   const dot = document.getElementById('sse-dot');
   const status = document.getElementById('sse-status');
-  const es = new EventSource('/events');
-  es.onopen = () => { dot.className = 'on'; status.textContent = 'connected'; };
-  es.onerror = () => { dot.className = ''; status.textContent = 'reconnecting…'; };
-  es.onmessage = (e) => {
+  const ws = new WebSocket(`ws://${location.hostname}:8765`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen  = () => { dot.className = 'on'; status.textContent = 'connected'; };
+  ws.onerror = () => { dot.className = ''; status.textContent = 'error'; };
+  ws.onclose = () => {
+    dot.className = ''; status.textContent = 'reconnecting…';
+    setTimeout(connectBus, 3000);
+  };
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      requestAnimationFrame(() => appendWaterfallRow(new Uint8Array(e.data)));
+      return;
+    }
     let ev;
     try { ev = JSON.parse(e.data); } catch(_) { return; }
-    if (ev.type === 'decode') addDecode(ev);
-    else if (ev.type === 'timing') updateTiming(ev);
-    else if (ev.type === 'js8timing') updateJS8Timing(ev);
+    if (ev.topic === 'ft8/decode' || ev.topic === 'js8/decode') addDecode(ev);
+    else if (ev.topic === 'ft8/timing') updateTiming(ev);
+    else if (ev.topic === 'js8/timing') updateJS8Timing(ev);
   };
 }
 
@@ -364,30 +373,12 @@ function appendWaterfallRow(bytes) {
   wfCtx.putImageData(frame, 0, 0);
 }
 
-function connectWaterfall() {
-  const statusEl = document.getElementById('wf-status');
-  const ws = new WebSocket(`ws://${location.host}/waterfall`);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen  = () => { statusEl.textContent = 'connected'; statusEl.style.color = '#98e890'; };
-  ws.onerror = () => { statusEl.textContent = 'error'; statusEl.style.color = '#e87070'; };
-  ws.onclose = () => {
-    statusEl.textContent = 'reconnecting…';
-    statusEl.style.color = '#555';
-    setTimeout(connectWaterfall, 3000);
-  };
-  ws.onmessage = (e) => {
-    if (!(e.data instanceof ArrayBuffer)) return;
-    requestAnimationFrame(() => appendWaterfallRow(new Uint8Array(e.data)));
-  };
-}
-
 async function init() {
   await loadPresets();
   await refreshStatus();
   setInterval(refreshStatus, 2000);
-  connectSSE();
   initWaterfall();
-  connectWaterfall();
+  connectBus();
 }
 init();
 </script>
