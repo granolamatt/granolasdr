@@ -125,7 +125,7 @@ def upload(rx_call, rx_grid, rig, reports, seq, session_id, include_templates, h
     pkt = build_packet(rx_call, rx_grid, rig, reports, seq, session_id, include_templates)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.sendto(pkt, (host, port))
-    print(f"[psk] {len(reports)} reports → {host}:{port}  "
+    print(f"[psk] uploaded {len(reports)} reports → {host}:{port}  "
           f"seq={seq}  {len(pkt)}B  templates={'yes' if include_templates else 'no'}")
 
 
@@ -140,6 +140,8 @@ def main():
                     help="Send to port 14739 (packet analyzer) instead of 4739")
     ap.add_argument("--send-test-packet", action="store_true",
                     help="Send one dummy packet immediately to port 14739 and exit")
+    ap.add_argument("--interval", type=int, default=UPLOAD_INTERVAL_SEC, metavar="SEC",
+                    help=f"Upload interval in seconds (default: {UPLOAD_INTERVAL_SEC})")
     args = ap.parse_args()
 
     rx_call    = args.call.upper()
@@ -171,28 +173,31 @@ def main():
     print(f"[psk] receiver {rx_call} / {rx_grid}  rig: {rx_rig}")
     print(f"[psk] session_id=0x{session_id:08X}")
     print(f"[psk] ZMQ XPUB tcp://localhost:{args.xpub} → {PSK_HOST}:{psk_port}")
-    print(f"[psk] uploading every {UPLOAD_INTERVAL_SEC}s")
+    print(f"[psk] uploading every {args.interval}s")
 
     pending: list[dict] = []
     last_upload = time.time()
-
     while True:
-        if sub.poll(timeout=1000):
+        sub.poll(timeout=1000)
+        while True:
             try:
                 frames = sub.recv_multipart(zmq.NOBLOCK)
-                if len(frames) != 2:
-                    pass
-                else:
-                    topic, payload = frames
-                    mode = "JS8" if topic == b"js8/decode" else "FT8"
-                    msg = json.loads(payload)
-                    msg.setdefault("mode", mode)
-                    if msg.get("call") and not msg["call"].startswith("Error"):
-                        pending.append(msg)
-            except (zmq.Again, json.JSONDecodeError):
+            except zmq.Again:
+                break
+            if len(frames) != 2:
+                continue
+            topic, payload = frames
+            try:
+                mode = "JS8" if topic == b"js8/decode" else "FT8"
+                msg = json.loads(payload)
+                msg.setdefault("mode", mode)
+                call = msg.get("call", "")
+                if call and not call.startswith("Error"):
+                    pending.append(msg)
+            except json.JSONDecodeError:
                 pass
 
-        if time.time() - last_upload >= UPLOAD_INTERVAL_SEC and pending:
+        if time.time() - last_upload >= args.interval and pending:
             # Send templates in first 3 packets and then once per hour
             include_tmpl = packets_sent < 3 or time.time() - last_template_time >= 3600
             if include_tmpl:
@@ -208,7 +213,7 @@ def main():
                 last_upload = time.time()
             except OSError as e:
                 print(f"[psk] upload failed ({e}), retrying in 30s ({len(pending)} reports buffered)")
-                last_upload = time.time() - UPLOAD_INTERVAL_SEC + 30
+                last_upload = time.time() - args.interval + 30
 
 
 if __name__ == "__main__":

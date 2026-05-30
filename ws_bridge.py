@@ -77,7 +77,7 @@ async def main():
                     await ws.send(msg)
                 except Exception:
                     dead.add(ws)
-            clients -= dead
+            clients.difference_update(dead)
 
     server = await websockets.serve(handle_client, args.host, args.ws_port)
     print(f"[ws_bridge] ZMQ XPUB  tcp://localhost:{args.xpub}")
