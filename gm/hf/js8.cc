@@ -8,6 +8,7 @@
 #include <string>
 
 #include "gm/hf/js8.h"
+#include "gm/hf/jsc.h"
 #include "gm/hf/ft8_capture.h"
 #include "gm/hf/hf_bands.h"
 #include "ft8_lib/ft8/constants.h"
@@ -317,7 +318,11 @@ static std::string decodeJs8Message(const uint8_t* info, std::string* from_call)
     // 72 bits are payload (no packed_flag header), flagged here not in bits[0].
     int i3bit = (int)bits_to_int(info, 72, 3);
     if (i3bit & 4) {
-        return extractMessage12(info) + " [data]";
+        // Fast-data: all 72 bits are JSC content; last 0 bit is end-of-data marker.
+        int last_zero = 71;
+        while (last_zero > 0 && info[last_zero]) last_zero--;
+        std::string text = jsc_decompress(info, last_zero);
+        return text.empty() ? "[data]" : text;
     }
 
     // Bits 0-2: frame sub-type (packed_flag).
@@ -333,7 +338,8 @@ static std::string decodeJs8Message(const uint8_t* info, std::string* from_call)
         }
         if (K <= 1 || K - 2 <= 0) return "[data]";
         if (compressed) {
-            return "[data compressed]";
+            std::string text = jsc_decompress(info + 2, K - 2);
+            return text.empty() ? "[data]" : text;
         }
         std::string text = huffDecode(info + 2, K - 2);
         return text.empty() ? "[data]" : text;

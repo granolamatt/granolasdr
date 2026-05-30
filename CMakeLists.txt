@@ -71,6 +71,9 @@ set(GM_SOURCES
     "gm/zmqcode/zmqworker.cc"
     "gm/hf/ft8.cc"
     "gm/hf/js8.cc"
+    "gm/hf/jsc.cc"
+    "gm/hf/jsc_map.cc"
+    "gm/hf/jsc_list.cc"
     "gm/zmqcode/ZMQPub.cc")
 
 set(GM_LIBS ${LIBLOC} ${LIBLOG} sddc ${LIBUSB} zmq)
