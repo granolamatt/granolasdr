@@ -43,6 +43,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/FT8SoftCuda.cu"
     "gm/cuda/FT8LdpcCuda.cu"
     "gm/cuda/JS8ScanCuda.cu"
+    "gm/cuda/JS8FastScanCuda.cu"
     "gm/cuda/JS8LdpcCuda.cu"
     "gm/cuda/JS8SoftCuda.cu"
     "gm/cuda/WaterfallKernel.cu"
@@ -105,6 +106,9 @@ target_link_libraries(test_ldpc_captures ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/lib
 
 add_executable(test_js8_wav test/test_js8_wav.cc ft8_lib/fft/kiss_fft.c)
 target_link_libraries(test_js8_wav gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
+
+add_executable(test_js8_fast_wav test/test_js8_fast_wav.cc ft8_lib/fft/kiss_fft.c)
+target_link_libraries(test_js8_fast_wav gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
 
 
 #adb push cudatest /data/local/develop/

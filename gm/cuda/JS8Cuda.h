@@ -12,26 +12,53 @@
 namespace gm {
 namespace cuda {
 
-// JS8 Normal decode orchestrator.
-//
-// Reads from the shared mag ring (DeviceRingBuffer) — no second RFFT.
-// Runs its own cont scan loop (stride=6, ~1/sec) on a separate CUDA stream.
-class JS8Cuda {
+// Non-template base: exposes only what JS8 (the CPU decode class) needs.
+// Allows JS8 to hold a JS8Cuda<N>* without knowing N.
+class JS8CudaBase {
 public:
-    explicit JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
-                     float min_score = 5.0f, int zmq_port = 0);
-    ~JS8Cuda();
+    virtual ~JS8CudaBase() = default;
+    virtual void setDecodeCallback(std::function<void(ContScanResult&)> cb) = 0;
+    virtual void start() = 0;
+    virtual void stop()  = 0;
+};
 
-    void setDecodeCallback(std::function<void(ContScanResult&)> cb) {
+// Scan kernel function pointer type — matches js8_gpu_scan and js8_fast_gpu_scan.
+// Parameterizes which Costas pattern (ORIGINAL vs MODIFIED) the scan uses.
+using JS8ScanFn = void(*)(
+    const uint8_t*, int, int,
+    int32_t*, uint8_t*, uint8_t*, uint8_t*,
+    int16_t*, uint32_t*, uint32_t,
+    int, int, int, int, float,
+    cudaStream_t);
+
+// JS8 decode orchestrator. N = ring depth (200 for Normal, 100 for Fast).
+// scan_fn   : js8_gpu_scan (ORIGINAL Costas) or js8_fast_gpu_scan (MODIFIED Costas).
+// time_osr  : time over-sampling ratio (4 for Normal, 2 for Fast).
+// freq_osr  : freq over-sampling ratio (4 for Normal, 2 for Fast).
+// cap_blocks: symbols+guard window in ring slots (106 for Normal, 100 for Fast).
+template<int N>
+class JS8Cuda : public JS8CudaBase {
+public:
+    explicit JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
+                     float min_score, int zmq_port,
+                     JS8ScanFn scan_fn,
+                     int time_osr, int freq_osr, int cap_blocks);
+    ~JS8Cuda() override;
+
+    void setDecodeCallback(std::function<void(ContScanResult&)> cb) override {
         decode_callback_ = std::move(cb);
     }
 
-    void start();
-    void stop();
+    void start() override;
+    void stop()  override;
 
 private:
-    const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
-    float    min_score_;
+    const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring_;
+    float      min_score_;
+    JS8ScanFn  scan_fn_;
+    int        time_osr_;
+    int        freq_osr_;
+    int        cap_blocks_;
 
     cudaStream_t js8_scan_stream_{};
 
@@ -70,6 +97,9 @@ private:
     void scanLoop();
     void workerLoop();
 };
+
+extern template class JS8Cuda<200>;
+extern template class JS8Cuda<100>;
 
 } // namespace cuda
 } // namespace gm

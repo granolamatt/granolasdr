@@ -1,6 +1,6 @@
 # TODOS
 
-Updated 2026-05-30.
+Updated 2026-05-31.
 
 ## Remaining Phase 12 work
 
@@ -14,10 +14,22 @@ complete. The following items remain from the original Phase 12 list:
   Gives ~7 kHz/bin across the amateur HF window with no canvas changes.
 
 - **CUDA error checking**: add `cudaGetLastError()` checks to FT8Cuda + JS8Cuda
-  kernel launches (MagBlock already has this from Phase 11).
+  kernel launches (MagBlock already has this from Phase 11). Phase 13 adds
+  JS8FastScanCuda and extends JS8Cuda to a template — all three new kernel
+  launch sites need the same treatment. T6 in Phase 13 implementation tasks.
 
 - **Corpus re-enable**: MagBlock exposes `demodFT8_d` callback so a
   `--record`-based corpus capture path can be used for JTDX/WSJT-X comparison.
+
+## Phase 13+ ZMQ port configurability
+
+ZMQ ports for Fast/Slow/Turbo/Ultra modes (5591-5594) are hardcoded in HFRx.cc.
+If any downstream tooling already uses these ports, there's a silent conflict.
+
+- Add `--js8-fast-port`, `--js8-slow-port`, `--js8-turbo-port` CLI args to HFRx.cc
+  with defaults 5591/5592/5593. Same pattern as existing `--min-score` arg.
+- Three lines of argparse per mode; trivially done when the mode is wired in.
+- Deferred from Phase 13 eng review (outside voice Point 5).
 
 ## QP-ADMM vs BP convergence baseline
 

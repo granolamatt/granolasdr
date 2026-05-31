@@ -12,7 +12,7 @@
 #include "gm/hf/band_map.h"
 #include "ft8_lib/ft8/constants.h"
 #include "gm/cuda/FT8Cuda.h"       // ContScanResult, CONT_CAND_MAX
-#include "gm/cuda/JS8Cuda.h"
+#include "gm/cuda/JS8Cuda.h"       // JS8CudaBase, JS8ScanFn
 #include "gm/cuda/JS8LdpcCuda.h"   // js8_ldpc_decode_cpu
 
 // ---- CRC-12: poly 0xC06, augmented, XOR key 42 -----------------------------
@@ -402,8 +402,11 @@ static std::string decodeJs8Message(const uint8_t* info, std::string* from_call)
 namespace gm {
 namespace hf {
 
-JS8::JS8(gm::cuda::JS8Cuda* js8cuda, int zmq_port)
+JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
+         float symbol_period, float cycle_secs, int time_osr, int rfft_size)
     : zmq_port_(zmq_port),
+      symbol_period_(symbol_period), cycle_secs_(cycle_secs),
+      time_osr_(time_osr), rfft_size_(rfft_size),
       zmq_ctx_(1),
       zmq_pub_(zmq_ctx_, zmq::socket_type::pub)
 {
@@ -462,8 +465,8 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
     auto now = std::chrono::system_clock::now();
     double unix_now = std::chrono::duration<double>(now.time_since_epoch()).count();
 
-    // Clear dedup set when JS8 epoch (15 s) rolls over.
-    uint64_t epoch = (uint64_t)(unix_now / 15.0);
+    // Clear dedup set when JS8 epoch rolls over (cycle_secs_ = 15s Normal, 10s Fast).
+    uint64_t epoch = (uint64_t)(unix_now / cycle_secs_);
     if (epoch != last_epoch_) {
         seen_this_epoch_.clear();
         last_epoch_ = epoch;
@@ -489,8 +492,8 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
         if (!seen_this_epoch_.insert(dedup_key).second) continue;
 
-        float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
-        float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
+        float freq_hz  = composite_bin_to_rf_hz(r.fo[i], rfft_size_);
+        float time_sec = (r.to[i] + (float)r.ts[i] / time_osr_) * symbol_period_;
         float snr      = (float)r.score[i] - 26.0f;
 
         publishDecoded(text.c_str(), from_call.c_str(), freq_hz, snr, unix_now, time_sec);

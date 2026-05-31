@@ -9,9 +9,14 @@
 namespace gm {
 namespace cuda {
 
-JS8Cuda::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
-                 float min_score, int zmq_port)
-    : ring_(ring), min_score_(min_score), zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
+template<int N>
+JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
+                    float min_score, int zmq_port,
+                    JS8ScanFn scan_fn,
+                    int time_osr, int freq_osr, int cap_blocks)
+    : ring_(ring), min_score_(min_score),
+      scan_fn_(scan_fn), time_osr_(time_osr), freq_osr_(freq_osr), cap_blocks_(cap_blocks),
+      zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
@@ -29,7 +34,8 @@ JS8Cuda::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
     allocSlots();
 }
 
-JS8Cuda::~JS8Cuda()
+template<int N>
+JS8Cuda<N>::~JS8Cuda()
 {
     stop();
 
@@ -45,7 +51,8 @@ JS8Cuda::~JS8Cuda()
     cudaStreamDestroy(js8_scan_stream_);
 }
 
-void JS8Cuda::allocSlots()
+template<int N>
+void JS8Cuda<N>::allocSlots()
 {
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
     for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
@@ -68,7 +75,8 @@ void JS8Cuda::allocSlots()
     }
 }
 
-void JS8Cuda::freeSlots()
+template<int N>
+void JS8Cuda<N>::freeSlots()
 {
     for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
         ContScanResult& s = cont_slots_[i];
@@ -90,14 +98,16 @@ void JS8Cuda::freeSlots()
     }
 }
 
-void JS8Cuda::start()
+template<int N>
+void JS8Cuda<N>::start()
 {
     running_.store(true, std::memory_order_release);
     scan_thread_   = std::thread([this]() { scanLoop(); });
     worker_thread_ = std::thread([this]() { workerLoop(); });
 }
 
-void JS8Cuda::stop()
+template<int N>
+void JS8Cuda<N>::stop()
 {
     if (!running_.load(std::memory_order_acquire)) return;
     running_.store(false, std::memory_order_release);
@@ -105,18 +115,17 @@ void JS8Cuda::stop()
     if (worker_thread_.joinable()) worker_thread_.join();
 }
 
-void JS8Cuda::scanLoop()
+template<int N>
+void JS8Cuda<N>::scanLoop()
 {
-    constexpr int RING_BLOCKS = 200;
-    constexpr int STRIDE      = 6;
-    constexpr int CAP_BLOCKS  = FT8_CAPTURE_BLOCKS;
+    constexpr int STRIDE = 6;
 
     uint64_t last_triggered = 0;
 
     while (running_.load(std::memory_order_acquire)) {
         uint64_t wi = ring_.write_idx.load(std::memory_order_acquire);
 
-        if (wi < (uint64_t)CAP_BLOCKS || wi <= last_triggered ||
+        if (wi < (uint64_t)cap_blocks_ || wi <= last_triggered ||
             wi % STRIDE != 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
@@ -132,24 +141,30 @@ void JS8Cuda::scanLoop()
         last_triggered = wi;
 
         ContScanResult& slot = cont_slots_[cw % CONTINUOUS_SLOTS];
-        int snap_start       = (int)((wi - CAP_BLOCKS) % RING_BLOCKS);
+        int snap_start       = (int)((wi - cap_blocks_) % N);
 
         cudaStreamWaitEvent(js8_scan_stream_, ring_.ready, 0);
 
-        js8_gpu_scan(
-            ring_.base_d, snap_start, RING_BLOCKS,
+        scan_fn_(
+            ring_.base_d, snap_start, N,
             slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
             slot.score_d, slot.count_d, CAND_MAX,
-            (int)ring_.num_bins, CAP_BLOCKS,
-            FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
+            (int)ring_.num_bins, cap_blocks_,
+            time_osr_, freq_osr_, min_score_,
             js8_scan_stream_);
+        {
+            cudaError_t kerr = cudaGetLastError();
+            if (kerr != cudaSuccess)
+                fprintf(stderr, "[JS8] scan kernel launch error: %s\n",
+                        cudaGetErrorString(kerr));
+        }
 
         js8_soft_symbols(
-            ring_.base_d, snap_start, RING_BLOCKS,
+            ring_.base_d, snap_start, N,
             slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
             slot.count_d, slot.log174_d,
-            (int)ring_.num_bins, CAP_BLOCKS,
-            FT8_TIME_OSR, FT8_FREQ_OSR, (int)CAND_MAX,
+            (int)ring_.num_bins, cap_blocks_,
+            time_osr_, freq_osr_, (int)CAND_MAX,
             js8_scan_stream_);
 
         cudaMemcpyAsync(slot.count,  slot.count_d,  sizeof(uint32_t),           cudaMemcpyDeviceToHost, js8_scan_stream_);
@@ -170,7 +185,8 @@ void JS8Cuda::scanLoop()
     }
 }
 
-void JS8Cuda::workerLoop()
+template<int N>
+void JS8Cuda<N>::workerLoop()
 {
     uint64_t ri = 0;
     while (running_.load(std::memory_order_acquire)) {
@@ -227,6 +243,9 @@ void JS8Cuda::workerLoop()
         cont_read_idx_.store(++ri, std::memory_order_release);
     }
 }
+
+template class JS8Cuda<200>;
+template class JS8Cuda<100>;
 
 } // namespace cuda
 } // namespace gm

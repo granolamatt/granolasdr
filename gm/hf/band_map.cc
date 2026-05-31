@@ -9,7 +9,6 @@
 
 static const int   kBandMapSize     = kNumHFBands;
 static const int   kIfftSize        = 65536;
-static const int   kFt8FftSize      = 1048576;
 static const int   kWidebandFftSize = 1400000; // 2 * NLARGE
 static const float kWbSampleRate    = 140000000.0f;
 
@@ -28,27 +27,27 @@ void init_band_map() {
     kBandMapReady = true;
 }
 
-static int band_map_ifft_bin(int freq_offset) {
-    int ifft_bin = (int)roundf((float)freq_offset * kIfftSize / kFt8FftSize);
+static int band_map_ifft_bin(int freq_offset, int rfft_size) {
+    int ifft_bin = (int)roundf((float)freq_offset * kIfftSize / rfft_size);
     if (ifft_bin < 0) ifft_bin += kIfftSize;
     return ifft_bin;
 }
 
-float composite_bin_to_rf_hz(int freq_offset) {
+float composite_bin_to_rf_hz(int freq_offset, int rfft_size) {
     init_band_map();
-    int ifft_bin = band_map_ifft_bin(freq_offset);
+    int ifft_bin = band_map_ifft_bin(freq_offset, rfft_size);
     for (int i = 0; i < kBandMapSize; ++i) {
         if (ifft_bin >= kBandMap[i].ifft_start && ifft_bin < kBandMap[i].ifft_end) {
             int wb_bin = kBandMap[i].wb_start + (ifft_bin - kBandMap[i].ifft_start);
             return (float)wb_bin * kWbSampleRate / kWidebandFftSize;
         }
     }
-    return (float)freq_offset; // fallback: return raw bin as Hz
+    return (float)freq_offset;
 }
 
-int composite_bin_to_band_idx(int freq_offset) {
+int composite_bin_to_band_idx(int freq_offset, int rfft_size) {
     init_band_map();
-    int ifft_bin = band_map_ifft_bin(freq_offset);
+    int ifft_bin = band_map_ifft_bin(freq_offset, rfft_size);
     for (int i = 0; i < kBandMapSize; ++i) {
         if (ifft_bin >= kBandMap[i].ifft_start && ifft_bin < kBandMap[i].ifft_end)
             return i;

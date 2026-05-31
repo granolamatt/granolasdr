@@ -10,6 +10,8 @@
 #include "gm/cuda/MagBlock.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8Cuda.h"
+#include "gm/cuda/JS8ScanCuda.h"
+#include "gm/cuda/JS8FastScanCuda.h"
 #include "gm/hf/ft8.h"
 #include "gm/hf/js8.h"
 #include "gm/buffer/BufferFile.h"
@@ -28,11 +30,11 @@ static void runProxy() {
 }
 
 static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
-                        float min_score, bool enable_js8) {
+                        float min_score, bool enable_js8, bool enable_js8_fast) {
 
     // RAII order: MagBlock owns ring memory; FT8Cuda/JS8Cuda hold const refs.
     // C++ destroys in reverse declaration order (scanners before ring).
-    gm::cuda::MagBlock magblock(&buf, kProxyXSubPort);
+    gm::cuda::MagBlock<200> magblock(&buf, 1048576, 4, 4, kProxyXSubPort);
     magblock.start();
 
     gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
@@ -41,12 +43,29 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort);
     ft8.start();
 
-    std::unique_ptr<gm::cuda::JS8Cuda> js8channel;
-    std::unique_ptr<gm::hf::JS8>       js8_obj;
+    std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
+    std::unique_ptr<gm::hf::JS8>            js8_obj;
     if (enable_js8) {
-        js8channel = std::make_unique<gm::cuda::JS8Cuda>(
-            magblock.getRing(), min_score, kProxyXSubPort);
-        js8_obj = std::make_unique<gm::hf::JS8>(js8channel.get(), kProxyXSubPort);
+        js8channel = std::make_unique<gm::cuda::JS8Cuda<200>>(
+            magblock.getRing(), min_score, kProxyXSubPort,
+            js8_gpu_scan, 4, 4, 106);
+        js8_obj = std::make_unique<gm::hf::JS8>(
+            js8channel.get(), 5590, 0.160f, 15.0f, 4, 1048576);
+    }
+
+    std::unique_ptr<gm::cuda::MagBlock<100>>  magblock_fast;
+    std::unique_ptr<gm::cuda::JS8Cuda<100>>   js8fast_channel;
+    std::unique_ptr<gm::hf::JS8>              js8fast_obj;
+    if (enable_js8_fast) {
+        magblock_fast = std::make_unique<gm::cuda::MagBlock<100>>(
+            &buf, 655360, 2, 2, 0);
+        magblock_fast->start();
+
+        js8fast_channel = std::make_unique<gm::cuda::JS8Cuda<100>>(
+            magblock_fast->getRing(), min_score, kProxyXSubPort,
+            js8_fast_gpu_scan, 2, 2, 100);
+        js8fast_obj = std::make_unique<gm::hf::JS8>(
+            js8fast_channel.get(), 5591, 0.100f, 10.0f, 2, 655360);
     }
 
     while (true) {
@@ -57,10 +76,11 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
 
 int main(int argc, char* argv[]) {
 
-    bool        enable_js8     = false;
-    std::string ctrl_host      = "127.0.0.1";
-    int         ctrl_port      = 8080;
-    float       min_score      = 3.0f;
+    bool        enable_js8      = false;
+    bool        enable_js8_fast = false;
+    std::string ctrl_host       = "127.0.0.1";
+    int         ctrl_port       = 8080;
+    float       min_score       = 3.0f;
     std::string record_file;
     std::string playback_file;
 
@@ -77,6 +97,9 @@ int main(int argc, char* argv[]) {
             playback_file = argv[++i];
         } else if (strcmp(argv[i], "--js8") == 0) {
             enable_js8 = true;
+        } else if (strcmp(argv[i], "--js8-fast") == 0) {
+            enable_js8 = true;
+            enable_js8_fast = true;
         }
     }
 
@@ -87,7 +110,7 @@ int main(int argc, char* argv[]) {
     if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
-        runPipeline(*playback.getBuffer(), min_score, enable_js8);
+        runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -102,7 +125,7 @@ int main(int argc, char* argv[]) {
             recorder->start();
         }
 
-        runPipeline(*channelizer.getBuffer(), min_score, enable_js8);
+        runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast);
     }
 
     return 0;
