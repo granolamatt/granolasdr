@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cuda_runtime.h>
 #include <cstdint>
 #include "gm/cuda/JS8ScanCuda.h"
