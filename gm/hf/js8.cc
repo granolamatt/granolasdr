@@ -403,10 +403,11 @@ namespace gm {
 namespace hf {
 
 JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
-         float symbol_period, float cycle_secs, int time_osr, int rfft_size)
+         float symbol_period, float cycle_secs, int time_osr, int rfft_size,
+         const char* mode_name)
     : zmq_port_(zmq_port),
       symbol_period_(symbol_period), cycle_secs_(cycle_secs),
-      time_osr_(time_osr), rfft_size_(rfft_size),
+      time_osr_(time_osr), rfft_size_(rfft_size), mode_name_(mode_name),
       zmq_ctx_(1),
       zmq_pub_(zmq_ctx_, zmq::socket_type::pub)
 {
@@ -414,7 +415,7 @@ JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
         char endpoint[64];
         snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", zmq_port_);
         zmq_pub_.connect(endpoint);
-        printf("[JS8] ZMQ publisher → %s  topic=js8/decode\n", endpoint);
+        printf("[%s] ZMQ publisher → %s  topic=js8/decode\n", mode_name_.c_str(), endpoint);
     }
 
     js8cuda->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
@@ -426,23 +427,23 @@ JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
 void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
                          float snr, double unix_time, float time_offset)
 {
-    printf("[JS8] DECODED: %-24s  freq=%7.0f Hz  snr=%+5.1f  offset=%+.3fs\n",
-           text, (double)freq_hz, (double)snr, (double)time_offset);
+    printf("[%s] DECODED: %-24s  freq=%7.0f Hz  snr=%+5.1f  offset=%+.3fs\n",
+           mode_name_.c_str(), text, (double)freq_hz, (double)snr, (double)time_offset);
 
     char buf[320];
     int len;
     if (from_call && from_call[0]) {
         len = snprintf(buf, sizeof(buf),
             "{\"call\":\"%s\",\"text\":\"%s\",\"freq\":%.0f,\"snr\":%.1f"
-            ",\"unix\":%.0f,\"offset\":%.3f,\"mode\":\"JS8\"}",
+            ",\"unix\":%.0f,\"offset\":%.3f,\"mode\":\"%s\"}",
             from_call, text, (double)freq_hz, (double)snr,
-            unix_time, (double)time_offset);
+            unix_time, (double)time_offset, mode_name_.c_str());
     } else {
         len = snprintf(buf, sizeof(buf),
             "{\"text\":\"%s\",\"freq\":%.0f,\"snr\":%.1f"
-            ",\"unix\":%.0f,\"offset\":%.3f,\"mode\":\"JS8\"}",
+            ",\"unix\":%.0f,\"offset\":%.3f,\"mode\":\"%s\"}",
             text, (double)freq_hz, (double)snr,
-            unix_time, (double)time_offset);
+            unix_time, (double)time_offset, mode_name_.c_str());
     }
     {
         std::lock_guard<std::mutex> lk(zmq_mutex_);

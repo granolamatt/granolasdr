@@ -16,9 +16,11 @@ public:
     // cycle_secs   : TX cycle length for dedup epoch (15.0f Normal, 10.0f Fast).
     // time_osr     : time over-sampling ratio used in the scan (4 Normal, 2 Fast).
     // rfft_size    : FFT length that produced freq-offset bins (1048576 Normal, 655360 Fast).
+    // mode_name    : value for "mode" field in ZMQ JSON ("JS8" Normal, "JS8-FAST" Fast).
     JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port = 5590,
         float symbol_period = 0.160f, float cycle_secs = 15.0f,
-        int time_osr = 4, int rfft_size = 1048576);
+        int time_osr = 4, int rfft_size = 1048576,
+        const char* mode_name = "JS8");
     ~JS8() = default;
 
     // Publish one decoded JS8 message; thread-safe.
@@ -31,11 +33,12 @@ public:
     void decodeAndPublishContinuous(gm::cuda::ContScanResult& r);
 
 private:
-    int   zmq_port_;
-    float symbol_period_;
-    float cycle_secs_;
-    int   time_osr_;
-    int   rfft_size_;
+    int         zmq_port_;
+    float       symbol_period_;
+    float       cycle_secs_;
+    int         time_osr_;
+    int         rfft_size_;
+    std::string mode_name_;
 
     zmq::context_t zmq_ctx_;
     zmq::socket_t  zmq_pub_;

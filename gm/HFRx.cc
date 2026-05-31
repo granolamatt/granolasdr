@@ -50,7 +50,7 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
             magblock.getRing(), min_score, kProxyXSubPort,
             js8_gpu_scan, 4, 4, 106);
         js8_obj = std::make_unique<gm::hf::JS8>(
-            js8channel.get(), 5590, 0.160f, 15.0f, 4, 1048576);
+            js8channel.get(), kProxyXSubPort, 0.160f, 15.0f, 4, 1048576, "JS8");
     }
 
     std::unique_ptr<gm::cuda::MagBlock<100>>  magblock_fast;
@@ -65,7 +65,7 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
             magblock_fast->getRing(), min_score, kProxyXSubPort,
             js8_fast_gpu_scan, 2, 2, 100);
         js8fast_obj = std::make_unique<gm::hf::JS8>(
-            js8fast_channel.get(), 5591, 0.100f, 10.0f, 2, 655360);
+            js8fast_channel.get(), kProxyXSubPort, 0.100f, 10.0f, 2, 655360, "JS8-FAST");
     }
 
     while (true) {
