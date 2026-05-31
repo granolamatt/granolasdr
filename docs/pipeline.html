@@ -191,7 +191,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   </div>
   <div class="stage-body wide">
     <div class="step"><span class="step-num">1</span><span class="step-text">16-bit real ADC samples, <span class="hl2">140 MS/s</span></span></div>
-    <div class="step"><span class="step-num">2</span><span class="step-text">DMA into host ring buffer, block = <span class="hl2">524,288 samples</span> = 3.75 ms</span></div>
+    <div class="step"><span class="step-num">2</span><span class="step-text">DMA into host ring buffer, block = <span class="hl2">700,000 samples</span> = 5 ms</span></div>
     <div class="step"><span class="step-num">3</span><span class="step-text">Signals <code>BufferPosition&lt;int16_t&gt;</code> — HFChannelizer thread wakes</span></div>
     <div class="note" style="margin-top:4px"><b>Playback mode</b> (<code>--playback FILE</code>): <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> reads a .dat file and feeds <code>BufferPosition&lt;complex&lt;float&gt;&gt;</code> directly into runPipeline — bypasses RX888 and HFChannelizer.</div>
   </div>
@@ -199,7 +199,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 
 <div class="arrow-row">
   <div class="arrow-line"></div><div class="arrow-head"></div>
-  <div class="arrow-label">int16_t ring · 140 MS/s · 524,288 samples/block</div>
+  <div class="arrow-label">int16_t ring · 140 MS/s · 700,000 samples/block</div>
 </div>
 
 <!-- ===== HFChannelizer ===== -->
@@ -215,36 +215,36 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <div class="step"><span class="step-num">2</span><span class="step-text hl3">Cast kernel:</span><span class="step-text"> int16 → float32, scale</span></div>
       <div class="step"><span class="step-num">3</span><span class="step-text hl3">Overlap-save wrap:</span><span class="step-text"> copy tail of previous block to start of fftInData_d</span></div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl3">R2C FFT: <span class="hl">1,048,576-pt</span></span> real → complex<br>
-        <span class="step-detail">bin width = 140,000,000 / 1,048,576 ≈ <span class="hl2">133.5 Hz/bin</span><br>
-        output: 524,288 complex bins spanning 0–70 MHz</span>
+        <span class="step-text"><span class="hl3">R2C FFT: <span class="hl">1,400,000-pt</span></span> real → complex<br>
+        <span class="step-detail">bin width = 140,000,000 / 1,400,000 = <span class="hl2">100 Hz/bin</span><br>
+        output: 700,001 complex bins spanning 0–70 MHz</span>
         </span>
       </div>
     </div>
     <div>
       <div class="step"><span class="step-num">5</span>
-        <span class="step-text"><span class="hl3">Band bin select:</span> zero-fill channelData_d[32768], then copy 10 HF bands:
+        <span class="step-text"><span class="hl3">Band bin select:</span> zero-fill channelData_d[65536], then copy 10 HF bands:
         <div class="band-grid">
-          <span class="band">160m 13480–14980</span>
-          <span class="band">80m 26212–29960</span>
-          <span class="band">60m 39920–40712</span>
-          <span class="band">40m 52424–54676</span>
-          <span class="band">30m 75644–76024</span>
-          <span class="band">20m 104856–107480</span>
-          <span class="band">17m 135324–136076</span>
-          <span class="band">15m 157284–160660</span>
-          <span class="band">12m 186420–187172</span>
-          <span class="band">10m 209712–222448</span>
+          <span class="band">160m 18000–20000</span>
+          <span class="band">80m 35000–40000</span>
+          <span class="band">60m 53300–54100</span>
+          <span class="band">40m 70000–73000</span>
+          <span class="band">30m 101000–101500</span>
+          <span class="band">20m 140000–143500</span>
+          <span class="band">17m 180680–181680</span>
+          <span class="band">15m 210000–214500</span>
+          <span class="band">12m 248900–249900</span>
+          <span class="band">10m 280000–297000</span>
         </div>
         </span>
       </div>
       <div class="step"><span class="step-num">6</span>
-        <span class="step-text"><span class="hl3">C2C IFFT: <span class="hl">32,768-pt</span></span> composite → decimated time domain<br>
-        <span class="step-detail">output rate = 140,000,000 / 32 = <span class="hl2">4,375,000 S/s</span></span>
+        <span class="step-text"><span class="hl3">C2C IFFT: <span class="hl">65,536-pt</span></span> composite → decimated time domain<br>
+        <span class="step-detail">output rate = <span class="hl2">6,553,600 S/s</span></span>
         </span>
       </div>
       <div class="step"><span class="step-num">7</span>
-        <span class="step-text"><span class="hl3">Overlap-save extract:</span> samples [8192..24576] = <span class="hl2">16,384 complex</span> → ring<br>
+        <span class="step-text"><span class="hl3">Overlap-save extract:</span> samples [16384..49152] = <span class="hl2">32,768 complex</span> → ring<br>
         </span>
       </div>
       <div class="note"><b>Record mode</b> (<code>--record FILE</code>): <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> taps this ring and writes to disk with block timing metadata for deterministic replay.</div>
@@ -254,7 +254,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 
 <div class="arrow-row">
   <div class="arrow-line"></div><div class="arrow-head"></div>
-  <div class="arrow-label">complex&lt;float&gt; ring · 4.375 MS/s · 16,384 samples/block · all HF bands packed</div>
+  <div class="arrow-label">complex&lt;float&gt; ring · 6.5536 MS/s · 32,768 samples/block · all HF bands packed</div>
 </div>
 
 <!-- ===== MagBlock ===== -->
@@ -267,8 +267,8 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <div class="stage-body">
     <div>
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text"><span class="hl">Accumulate:</span> D2D copy blocks → window until <span class="hl">buff_pos &gt; 2 × 698,880 = 1,397,760 samples</span><br>
-        <span class="step-detail">≈ 85 HFChannelizer blocks = 320 ms of data</span>
+        <span class="step-text"><span class="hl">Accumulate:</span> D2D copy blocks → window until <span class="hl">buff_pos &gt; 2 × 1,048,576 = 2,097,152 samples</span><br>
+        <span class="step-detail">≈ 64 HFChannelizer blocks = 320 ms of data</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
@@ -279,13 +279,13 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
           <table style="font-size:11px;border-collapse:collapse;margin-left:20px">
             <tr><td style="color:#6e7681;padding:1px 8px 1px 0">time offset t=0..3</td><td>start sample = t × 174,720</td></tr>
             <tr><td style="color:#6e7681;padding:1px 8px 1px 0">freq offset f=0..3</td><td>freqShift by f × 1.5625 Hz</td></tr>
-            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">each FFT</td><td style="color:#e3b341">C2C 698,880-pt → 698,880 bins</td></tr>
-            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">bin width</td><td>4,375,000 / 698,880 = <span style="color:#79c0ff">6.25 Hz</span> (1 FT8 tone)</td></tr>
+            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">each FFT</td><td style="color:#e3b341">C2C 1,048,576-pt → 1,048,576 bins</td></tr>
+            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">bin width</td><td>6,553,600 / 1,048,576 = <span style="color:#79c0ff">6.25 Hz</span> (1 FT8 tone)</td></tr>
           </table>
         </span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl">Advance:</span> buff_pos -= 698,880 samples<br>
+        <span class="step-text"><span class="hl">Advance:</span> buff_pos -= 1,048,576 samples<br>
         <span class="step-detail">= 160 ms = one FT8 symbol period → fires ~6.25×/sec</span>
         </span>
       </div>
@@ -297,15 +297,15 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
         </span>
       </div>
       <div class="step"><span class="step-num">5</span>
-        <span class="step-text"><span class="hl">D2D ring write:</span> 1 block = 4×4×698,880 = <span class="hl">11,182,080 bytes</span> → DeviceRingBuffer<br>
-        <span class="step-detail">ring wraps at N=200 slots = 2.24 GB on GPU</span>
+        <span class="step-text"><span class="hl">D2D ring write:</span> 1 block = 4×4×1,048,576 = <span class="hl">16,777,216 bytes</span> → DeviceRingBuffer<br>
+        <span class="step-detail">ring wraps at N=200 slots = 3.36 GB on GPU</span>
         </span>
       </div>
       <div class="note" style="margin-top:8px">
         <b>Ring memory layout:</b><br>
-        <code style="color:#e3b341">mag[block × block_stride + (ts×4 + fs) × 698880 + fo]</code><br>
-        block_stride = 4×4×698,880 = 11,182,080 bytes<br>
-        <span style="color:#6e7681">ts = time sub-sample [0..3]  |  fs = freq sub-sample [0..3]  |  fo = freq bin [0..698879]</span>
+        <code style="color:#e3b341">mag[block × block_stride + (ts×4 + fs) × 1048576 + fo]</code><br>
+        block_stride = 4×4×1,048,576 = 16,777,216 bytes<br>
+        <span style="color:#6e7681">ts = time sub-sample [0..3]  |  fs = freq sub-sample [0..3]  |  fo = freq bin [0..1048575]</span>
       </div>
       <div class="step" style="margin-top:8px"><span class="step-num">6</span>
         <span class="step-text"><span class="hl">Wideband waterfall:</span> → ZMQ proxy topic <code>ft8/waterfall</code></span>
