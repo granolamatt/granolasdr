@@ -7,22 +7,28 @@ A wideband HF FT8 decoder and audio server for the RX888 SDR. Simultaneously mon
 ## How it works
 
 ```
-RX888 SDR (140 MS/s real)
+RX888 SDR (140 MS/s real, int16_t)
   └─ HFChannelizer (CUDA)
-       1,400,000-pt R2C FFT → 100 Hz/bin, 200 blocks/sec
-       Selects 10 HF band slices → 65,536-pt composite IFFT
-       Output: 32,768 complex samples/slot at 6.5536 MS/s
-       Audio: 4 tunable sinks × 480 bins → 480-pt IFFT → 48 kHz ZMQ streams
-  └─ FT8Cuda (CUDA)
-       1,048,576-pt C2C FFT at 4 time × 4 freq offsets (16 FFTs/block)
-       uint8_t magnitude → 200-block GPU ring buffer (~3.4 GB VRAM)
-       Costas sync scan → candidate list (fo, to, ts, fs)
-       Soft symbol kernel → float32 LLRs for each candidate (~70 MB D2H)
-  └─ FT8 (CPU, ft8_lib)
-       LDPC BP decode → callsign extraction (no CPU candidate search)
-       Publishes JSON on tcp://*:5580 (ZMQ PUB)
-  └─ psk_uploader.py (Python)
-       Buffers decoded reports → uploads to PSKReporter every 5 min
+       1,048,576-pt R2C FFT → 10 HF band slices → 32,768-pt composite IFFT
+       Output: complex<float>, 16,384 samples/block at 4.375 MS/s
+       Audio: 4 tunable sinks → 48 kHz ZMQ streams
+  └─ MagBlock (CUDA)
+       16× C2C FFTs (4 time offsets × 4 freq offsets, 698,880-pt each)
+       uint8_t magnitude → 200-slot DeviceRingBuffer (2.24 GB VRAM)
+       Wideband waterfall → ZMQ
+  ├─ FT8Cuda (CUDA) — continuous scan every 6 blocks
+  │    Costas sync scan → candidates + soft symbol LLRs
+  │  └─ FT8 (CPU): 15s window, best-SNR per callsign, publishes ft8/decode
+  └─ JS8Cuda (CUDA, --js8) — continuous scan
+       JS8 Costas scan → candidates + LLRs
+     └─ JS8 (CPU): per-epoch dedup, publishes js8/decode
+
+ZMQ proxy bus (all modes):
+  Producers → tcp://*:5599 (XSUB)
+  Consumers ← tcp://*:5600 (XPUB)   ← subscribe here for ft8/decode, js8/decode
+
+psk_uploader.py (Python):
+  Subscribes to :5600, uploads to PSKReporter every 5 min
 ```
 
 Decoded bands: **160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m**
@@ -120,9 +126,9 @@ Frame size: 968 bytes. Frame rate: 200 Hz (240 × 200 = 48,000 samples/sec).
 ### Hardware
 
 - [RX888 MkII](https://github.com/TAPR/RX888) or compatible
-- NVIDIA GPU (tested on RTX 5060 with 8 GB VRAM; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
-- NVIDIA GPU with ≥ 8 GB VRAM (GPU ring buffer ~3.4 GB + LLR buffers ~140 MB)
-- 16 GB system RAM recommended (~70 MB pinned for LLR staging; rest for OS/driver overhead)
+- NVIDIA GPU with ≥ 4 GB VRAM (tested on RTX 5060 8 GB; `CMAKE_CUDA_ARCHITECTURES` defaults to 120)
+  - MagBlock DeviceRingBuffer: 2.24 GB GPU; LLR staging: ~50 MB
+- 8 GB system RAM recommended
 
 ### System dependencies
 
@@ -205,7 +211,7 @@ This starts the RX888 capture, CUDA processing pipeline, FT8 decoder, and REST c
 DECODED: W1AW K1ABC FN42 time_offset=0.450s freq=14074150.3Hz snr=-8.0 unix=1716000015
 ```
 
-A ZMQ PUB socket opens on `tcp://*:5580` (all interfaces) and publishes each decode as JSON. If the host is publicly reachable, firewall port 5580 — no authentication is required to subscribe.
+A ZMQ proxy opens on port 5599 (producers) and 5600 (consumers). Subscribe to port 5600 with topic prefix `ft8/` or `js8/` to receive decoded messages as JSON. If the host is publicly reachable, firewall ports 5599–5600 — no authentication is required to subscribe.
 
 ```json
 {"call":"K1ABC","freq":14074150,"snr":-8.0,"unix":1716000015,"offset":0.45}
@@ -215,7 +221,10 @@ A ZMQ PUB socket opens on `tcp://*:5580` (all interfaces) and publishes each dec
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--jtdx` | off | Capture 20m corpus WAV files for JTDX/WSJT-X comparison |
+| `--js8` | off | Enable JS8Call decoder |
+| `--record FILE` | off | Record channelizer output to a `.dat` file for later playback |
+| `--playback FILE` | off | Replay a `.dat` file instead of using a live RX888 |
+| `--min-score FLOAT` | `3.0` | Minimum Costas sync scan score threshold |
 | `--control-host` | `127.0.0.1` | Bind address for REST control server |
 | `--control-port` | `8080` | Port for REST control server and web UI |
 
@@ -230,7 +239,7 @@ python3 psk_uploader.py --call W1AW --grid DM78
 | `--call` | required | Your callsign (receiver) |
 | `--grid` | required | Your Maidenhead grid square |
 | `--rig` | `rx888` | Antenna/rig description |
-| `--port` | `5580` | ZMQ port |
+| `--xpub` | `5600` | ZMQ XPUB proxy port (consumers subscribe here) |
 | `--test` | off | Send to PSKReporter packet analyzer (port 14739) |
 | `--send-test-packet` | off | Send one dummy packet and exit |
 
@@ -280,39 +289,25 @@ Output shows:
 
 ### `compare_corpus.py` — JTDX / WSJT-X comparison
 
-The `--jtdx` flag enables corpus capture: every 15-second FT8 period, a 16-bit PCM WAV of
-the 20m band is saved to `ft8_corpus/`. This lets you run JTDX or WSJT-X on the same audio
-granolasdr processed and compare which signals each decoder found.
-
-**WAV file details**
-
-| Parameter | Value |
-|-----------|-------|
-| Band | 20m FT8 (14.074 MHz dial) |
-| Sample rate | 12,000 Hz |
-| Format | 16-bit signed PCM, mono |
-| Duration | 106 symbol-blocks ≈ 17 s per file |
-| Filename | `ft8_corpus/20m_YYYYMMDD_HHMMSS.wav` |
-
-**Workflow**
+Record a pipeline session to disk with `--record`, then replay it and simultaneously run JTDX or WSJT-X on the same signal for comparison:
 
 ```bash
-# 1. Run with corpus capture
-./build/hf_rx --jtdx 2>&1 | tee granola_decodes.txt
+# 1. Record a session
+./build/hf_rx --record /tmp/session.dat 2>&1 | tee granola_decodes.txt
 
 # 2. Subscribe to ZMQ and capture JSON decodes
 python3 -c "
 import zmq, sys
 ctx = zmq.Context()
 s = ctx.socket(zmq.SUB)
-s.connect('tcp://localhost:5580')
-s.setsockopt(zmq.SUBSCRIBE, b'')
+s.connect('tcp://localhost:5600')
+s.setsockopt(zmq.SUBSCRIBE, b'ft8/')
 while True:
-    print(s.recv_string(), flush=True)
+    topic, msg = s.recv_multipart()
+    print(msg.decode(), flush=True)
 " > granola_log.jsonl &
 
-# 3. Decode the corpus WAV files with WSJT-X or JTDX
-#    (run jt9 or wsjtx --decode on each file, redirect to ALL.TXT)
+# 3. Decode corpus WAV files (from a separate SDR capture) with WSJT-X or JTDX
 for f in ft8_corpus/*.wav; do
     jt9 --ft8 -d 3 "$f" >> ALL.TXT
 done
@@ -331,7 +326,8 @@ python3 compare_corpus.py granola_log.jsonl ALL.TXT --date 20240518
 
 | Port | Protocol | Direction | Description |
 |------|----------|-----------|-------------|
-| 5580 | ZMQ PUB | outbound | FT8 decoded messages (JSON) |
+| 5599 | ZMQ XSUB | inbound | ZMQ proxy — producers (FT8, JS8, waterfall) connect here |
+| 5600 | ZMQ XPUB | outbound | ZMQ proxy — subscribers connect here; topics: `ft8/decode`, `js8/decode`, `ft8/waterfall` |
 | 5581 | ZMQ PUB | outbound | Audio sink 0 (48 kHz PCM) |
 | 5582 | ZMQ PUB | outbound | Audio sink 1 (48 kHz PCM) |
 | 5583 | ZMQ PUB | outbound | Audio sink 2 (48 kHz PCM) |
@@ -344,20 +340,25 @@ python3 compare_corpus.py granola_log.jsonl ALL.TXT --date 20240518
 gm/
   cuda/
     HFChannelizer.cc      — CUDA channelizer; R2C FFT → 10-band composite IFFT + 4 tunable audio sinks
-    FT8Cuda.cc            — 4×4 oversampled FFT, GPU mag ring, scan dispatch, D2H
-    FT8ScanCuda.cu        — GPU Costas sync scan; outputs candidate list
+    MagBlock.cc           — 16×FFT, uint8 magnitude, DeviceRingBuffer; wideband waterfall → ZMQ
+    FT8Cuda.cc            — Continuous Costas scan; soft symbol LLRs → decode callback
+    JS8Cuda.cc            — JS8 Costas scan; soft symbol LLRs → decode callback
+    FT8ScanCuda.cu        — GPU Costas sync scan kernel; outputs candidate list
     FT8SoftCuda.cu        — GPU soft symbol kernel; outputs float32 LLRs per candidate
     HostCuda.cu           — CUDA kernels (magnitude, frequency shift)
   hf/
-    ft8.cc                — FT8 decoder thread; LDPC decode; frequency mapping; ZMQ publisher
+    ft8.cc                — FT8 decoder thread; 15s window accumulation; ZMQ publisher
+    js8.cc                — JS8 decoder thread; per-epoch dedup; ZMQ publisher
     ft8_capture.h         — FT8_TIME_OSR, FT8_FREQ_OSR, capture window constants
+  buffer/
+    BufferFile.cc/h       — Generic pipeline tape; playback or record any BufferPosition<T> edge
   rx888/                  — RX888 USB driver interface
   zmqcode/                — ZMQ server/pub utilities
 ft8_lib/                  — FT8 codec (prebuilt libft8.a)
 control/index.html        — Web UI for tuning sinks (served by hf_rx on port 8080)
 third_party/              — Vendored single-header libs: cpp-httplib, nlohmann/json
 audio_router.py           — Route 4-sink 48 kHz ZMQ audio streams to PulseAudio null sinks
-psk_uploader.py           — PSKReporter IPFIX uploader
+psk_uploader.py           — PSKReporter IPFIX uploader (subscribes to ZMQ XPUB :5600)
 compare_psk.py            — Decoder vs PSKReporter comparison tool
 compare_corpus.py         — Granolasdr vs JTDX/WSJT-X decode comparison
 check_uploads.py          — Verify PSKReporter accepted your uploads
