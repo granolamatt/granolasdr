@@ -173,16 +173,25 @@ int MagBlock<N>::doCopy(uint64_t now)
 template<int N>
 void MagBlock<N>::run()
 {
+    // demodData_d_ holds 4×rfft_length_ samples; steady-state usage is
+    // ~rfft_length_, so we have ~2×rfft_length_ / block_size blocks of safe
+    // headroom before overflow.  Use that as the real drop threshold so that
+    // OS scheduling jitter between two MagBlock threads sharing one
+    // BufferPosition condvar doesn't cause spurious drops.
+    const uint64_t block_size = inShape_.size() > 1 ? inShape_[1] : 32768;
+    const uint64_t lag_drop   = 2 * rfft_length_ / block_size;
+
     uint64_t now = inPos_->getNow(1) + 1;
     while (isRunning()) {
         uint64_t next = inPos_->getPosition(now + 1, 1);
+        uint64_t lag  = (next > now) ? (next - now) : 0;
+        if (lag > lag_drop) {
+            fprintf(stderr, "MagBlock: lag=%lu blocks (max=%lu), dropping to catch up\n",
+                    (unsigned long)lag, (unsigned long)lag_drop);
+            now = next;
+            continue;
+        }
         while (now < next) {
-            uint64_t lag = next - now;
-            if (lag > 4) {
-                fprintf(stderr, "Error Falling Behind in MagBlock::doCopy, Dropping Data\n");
-                now = next;
-                break;
-            }
             int copied = doCopy(now);
             if (!copied) exit(-200);
             now += copied;
@@ -191,7 +200,7 @@ void MagBlock<N>::run()
 }
 
 template class MagBlock<200>;
-template class MagBlock<100>;
+template class MagBlock<116>;
 
 } // namespace cuda
 } // namespace gm

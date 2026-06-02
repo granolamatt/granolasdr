@@ -2,24 +2,20 @@
 #include <cstdio>
 #include <algorithm>
 #include "gm/cuda/JS8Cuda.h"
-#include "gm/cuda/JS8ScanCuda.h"
 #include "gm/cuda/JS8SoftCuda.h"
-#include "gm/hf/ft8_capture.h"
 
 namespace gm {
 namespace cuda {
 
 template<int N>
 JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
-                    float min_score, int zmq_port,
+                    float min_score,
                     JS8ScanFn scan_fn,
-                    int time_osr, int freq_osr, int cap_blocks)
-    : ring_(ring), min_score_(min_score),
-      scan_fn_(scan_fn), time_osr_(time_osr), freq_osr_(freq_osr), cap_blocks_(cap_blocks),
-      zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
+                    int time_osr, int freq_osr, int cap_blocks,
+                    const char* label)
+    : JS8CudaBase(label), ring_(ring), min_score_(min_score),
+      scan_fn_(scan_fn), time_osr_(time_osr), freq_osr_(freq_osr), cap_blocks_(cap_blocks)
 {
-    if (zmq_port > 0)
-        zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
     cudaStreamCreate(&js8_scan_stream_);
 
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
@@ -155,8 +151,8 @@ void JS8Cuda<N>::scanLoop()
         {
             cudaError_t kerr = cudaGetLastError();
             if (kerr != cudaSuccess)
-                fprintf(stderr, "[JS8] scan kernel launch error: %s\n",
-                        cudaGetErrorString(kerr));
+                fprintf(stderr, "[%s] scan kernel launch error: %s\n",
+                        label_.c_str(), cudaGetErrorString(kerr));
         }
 
         js8_soft_symbols(
@@ -178,8 +174,6 @@ void JS8Cuda<N>::scanLoop()
                         cudaMemcpyDeviceToHost, js8_scan_stream_);
 
         cudaEventRecord(slot.event, js8_scan_stream_);
-        slot_dispatch_ns_[cw % CONTINUOUS_SLOTS] =
-            std::chrono::steady_clock::now().time_since_epoch().count();
         slot.dispatched.store(true, std::memory_order_release);
         cont_write_idx_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -207,36 +201,22 @@ void JS8Cuda<N>::workerLoop()
         }
 
         if (ev == cudaSuccess) {
-            int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
-            int64_t dispatch_ns = slot_dispatch_ns_[ri % CONTINUOUS_SLOTS];
-            float scan_ms = dispatch_ns ? (now_ns - dispatch_ns) * 1e-6f : 0.0f;
-
             uint32_t n = std::min(*slot.count, CAND_MAX);
             if (n > 0) {
-                fprintf(stderr, "[JS8] scan: %u candidates  %.1f ms\n", n, (double)scan_ms);
                 if (decode_callback_) {
                     *slot.count = n;
                     try {
                         decode_callback_(slot);
                     } catch (...) {
-                        fprintf(stderr, "[JS8] decode_callback threw\n");
+                        fprintf(stderr, "[%s] decode_callback threw\n", label_.c_str());
                     }
                 }
-                {
-                    char buf[96];
-                    snprintf(buf, sizeof(buf), "{\"scan_ms\":%.1f,\"n\":%u}", scan_ms, n);
-                    std::lock_guard<std::mutex> lk(zmq_mu_);
-                    zmq::message_t t("js8/timing", 10);
-                    zmq::message_t d(buf, strlen(buf));
-                    zmq_pub_.send(t, zmq::send_flags::sndmore);
-                    zmq_pub_.send(d, zmq::send_flags::none);
-                }
             } else if (ri % 60 == 0) {
-                fprintf(stderr, "[JS8] alive: %lu scans, 0 candidates\n", (unsigned long)ri);
+                fprintf(stderr, "[%s] alive: %lu scans, 0 candidates\n", label_.c_str(), (unsigned long)ri);
             }
         } else {
-            fprintf(stderr, "[JS8] CUDA event error at slot %lu: %s\n",
-                    (unsigned long)(ri % CONTINUOUS_SLOTS), cudaGetErrorString(ev));
+            fprintf(stderr, "[%s] CUDA event error at slot %lu: %s\n",
+                    label_.c_str(), (unsigned long)(ri % CONTINUOUS_SLOTS), cudaGetErrorString(ev));
         }
 
         slot.dispatched.store(false, std::memory_order_release);
@@ -245,7 +225,7 @@ void JS8Cuda<N>::workerLoop()
 }
 
 template class JS8Cuda<200>;
-template class JS8Cuda<100>;
+template class JS8Cuda<116>;
 
 } // namespace cuda
 } // namespace gm

@@ -110,6 +110,9 @@ target_link_libraries(test_js8_wav gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/li
 add_executable(test_js8_fast_wav test/test_js8_fast_wav.cc ft8_lib/fft/kiss_fft.c)
 target_link_libraries(test_js8_fast_wav gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
 
+add_executable(test_js8_fast_gpu_scan test/test_js8_fast_gpu_scan.cc)
+target_link_libraries(test_js8_fast_gpu_scan gmcuda cudart)
+
 
 #adb push cudatest /data/local/develop/
 

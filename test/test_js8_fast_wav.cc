@@ -6,7 +6,7 @@
 // Can also read a real WAV file: ./test_js8_fast_wav [file.wav [min_score]]
 //
 // D6/D8 ring-slot requirement: 10s × 12 kHz / NSTEP(600) = 200 STFT steps = 100 symbols
-// (cap_blocks=100 for Fast).
+// (cap_blocks=108 for Fast after T10 ring resize; STFT test uses LDPC path, unaffected).
 
 #include <cstdio>
 #include <cstdlib>

@@ -17,18 +17,16 @@ private:
     using pointer = T*;
 
     uint64_t buffPosition;
-    int lastWait;
     bool running;
     pointer buffer;
     int bufferSize;
     std::vector<size_t> shape;
     std::vector<size_t> stride;
 public:
-    BufferPosition() : lastWait(0), 
-                    buffPosition(0), 
-                    buffer(NULL), 
-                    running(false), 
-                    shape({0}), 
+    BufferPosition() : buffPosition(0),
+                    buffer(NULL),
+                    running(false),
+                    shape({0}),
                     stride({sizeof(value_type)}) {}
     ~BufferPosition() {
         // {100, 1000, 1000}, // shape
@@ -80,10 +78,6 @@ public:
         }
         return buffPosition;
     }
-    int getLastWait() {
-        return lastWait;
-    }
-
     uint64_t getPosition(uint64_t desired_o, int axis=0) {
         uint64_t desired = desired_o;
         if (axis && axis < shape.size()) {
@@ -94,22 +88,12 @@ public:
             }
 
         }
-        int waitCount = 0;
         auto& sync = getSynchro(*this);
         {
             std::unique_lock<std::mutex> lk(sync.mutex);
             while (buffPosition < desired) {
                 sync.cv.wait(lk);
-                waitCount++;
             }
-        }
-        if (waitCount == 0) {
-            if (lastWait >= 100) {
-                fprintf(stderr, "Falling behind\n");
-            }
-            lastWait++;
-        } else {
-            lastWait = 0;
         }
         return getNow(axis);
     }

@@ -23,9 +23,9 @@ static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
 static void runProxy() {
     zmq::context_t ctx(1);
     zmq::socket_t xsub(ctx, ZMQ_XSUB);
-    xsub.bind("tcp://*:5599");
+    xsub.bind("tcp://*:" + std::to_string(kProxyXSubPort));
     zmq::socket_t xpub(ctx, ZMQ_XPUB);
-    xpub.bind("tcp://*:5600");
+    xpub.bind("tcp://*:" + std::to_string(kProxyXPubPort));
     zmq_proxy(xsub.handle(), xpub.handle(), nullptr);
 }
 
@@ -47,23 +47,23 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     std::unique_ptr<gm::hf::JS8>            js8_obj;
     if (enable_js8) {
         js8channel = std::make_unique<gm::cuda::JS8Cuda<200>>(
-            magblock.getRing(), min_score, kProxyXSubPort,
-            js8_gpu_scan, 4, 4, 106);
+            magblock.getRing(), min_score,
+            js8_gpu_scan, 4, 4, 106, "JS8-NORMAL");
         js8_obj = std::make_unique<gm::hf::JS8>(
             js8channel.get(), kProxyXSubPort, 0.160f, 15.0f, 4, 1048576, "JS8");
     }
 
-    std::unique_ptr<gm::cuda::MagBlock<100>>  magblock_fast;
-    std::unique_ptr<gm::cuda::JS8Cuda<100>>   js8fast_channel;
+    std::unique_ptr<gm::cuda::MagBlock<116>>  magblock_fast;
+    std::unique_ptr<gm::cuda::JS8Cuda<116>>   js8fast_channel;
     std::unique_ptr<gm::hf::JS8>              js8fast_obj;
     if (enable_js8_fast) {
-        magblock_fast = std::make_unique<gm::cuda::MagBlock<100>>(
+        magblock_fast = std::make_unique<gm::cuda::MagBlock<116>>(
             &buf, 655360, 2, 2, 0);
         magblock_fast->start();
 
-        js8fast_channel = std::make_unique<gm::cuda::JS8Cuda<100>>(
-            magblock_fast->getRing(), min_score, kProxyXSubPort,
-            js8_fast_gpu_scan, 2, 2, 100);
+        js8fast_channel = std::make_unique<gm::cuda::JS8Cuda<116>>(
+            magblock_fast->getRing(), min_score,
+            js8_fast_gpu_scan, 2, 2, 108, "JS8-FAST");
         js8fast_obj = std::make_unique<gm::hf::JS8>(
             js8fast_channel.get(), kProxyXSubPort, 0.100f, 10.0f, 2, 655360, "JS8-FAST");
     }

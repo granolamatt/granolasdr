@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>FT8 Costas Sync Scan — CUDA Kernel Diagram</title>
+<title>FT8 / JS8 Costas Sync Scan — CUDA Kernel Diagram</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -105,16 +105,6 @@
 
   /* ── 3. Score Computation ── */
   .score-diagram { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; }
-  .score-grid-wrap { display: flex; gap: 6px; }
-  .score-grid {
-    display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(5, 36px); gap: 3px;
-  }
-  .sc { border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-direction: column; gap: 1px; }
-  .sc-empty  { background: #1c2128; border: 1px solid var(--border); }
-  .sc-focus  { background: #1f3a5f; border: 2px solid var(--costas-tone); color: var(--costas-tone); }
-  .sc-fn     { background: #2d1f00; border: 1px dashed var(--yellow); color: var(--yellow); }
-  .sc-tn     { background: #1f0e2d; border: 1px dashed var(--purple); color: var(--purple); }
-  .sc-label  { font-size: 9px; font-weight: 400; }
   .score-legend { margin-top: 12px; }
   .score-legend p { font-size: 12px; color: var(--muted); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
   .swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
@@ -176,12 +166,18 @@
   .tag-c { background: #1f3a5f; color: var(--costas-tone); border: 1px solid var(--costas-tone); }
   .tag-d { background: var(--data-bg); color: var(--green); border: 1px solid #2a4a2a; }
   .tag-s { background: #2d1f00; color: var(--yellow); border: 1px solid var(--yellow); }
+
+  /* ── 7. JS8 table ── */
+  .cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cmp-table th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; }
+  .cmp-table td { padding: 7px 12px; border-bottom: 1px solid #21262d; }
+  .cmp-table td:first-child { color: var(--muted); }
 </style>
 </head>
 <body>
 
-<h1>ft8SyncScanKernel — Costas Sync Algorithm</h1>
-<p class="subtitle">GPU Costas array correlation for FT8 sync detection &nbsp;·&nbsp; <code>gm/cuda/FT8ScanCuda.cu</code></p>
+<h1>ft8SyncScanKernel / js8SyncScanKernel — Costas Sync Algorithm</h1>
+<p class="subtitle">GPU max-log 8-FSK Costas correlation for FT8 &amp; JS8 sync detection &nbsp;·&nbsp; <code>gm/cuda/FT8ScanCuda.cu</code> &amp; <code>gm/cuda/JS8ScanCuda.cu</code></p>
 
 <!-- ──────────────────────── SECTION 1: FT8 Frame ──────────────────────── -->
 <div class="section">
@@ -200,7 +196,7 @@
 
 <!-- ──────────────────────── SECTION 2: Costas Pattern ──────────────────────── -->
 <div class="section">
-  <h2>2 &nbsp;Costas Tone Pattern — <code>kCostas[7] = {3, 1, 4, 0, 6, 5, 2}</code></h2>
+  <h2>2 &nbsp;FT8 Costas Tone Pattern — <code>kCostas[7] = {3, 1, 4, 0, 6, 5, 2}</code></h2>
   <div class="costas-grid-wrap">
     <div style="display:flex;gap:0;align-items:flex-start;">
       <div>
@@ -217,17 +213,17 @@
       <p>Each Costas symbol <em>k</em> transmits on a single 8-FSK tone bin <code>sm = kCostas[k]</code> (0–7 within the 8-tone group). The pattern forms a Costas array — no two symbols share a row, column, or diagonal, making it easy to distinguish from noise even at low SNR.</p>
 
       <div class="code-block">
-<span class="kw">static __constant__</span> uint8_t kCostas[<span class="num">7</span>] = {<span class="num">3, 1, 4, 0, 6, 5, 2</span>}; <span class="cmt">// tone bin per symbol</span><br>
+<span class="kw">static __constant__</span> uint8_t kCostas[<span class="num">7</span>] = {<span class="num">3, 1, 4, 0, 6, 5, 2</span>}; <span class="cmt">// FT8 tone bin per sync symbol</span><br>
 <br>
 <span class="cmt">// per symbol k:</span><br>
-<span class="kw">int</span> sm  = kCostas[k];           <span class="cmt">// expected freq bin (0–6)</span><br>
-<span class="kw">int</span> si  = (m<span class="num">*7</span>+k) * WINDOW + threadIdx.x; <span class="cmt">// smem base</span><br>
-<span class="kw">int</span> cur = smem[si + sm];        <span class="cmt">// magnitude at Costas bin</span>
+<span class="kw">int</span> sm  = kCostas[k];                        <span class="cmt">// expected tone bin (0–7)</span><br>
+<span class="kw">int</span> si  = (m*<span class="num">7</span>+k) * WINDOW + threadIdx.x;    <span class="cmt">// smem slot base</span><br>
+<span class="kw">int</span> cur = smem[si + sm];                     <span class="cmt">// magnitude at Costas tone</span>
       </div>
 
       <div class="score-legend">
         <p><span class="swatch" style="background:#1f3a5f;border:1px solid var(--costas-tone)"></span> <strong style="color:var(--costas-tone)">Costas tone</strong> — expected Costas bin for symbol k</p>
-        <p><span class="swatch" style="background:#2d1f00;border:1px dashed var(--yellow)"></span> <strong style="color:var(--yellow)">Frequency neighbor</strong> — adjacent bin ±1 (contributes to score)</p>
+        <p><span class="swatch" style="background:#2d1f00;border:1px dashed var(--yellow)"></span> <strong style="color:var(--yellow)">Frequency neighbor</strong> — adjacent bin ±1 (read during best_other search)</p>
         <p><span class="swatch" style="background:transparent;border:1px solid var(--border)"></span> Empty — no energy expected here</p>
       </div>
     </div>
@@ -236,56 +232,58 @@
 
 <!-- ──────────────────────── SECTION 3: Score Computation ──────────────────────── -->
 <div class="section">
-  <h2>3 &nbsp;Score Computation — Differential Contrast</h2>
+  <h2>3 &nbsp;Score Computation — Max-Log 8-FSK</h2>
   <div class="score-diagram">
 
-    <!-- mini time×freq grid showing one symbol with its neighbors -->
+    <!-- 8-bin per-symbol visualization -->
     <div>
-      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;text-align:center;">Neighbors for one Costas symbol (time × freq)</p>
-      <div style="display:flex;gap:6px;align-items:flex-start;">
-        <div>
-          <div style="height:36px;"></div>
-          <div style="display:grid;grid-template-rows:repeat(5,36px);gap:3px;font-size:10px;color:var(--muted);text-align:right;padding-right:4px;">
-            <div style="display:flex;align-items:center;justify-content:flex-end;">sm+2</div>
-            <div style="display:flex;align-items:center;justify-content:flex-end;">sm+1</div>
-            <div style="display:flex;align-items:center;justify-content:flex-end;color:var(--costas-tone)">sm</div>
-            <div style="display:flex;align-items:center;justify-content:flex-end;">sm-1</div>
-            <div style="display:flex;align-items:center;justify-content:flex-end;">sm-2</div>
-          </div>
-        </div>
-        <div>
-          <div style="display:grid;grid-template-columns:repeat(3,60px);gap:3px;font-size:10px;color:var(--muted);text-align:center;margin-bottom:3px;">
-            <div>k-1</div><div style="color:var(--costas-tone)">k</div><div>k+1</div>
-          </div>
-          <div class="score-grid">
-            <!-- row sm+2 -->
-            <div class="sc sc-empty"></div>
-            <div class="sc sc-empty"><span style="font-size:9px;color:var(--muted)">no cmp</span></div>
-            <div class="sc sc-empty"></div>
-            <!-- row sm+1 -->
-            <div class="sc sc-empty"></div>
-            <div class="sc sc-fn"><span class="sc-label" style="color:var(--yellow)">freq+1</span></div>
-            <div class="sc sc-empty"></div>
-            <!-- row sm (Costas tone) -->
-            <div class="sc sc-tn"><span class="sc-label" style="color:var(--purple)">time-1</span></div>
-            <div class="sc sc-focus">cur<br><span class="sc-label">kCostas[k]</span></div>
-            <div class="sc sc-tn"><span class="sc-label" style="color:var(--purple)">time+1</span></div>
-            <!-- row sm-1 -->
-            <div class="sc sc-empty"></div>
-            <div class="sc sc-fn"><span class="sc-label" style="color:var(--yellow)">freq-1</span></div>
-            <div class="sc sc-empty"></div>
-            <!-- row sm-2 -->
-            <div class="sc sc-empty"></div>
-            <div class="sc sc-empty"><span style="font-size:9px;color:var(--muted)">no cmp</span></div>
-            <div class="sc sc-empty"></div>
-          </div>
-          <div style="text-align:center;font-size:10px;color:var(--muted);margin-top:4px;">symbol index k →</div>
-        </div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;text-align:center;">
+        One symbol (k=0, sm=3 for FT8): expected tone vs. best competitor
+      </p>
+      <!-- top labels -->
+      <div style="display:flex;gap:5px;margin-bottom:3px;">
+        <div style="flex:1;"></div>
+        <div style="flex:1;"></div>
+        <div style="flex:1;"></div>
+        <div style="flex:1;text-align:center;font-size:9px;color:var(--costas-tone);font-weight:600;">cur</div>
+        <div style="flex:1;text-align:center;font-size:9px;color:var(--orange);font-weight:600;">best</div>
+        <div style="flex:1;"></div>
+        <div style="flex:1;"></div>
+        <div style="flex:1;"></div>
       </div>
-      <div class="score-legend" style="margin-top:12px;">
-        <p><span class="swatch" style="background:#1f3a5f;border:1px solid var(--costas-tone)"></span><strong style="color:var(--costas-tone)">cur</strong> — magnitude at Costas tone bin</p>
-        <p><span class="swatch" style="background:#2d1f00;border:1px dashed var(--yellow)"></span><strong style="color:var(--yellow)">freq ±1</strong> — adjacent frequency bins</p>
-        <p><span class="swatch" style="background:#1f0e2d;border:1px dashed var(--purple)"></span><strong style="color:var(--purple)">time ±1</strong> — adjacent symbols (same Costas group)</p>
+      <!-- bars -->
+      <div style="display:flex;gap:5px;align-items:flex-end;height:108px;">
+        <div style="flex:1;height:22px;background:#1c2128;border:1px solid var(--border);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:15px;background:#1c2128;border:1px solid var(--border);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:25px;background:#1c2128;border:1px solid var(--border);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:90px;background:var(--costas-bg);border:2px solid var(--costas-tone);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:42px;background:#2d1800;border:2px solid var(--orange);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:18px;background:#1c2128;border:1px solid var(--border);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:12px;background:#1c2128;border:1px solid var(--border);border-radius:3px 3px 0 0;"></div>
+        <div style="flex:1;height:10px;background:#1c2128;border:1px solid var(--border);border-radius:3px 3px 0 0;"></div>
+      </div>
+      <!-- tone labels -->
+      <div style="display:flex;gap:5px;margin-top:3px;">
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--muted);">0</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--muted);">1</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--muted);">2</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--costas-tone);font-weight:600;">3=sm</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--orange);">4</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--muted);">5</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--muted);">6</div>
+        <div style="flex:1;text-align:center;font-size:10px;color:var(--muted);">7</div>
+      </div>
+      <div style="text-align:center;font-size:10px;color:var(--muted);margin-top:4px;">8-FSK tone bin →</div>
+
+      <div class="score-legend" style="margin-top:14px;">
+        <p><span class="swatch" style="background:var(--costas-bg);border:2px solid var(--costas-tone)"></span>
+           <strong style="color:var(--costas-tone)">cur</strong> — magnitude at expected Costas tone sm = kCostas[k]</p>
+        <p><span class="swatch" style="background:#2d1800;border:2px solid var(--orange)"></span>
+           <strong style="color:var(--orange)">best_other</strong> — max magnitude over all 7 other tones j ≠ sm</p>
+        <p style="font-size:12px;padding-left:2px;">
+          <strong style="color:var(--green)">score_k</strong>
+          <span style="color:var(--muted);"> = cur − best_other &nbsp;(margin over strongest competitor)</span>
+        </p>
       </div>
     </div>
 
@@ -295,35 +293,44 @@
         <span class="label">For each of 21 symbols</span> (m=0..2, k=0..6):
       </div>
       <div class="step">
-        <span class="label">sm &nbsp;=</span><span class="expr">kCostas[k]</span>
-        <span class="note">expected tone bin within 8-FSK group</span>
+        <span class="label">sm &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=</span><span class="expr"> kCostas[k]</span>
+        <span class="note">expected tone bin within 8-FSK group (0–7)</span>
       </div>
       <div class="step">
-        <span class="label">cur =</span><span class="expr">smem[slot + sm]</span>
-        <span class="note">magnitude at expected Costas bin</span>
+        <span class="label">cur &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=</span><span class="expr"> smem[slot + sm]</span>
+        <span class="note">magnitude at expected Costas tone bin</span>
       </div>
       <div class="step">
-        <span class="label">score +=</span>
-        <span class="highlight-y">(sm&gt;0) cur − smem[slot + sm−1]</span> &nbsp; <span style="color:var(--muted)">// freq below</span>
-        <span class="note">+= <span class="highlight-y">(sm&lt;7) cur − smem[slot + sm+1]</span> &nbsp;&nbsp;&nbsp; // freq above</span>
-        <span class="note">+= <span class="highlight-p">(k&gt;0) cur − smem[prev_slot + sm]</span> &nbsp; // time back</span>
-        <span class="note">+= <span class="highlight-p">(k&lt;6) cur − smem[next_slot + sm]</span> &nbsp; // time fwd</span>
+        <span class="label">best_other =</span>
+        <span class="highlight-y"> max( smem[slot + j] )</span>
+        <span class="note">over all j ∈ 0..7, j ≠ sm &nbsp;·&nbsp; strongest competing tone</span>
       </div>
       <div class="step">
-        <span class="label">score /=</span><span class="expr">num_avg</span>
-        <span class="note">normalize by number of valid comparisons</span>
+        <span class="label">score &nbsp;&nbsp;&nbsp;&nbsp;+=</span>
+        <span class="highlight-g"> cur − best_other</span>
+        <span class="note">max-log soft metric: signal margin over noise floor (int, uint8 units)</span>
+      </div>
+      <div class="step">
+        <span class="label">num_valid ++</span>
+        <span class="note">count symbols with block_abs &lt; num_blocks</span>
+      </div>
+      <div class="step">
+        <span class="label">fscore &nbsp;&nbsp;&nbsp;&nbsp;=</span><span class="expr"> (float)score / num_valid</span>
+        <span class="note">average margin per valid Costas symbol</span>
       </div>
       <div class="step" style="background:#1f3a5f;padding:8px;border-radius:4px;">
         <span class="label" style="color:var(--green)">Emit if</span>
-        <span class="expr">score ≥ min_score</span>
+        <span class="expr">fscore ≥ min_score</span>
         <span class="note" style="color:var(--muted)">→ write (fo, time_off, time_sub, freq_sub, score) via atomicAdd</span>
       </div>
       <div style="margin-top:12px;font-size:12px;color:var(--muted);line-height:1.7;">
-        <strong style="color:var(--text)">Intuition:</strong> Score measures how much the expected Costas tone
-        <em>stands out</em> from its immediate frequency and temporal neighbors.
-        A clean signal gives large positive differences; noise gives near-zero.
-        Dividing by <code>num_avg</code> normalizes partial Costas groups at the
-        frame edges.
+        <strong style="color:var(--text)">Intuition:</strong> This is the max-log soft metric for non-coherent
+        8-FSK detection. Each Costas symbol contributes the margin by which the
+        expected tone exceeds the single strongest competitor. A clean signal gives
+        large positive margins; noise keeps all eight bins roughly equal, so margins
+        stay near zero. Averaging over all 21 symbols yields a robust SNR proxy
+        computed entirely from shared memory — no further global reads after the
+        cooperative smem load.
       </div>
     </div>
   </div>
@@ -397,17 +404,125 @@
     <div class="pipe-arrow">→</div>
     <div class="pipe-step">
       <div class="ps-title">③ Score loop</div>
-      <div class="ps-body">3 Costas groups × 7 symbols; accumulate differential contrasts from smem only</div>
+      <div class="ps-body">3 Costas groups × 7 symbols; max-log 8-FSK: accumulate (cur − best_other) per symbol entirely from smem</div>
     </div>
     <div class="pipe-arrow">→</div>
     <div class="pipe-step">
       <div class="ps-title">④ Normalize</div>
-      <div class="ps-body"><code>score /= num_avg</code><br>skip if below min_score</div>
+      <div class="ps-body"><code>fscore = score / num_valid</code><br>skip if below min_score</div>
     </div>
     <div class="pipe-arrow">→</div>
     <div class="pipe-step">
       <div class="ps-title">⑤ Emit candidate</div>
       <div class="ps-body"><code>atomicAdd(cand_count)</code> → write (fo, to, ts, fs, score) to candidate arrays</div>
+    </div>
+  </div>
+</div>
+
+<!-- ──────────────────────── SECTION 7: JS8 ──────────────────────── -->
+<div class="section">
+  <h2>7 &nbsp;JS8 Normal (Mode A) — Differences from FT8</h2>
+  <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;">
+
+    <!-- JS8 Costas grid -->
+    <div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">JS8 Costas Pattern — <code style="color:var(--orange);">kCostas[7] = {4, 2, 5, 6, 1, 3, 0}</code></p>
+      <div style="display:flex;gap:0;align-items:flex-start;">
+        <div>
+          <div style="height:36px;"></div>
+          <div class="freq-nums" id="freq-nums-js8"></div>
+        </div>
+        <div>
+          <div class="sym-nums" id="sym-nums-js8"></div>
+          <div class="costas-grid" id="costas-grid-js8"></div>
+          <div class="axis-label">Symbol index k →</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comparison table + note -->
+    <div style="flex:1;min-width:320px;">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th style="color:var(--muted);">Property</th>
+            <th style="color:var(--costas-tone);">FT8</th>
+            <th style="color:var(--orange);">JS8 Normal</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>kCostas</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">{3,1,4,0,6,5,2}</td>
+            <td style="font-family:monospace;color:var(--orange);">{4,2,5,6,1,3,0}</td>
+          </tr>
+          <tr>
+            <td>Kernel name</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">ft8SyncScanKernel</td>
+            <td style="font-family:monospace;color:var(--orange);">js8SyncScanKernel</td>
+          </tr>
+          <tr>
+            <td>Score metric</td>
+            <td style="color:var(--costas-tone);">max-log 8-FSK</td>
+            <td style="color:var(--orange);">max-log 8-FSK (identical)</td>
+          </tr>
+          <tr>
+            <td>Grid dims</td>
+            <td style="color:var(--costas-tone);">ceil(num_bins/256) × 30×osr²</td>
+            <td style="color:var(--orange);">identical formula</td>
+          </tr>
+          <tr>
+            <td>Normal osr (t×f)</td>
+            <td style="color:var(--costas-tone);">4×4 → 480 y-blocks</td>
+            <td style="color:var(--orange);">4×4 → 480 y-blocks</td>
+          </tr>
+          <tr>
+            <td>num_bins (normal)</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">1,048,576</td>
+            <td style="font-family:monospace;color:var(--orange);">1,048,576 (shared ring)</td>
+          </tr>
+          <tr>
+            <td>gridDim.x (normal)</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">4,096</td>
+            <td style="font-family:monospace;color:var(--orange);">4,096</td>
+          </tr>
+          <tr>
+            <td>Total blocks (normal)</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">4,096 × 480 ≈ 2M</td>
+            <td style="font-family:monospace;color:var(--orange);">4,096 × 480 ≈ 2M</td>
+          </tr>
+          <tr>
+            <td>CAND_MAX</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">1,000 (CONT_CAND_MAX)</td>
+            <td style="font-family:monospace;color:var(--orange);">2,048</td>
+          </tr>
+          <tr>
+            <td>Ring size N</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">200</td>
+            <td style="font-family:monospace;color:var(--orange);">200 (Normal) / 116 (Fast)</td>
+          </tr>
+          <tr>
+            <td>Scan stride</td>
+            <td style="font-family:monospace;color:var(--costas-tone);">every 6 ring writes</td>
+            <td style="font-family:monospace;color:var(--orange);">every 6 ring writes</td>
+          </tr>
+          <tr>
+            <td>Kernel time (RTX 5060 Ti)</td>
+            <td style="color:var(--costas-tone);">~110 ms alone</td>
+            <td style="color:var(--orange);">~110 ms alone</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div style="margin-top:14px;padding:12px;background:#1c2128;border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--muted);line-height:1.7;">
+        <strong style="color:var(--red);">⚠ GPU serialization:</strong>
+        Both kernels launch with identical grid dimensions (~2M blocks) against the same
+        shared MagBlock&lt;200&gt; ring. When FT8 and JS8 Normal trigger simultaneously
+        (both every 6 ring writes = every ~960 ms), they compete for the full SM array.
+        On the RTX 5060 Ti (SM 12.0) each scan saturates the GPU at ~110 ms alone;
+        serialized, the loser waits then runs — total latency ~220 ms — causing pipeline
+        backlog when <code>--js8-fast</code> adds a third concurrent scan stream.
+      </div>
     </div>
   </div>
 </div>
@@ -444,7 +559,7 @@ for (let i = 0; i < 79; i++) {
   frameEl.appendChild(sym);
 }
 
-// ── Build Costas pattern grid ──
+// ── Build FT8 Costas pattern grid ──
 const grid = document.getElementById('costas-grid');
 const freqNums = document.getElementById('freq-nums');
 const symNums = document.getElementById('sym-nums');
@@ -460,9 +575,6 @@ for (let k = 0; k < 7; k++) {
 for (let f = 7; f >= 0; f--) {
   const d = document.createElement('div');
   d.textContent = f;
-  if (kCostas.includes(f)) {
-    // check if any k has this
-  }
   freqNums.appendChild(d);
 }
 
@@ -542,6 +654,40 @@ for (let slot = 0; slot < 21; slot++) {
   dots.textContent = '···';
   rowCells.appendChild(dots);
   smemContainer.appendChild(rowCells);
+}
+
+// ── Build JS8 Costas pattern grid ──
+const kCostasJS8 = [4, 2, 5, 6, 1, 3, 0];
+const gridJS8    = document.getElementById('costas-grid-js8');
+const freqNumsJS8 = document.getElementById('freq-nums-js8');
+const symNumsJS8  = document.getElementById('sym-nums-js8');
+
+for (let k = 0; k < 7; k++) {
+  const d = document.createElement('div');
+  d.textContent = 'k=' + k;
+  symNumsJS8.appendChild(d);
+}
+for (let f = 7; f >= 0; f--) {
+  const d = document.createElement('div');
+  d.textContent = f;
+  freqNumsJS8.appendChild(d);
+}
+for (let f = 7; f >= 0; f--) {
+  for (let k = 0; k < 7; k++) {
+    const cell = document.createElement('div');
+    const expectedF = kCostasJS8[k];
+    if (expectedF === f) {
+      cell.className = 'cell';
+      cell.style.cssText = 'background:#3d2200;border:2px solid var(--orange);color:var(--orange);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;';
+      cell.textContent = f;
+    } else if (Math.abs(expectedF - f) === 1) {
+      cell.className = 'cell cell-freq-n';
+      cell.textContent = '±1';
+    } else {
+      cell.className = 'cell cell-empty';
+    }
+    gridJS8.appendChild(cell);
+  }
 }
 </script>
 </body>

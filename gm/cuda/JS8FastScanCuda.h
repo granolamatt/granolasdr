@@ -10,7 +10,7 @@
 //   Block 2: {2, 5, 0, 6, 4, 1, 3}
 //
 // All other grid/memory parameters are identical to js8_gpu_scan.
-// Caller must pass ring_size=100 and num_blocks=100 for the 100-slot Fast ring.
+// Caller must pass ring_size=116 and num_blocks=108 for the 116-slot Fast ring.
 void js8_fast_gpu_scan(
     const uint8_t* mag_d,
     int snap_start, int ring_size,

@@ -14,7 +14,7 @@ namespace gm {
 namespace cuda {
 
 // MagBlock: RFFT + |·|² + uint8 decimation → DeviceRingBuffer + waterfall ZMQ.
-// N = ring depth (number of slots). Normal uses N=200; Fast uses N=100.
+// N = ring depth (number of slots). Normal uses N=200; Fast uses N=116.
 template<int N>
 class MagBlock : public Thread {
 public:
@@ -69,7 +69,7 @@ private:
 };
 
 extern template class MagBlock<200>;
-extern template class MagBlock<100>;
+extern template class MagBlock<116>;
 
 } // namespace cuda
 } // namespace gm

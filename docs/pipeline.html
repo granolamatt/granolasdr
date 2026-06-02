@@ -179,6 +179,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 <body>
 <h1>granolasdr Signal Processing Pipeline</h1>
 <div class="subtitle">RX888 → HFChannelizer → MagBlock → FT8Cuda/JS8Cuda → ft8.cc/js8.cc → ZMQ proxy | block diagram with code locations</div>
+<div class="subtitle" style="margin-bottom:8px">Normal ring: MagBlock&lt;200&gt; → FT8 + JS8-Normal &nbsp;|&nbsp; Fast ring (--js8-fast): MagBlock&lt;116&gt; → JS8-Fast (parallel path, same ZMQ proxy)</div>
 
 <div class="pipeline">
 
@@ -260,7 +261,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 <!-- ===== MagBlock ===== -->
 <div class="stage mag">
   <div class="stage-header">
-    MagBlock — Oversampled FFT &amp; Magnitude Ring
+    MagBlock&lt;200&gt; — Normal Ring (FT8 + JS8-Normal)
     <span class="thread-badge" style="background:#2d1f0a;border:1px solid #e3b34144;color:#e3b341">CUDA thread</span>
     <span class="file-tag">gm/cuda/MagBlock.cc</span>
   </div>
@@ -310,7 +311,8 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <div class="step" style="margin-top:8px"><span class="step-num">6</span>
         <span class="step-text"><span class="hl">Wideband waterfall:</span> → ZMQ proxy topic <code>ft8/waterfall</code></span>
       </div>
-      <div class="note" style="margin-top:4px">FT8Cuda and JS8Cuda both hold <code>const&amp; DeviceRingBuffer</code> — no second FFT needed. MagBlock owns the ring memory; scanners hold references.</div>
+      <div class="note" style="margin-top:4px">FT8Cuda and JS8Cuda-Normal both hold <code>const&amp; DeviceRingBuffer</code> — no second FFT needed. MagBlock owns the ring memory; scanners hold references.</div>
+      <div class="note" style="margin-top:6px;border-left:2px solid #e3b341"><b>Fast ring (--js8-fast):</b> parallel <code>MagBlock&lt;116&gt;</code> runs from same HFChannelizer output. rfft_len=655,360 · time_osr=2 · freq_osr=2 · N=116 slots · ring=~304 MB. Feeds <code>JS8Cuda&lt;116&gt;</code> → <code>js8.cc</code> (mode="JS8-FAST"). cap_blocks=108 → covers 78 symbols + 30 guard slots.</div>
     </div>
   </div>
 </div>
@@ -361,32 +363,44 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 
   <div class="stage js8cu">
     <div class="stage-header">
-      JS8Cuda — Continuous Scan
-      <span class="thread-badge" style="background:#0a1f2e;border:1px solid #79c0ff44;color:#79c0ff">CUDA thread (--js8)</span>
-      <span class="file-tag">JS8Cuda.cc</span>
+      JS8Cuda&lt;200&gt; — Normal Scan (--js8)
+      <span class="thread-badge" style="background:#0a1f2e;border:1px solid #79c0ff44;color:#79c0ff">CUDA thread</span>
+      <span class="file-tag">JS8Cuda.cc · JS8ScanCuda.cu</span>
     </div>
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text">Reads same <span class="hl2">DeviceRingBuffer</span> (no second FFT)<br>
-        <span class="step-detail">JS8 epoch = 15 s; continuous scan shares MagBlock ring</span>
+        <span class="step-text">Reads <span class="hl2">MagBlock&lt;200&gt; ring</span> (no second FFT)<br>
+        <span class="step-detail">JS8 Normal epoch = 15 s · ORIGINAL Costas × 3</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl2">JS8 Costas scan kernel:</span><br>
-        <span class="step-detail">Costas pattern {4,2,5,6,1,3,0}<br>
-        score ≥ min_score → candidate list</span>
+        <span class="step-text"><span class="hl2">ORIGINAL Costas scan (Normal):</span><br>
+        <span class="step-detail">{4,2,5,6,1,3,0} × 3 identical blocks · score ≥ min_score → candidates</span>
         </span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl2">Soft symbol kernel:</span><br>
-        <span class="step-detail">LDPC code (174,91), M=87<br>
-        output: log174_d per candidate</span>
+        <span class="step-text"><span class="hl2">Soft symbol kernel:</span> LDPC(174,87) LLRs → decode callback</span>
+      </div>
+    </div>
+    <div class="stage-header" style="margin-top:6px;border-top:1px solid #79c0ff22">
+      JS8Cuda&lt;116&gt; — Fast Scan (--js8-fast)
+      <span class="thread-badge" style="background:#0a1f2e;border:1px solid #79c0ff44;color:#79c0ff">CUDA thread</span>
+      <span class="file-tag">JS8Cuda.cc · JS8FastScanCuda.cu</span>
+    </div>
+    <div class="stage-body wide">
+      <div class="step"><span class="step-num">1</span>
+        <span class="step-text">Reads <span class="hl2">MagBlock&lt;116&gt; ring</span> (parallel FFT path)<br>
+        <span class="step-detail">JS8 Fast epoch = 10 s · MODIFIED Costas · rfft_len=655,360</span>
         </span>
       </div>
-      <div class="step"><span class="step-num">4</span>
-        <span class="step-text">D2H → <span class="hl2">decode callback</span><br>
-        <span class="step-detail">callback = JS8::decodeAndPublishContinuous() (wired in JS8 constructor)</span>
+      <div class="step"><span class="step-num">2</span>
+        <span class="step-text"><span class="hl2">MODIFIED Costas scan (Fast/Slow/Turbo/Ultra):</span><br>
+        <span class="step-detail">Blk0={0,6,2,3,5,4,1} Blk1={1,5,0,2,3,6,4} Blk2={2,5,0,6,4,1,3}<br>
+        cap_blocks=108 · time_osr=2 · freq_osr=2 · bin=10 Hz</span>
         </span>
+      </div>
+      <div class="step"><span class="step-num">3</span>
+        <span class="step-text"><span class="hl2">Soft symbol kernel:</span> same LDPC(174,87) → decode callback</span>
       </div>
     </div>
   </div>
@@ -444,33 +458,24 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <!-- js8.cc -->
   <div class="stage js8cpu">
     <div class="stage-header">
-      js8.cc — Epoch Decoder
-      <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">CPU thread (--js8)</span>
+      js8.cc — Epoch Decoder (Normal + Fast)
+      <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">CPU thread ×2</span>
       <span class="file-tag">gm/hf/js8.cc · ft8_lib/</span>
     </div>
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text"><span class="hl6">LDPC decode:</span> BP decoder<br>
-        <span class="step-detail">(174,91) code M=87 · CRC-12 check</span>
-        </span>
+        <span class="step-text"><span class="hl6">LDPC decode:</span> BP decoder (174,87) M=87 · CRC-12</span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl6">JSC decompress:</span> Huffman decode<br>
-        <span class="step-detail">JS8Call JSC bitstream → UTF-8 text</span>
-        </span>
+        <span class="step-text"><span class="hl6">JSC decompress:</span> Huffman → UTF-8 · Frame decode → from_call, text</span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl6">Frame decode:</span> Normal/Compact/Ultra/Turbo<br>
-        <span class="step-detail">extracts from_call, to_call, message text, APRS fields</span>
-        </span>
+        <span class="step-text"><span class="hl6">Per-epoch dedup:</span> Normal: floor(unix/15) · Fast: floor(unix/10)</span>
       </div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl6">Per-epoch dedup:</span> seen_this_epoch_ set<br>
-        <span class="step-detail">cleared when floor(unix/15) rolls over</span>
+        <span class="step-text">publishDecoded() → ZMQ proxy (topic: <span class="hl6">js8/decode</span>)<br>
+        <span class="step-detail">JSON payload includes <code>"mode":"JS8"</code> (Normal) or <code>"mode":"JS8-FAST"</code></span>
         </span>
-      </div>
-      <div class="step"><span class="step-num">5</span>
-        <span class="step-text">publishDecoded() → ZMQ proxy (topic: <span class="hl6">js8/decode</span>)</span>
       </div>
     </div>
   </div>
@@ -500,6 +505,12 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <div class="step"><span class="step-num">3</span>
         <span class="step-text"><span class="hl3">ft8/decode</span> JSON example:<br>
         <span class="step-detail">{"call":"WA9TT","freq":7076397,"snr":-7.0,"unix":…,"offset":3.0}</span>
+        </span>
+      </div>
+      <div class="step"><span class="step-num">3b</span>
+        <span class="step-text"><span class="hl3">js8/decode</span> JSON example:<br>
+        <span class="step-detail">{"from":"KD9ABC","text":"…","freq":14076500,"snr":-12.0,"mode":"JS8","unix":…}<br>
+        mode = "JS8" (Normal, 15 s) or "JS8-FAST" (Fast, 10 s)</span>
         </span>
       </div>
     </div>
@@ -536,11 +547,18 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <td style="padding:4px 8px;color:#3fb950">not a bottleneck</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:4px 8px;color:#e3b341">MagBlock 16×FFT + mag + ring</td>
+      <td style="padding:4px 8px;color:#e3b341">MagBlock&lt;200&gt; 16×FFT + mag (Normal)</td>
       <td style="padding:4px 8px;color:#6e7681">CUDA stream</td>
       <td style="padding:4px 8px">every ~160 ms</td>
       <td style="padding:4px 8px;color:#e3b341">~30 ms GPU</td>
-      <td style="padding:4px 8px;color:#3fb950">non-blocking</td>
+      <td style="padding:4px 8px;color:#3fb950">non-blocking · N=200 slots · 3.3 GB</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 8px;color:#e3b341">MagBlock&lt;116&gt; 4×FFT + mag (Fast)</td>
+      <td style="padding:4px 8px;color:#6e7681">CUDA stream</td>
+      <td style="padding:4px 8px">every ~100 ms (--js8-fast)</td>
+      <td style="padding:4px 8px;color:#e3b341">~15 ms GPU</td>
+      <td style="padding:4px 8px;color:#3fb950">non-blocking · N=116 slots · ~304 MB</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:4px 8px;color:#ff9999">FT8Cuda Costas scan + soft syms</td>
@@ -562,6 +580,13 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <td style="padding:4px 8px">every 15 s</td>
       <td style="padding:4px 8px;color:#56d364">&lt;1 ms</td>
       <td style="padding:4px 8px;color:#3fb950">best-SNR per callsign</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 8px;color:#70d6e8">JS8Cuda&lt;116&gt;-Fast scan (--js8-fast)</td>
+      <td style="padding:4px 8px;color:#6e7681">CUDA thread</td>
+      <td style="padding:4px 8px">every 6 blocks (~600 ms)</td>
+      <td style="padding:4px 8px;color:#70d6e8">~60–120 ms GPU</td>
+      <td style="padding:4px 8px;color:#3fb950">MODIFIED Costas · cap_blocks=108</td>
     </tr>
     <tr>
       <td style="padding:4px 8px;color:#7ee787">PSKReporter upload</td>
