@@ -24,4 +24,5 @@ void js8_gpu_scan(
     uint32_t* cand_count_d,
     uint32_t  max_cands,
     int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    const uint8_t* block_active_d = nullptr);

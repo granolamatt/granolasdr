@@ -21,8 +21,11 @@ __global__ void js8SyncScanKernel(
     int16_t*  __restrict__ cand_score,
     uint32_t* __restrict__ cand_count,
     uint32_t max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score)
+    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
+    const uint8_t* __restrict__ block_active)
 {
+    if (block_active && !block_active[blockIdx.x]) return;
+
     const int BLOCK_SZ = blockDim.x;
     const int WINDOW   = BLOCK_SZ + 8;
     const int fo_base  = blockIdx.x * BLOCK_SZ;
@@ -109,7 +112,8 @@ void js8_gpu_scan(
     uint32_t* cand_count_d,
     uint32_t  max_cands,
     int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    const uint8_t* block_active_d)
 {
     cudaMemsetAsync(cand_count_d, 0, sizeof(uint32_t), stream);
 
@@ -122,5 +126,5 @@ void js8_gpu_scan(
     js8SyncScanKernel<<<grid, BLOCK_SZ, smem_bytes, stream>>>(
         mag_d, snap_start, ring_size,
         cand_fo_d, cand_to_d, cand_ts_d, cand_fs_d, cand_score_d, cand_count_d, max_cands,
-        num_bins, num_blocks, time_osr, freq_osr, min_score);
+        num_bins, num_blocks, time_osr, freq_osr, min_score, block_active_d);
 }

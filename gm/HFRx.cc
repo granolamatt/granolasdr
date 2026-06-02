@@ -28,14 +28,14 @@ static void runProxy() {
 }
 
 static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
-                        float min_score, bool enable_js8) {
+                        float min_score, bool enable_js8, float cfar_multiplier) {
 
     // RAII order: MagBlock owns ring memory; FT8Cuda/JS8Cuda hold const refs.
     // C++ destroys in reverse declaration order (scanners before ring).
     gm::cuda::MagBlock magblock(&buf, kProxyXSubPort);
     magblock.start();
 
-    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
+    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, cfar_multiplier);
     ft8channel.start();
 
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort);
@@ -57,10 +57,11 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
 
 int main(int argc, char* argv[]) {
 
-    bool        enable_js8     = false;
-    std::string ctrl_host      = "127.0.0.1";
-    int         ctrl_port      = 8080;
-    float       min_score      = 3.0f;
+    bool        enable_js8      = false;
+    std::string ctrl_host       = "127.0.0.1";
+    int         ctrl_port       = 8080;
+    float       min_score       = 3.0f;
+    float       cfar_multiplier = 0.5f;  // 0 = disable chi pre-filter
     std::string record_file;
     std::string playback_file;
 
@@ -71,6 +72,8 @@ int main(int argc, char* argv[]) {
             ctrl_port = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
             min_score = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--cfar-multiplier") == 0 && i + 1 < argc) {
+            cfar_multiplier = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
             record_file = argv[++i];
         } else if (strcmp(argv[i], "--playback") == 0 && i + 1 < argc) {
@@ -87,7 +90,7 @@ int main(int argc, char* argv[]) {
     if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
-        runPipeline(*playback.getBuffer(), min_score, enable_js8);
+        runPipeline(*playback.getBuffer(), min_score, enable_js8, cfar_multiplier);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -102,7 +105,7 @@ int main(int argc, char* argv[]) {
             recorder->start();
         }
 
-        runPipeline(*channelizer.getBuffer(), min_score, enable_js8);
+        runPipeline(*channelizer.getBuffer(), min_score, enable_js8, cfar_multiplier);
     }
 
     return 0;

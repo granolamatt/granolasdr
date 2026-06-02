@@ -34,6 +34,7 @@ private:
     float    min_score_;
 
     cudaStream_t js8_scan_stream_{};
+    uint8_t*     block_active_d_{nullptr};  // chi pre-filter output [ceil(num_bins/256)]
 
     static constexpr uint32_t CAND_MAX = JS8_GPU_CAND_MAX;
 

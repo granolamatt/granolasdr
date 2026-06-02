@@ -39,6 +39,7 @@ set(LIBLOC "-L/opt/cuda/lib64")
 
 set(GM_CUDA_SOURCES
     "gm/cuda/HostCuda.cu"
+    "gm/cuda/ChiFilter.cu"
     "gm/cuda/FT8ScanCuda.cu"
     "gm/cuda/FT8SoftCuda.cu"
     "gm/cuda/FT8LdpcCuda.cu"

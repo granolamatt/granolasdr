@@ -17,6 +17,9 @@ JS8Cuda::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
     cudaStreamCreate(&js8_scan_stream_);
 
+    size_t nblocks = ((size_t)ring_.num_bins + 255) / 256;
+    cudaMalloc((void**)&block_active_d_, nblocks);
+
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
     cudaMalloc((void**)&cand_count_d_, sizeof(uint32_t));
     cudaMalloc((void**)&cand_fo_d_,    CAND_MAX * sizeof(int32_t));
@@ -40,6 +43,7 @@ JS8Cuda::~JS8Cuda()
     if (cand_fs_d_)    cudaFree(cand_fs_d_);
     if (cand_score_d_) cudaFree(cand_score_d_);
     if (log174_d_)     cudaFree(log174_d_);
+    if (block_active_d_) cudaFree(block_active_d_);
     freeSlots();
 
     cudaStreamDestroy(js8_scan_stream_);
@@ -136,13 +140,18 @@ void JS8Cuda::scanLoop()
 
         cudaStreamWaitEvent(js8_scan_stream_, ring_.ready, 0);
 
+        chi_prefilter(
+            ring_.base_d, snap_start, RING_BLOCKS,
+            FT8_TIME_OSR * FT8_FREQ_OSR, (int)ring_.num_bins, CAP_BLOCKS,
+            1.5f, block_active_d_, js8_scan_stream_);
+
         js8_gpu_scan(
             ring_.base_d, snap_start, RING_BLOCKS,
             slot.fo_d, slot.to_d, slot.ts_d, slot.fs_d,
             slot.score_d, slot.count_d, CAND_MAX,
             (int)ring_.num_bins, CAP_BLOCKS,
             FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
-            js8_scan_stream_);
+            js8_scan_stream_, block_active_d_);
 
         js8_soft_symbols(
             ring_.base_d, snap_start, RING_BLOCKS,
