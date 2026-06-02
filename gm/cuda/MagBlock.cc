@@ -4,7 +4,6 @@
 #include <cuda.h>
 #include <cufft.h>
 #include "gm/cuda/MagBlock.h"
-#include "gm/cuda/WaterfallKernel.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/hf/ft8_capture.h"
 
@@ -22,11 +21,9 @@ MagBlock::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP, int zmq
 
     cuda_check_error(cudaSetDevice(0));
     cuda_check_error(cudaStreamCreate(&stream_));
-    cuda_check_error(cudaStreamCreate(&waterfall_stream_));
-    cuda_check_error(cudaEventCreateWithFlags(&waterfall_ready_, cudaEventDisableTiming));
     cuda_check_error(cudaEventCreateWithFlags(&ring_.ready, cudaEventDisableTiming));
 
-    cuda_h_     = gm::cuda::device::HostCuda(stream_);
+    cuda_h_      = gm::cuda::device::HostCuda(stream_);
     rfft_length_ = 1048576;  // 2^20; 6553600 Hz / 6.25 Hz/bin
 
     // demodData_d: double-buffer for overlap-save RFFT
@@ -55,11 +52,6 @@ MagBlock::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP, int zmq
     ring_.num_bins   = rfft_length_;
     printf("GPU mag ring: %.1f MB\n", (double)dev_ring_bytes / 1e6);
 
-    // Waterfall
-    cuda_check_error(cudaMalloc((void**)&waterfall_d_, WATERFALL_BINS));
-    cuda_check_error(cudaHostAlloc((void**)&waterfall_host_, WATERFALL_BINS,
-                                   cudaHostAllocDefault));
-
     // cuFFT plan: single 1D C2C of rfft_length
     cufftResult fftRes = cufftPlan1d(&rplan_, (int)rfft_length_, CUFFT_C2C, 1);
     if (fftRes) { fprintf(stderr, "MagBlock: cufftPlan1d failed\n"); exit(1); }
@@ -74,13 +66,9 @@ MagBlock::~MagBlock()
     if (demodShift_d_) cudaFree(demodShift_d_);
     if (magFT8_d_)     cudaFree(magFT8_d_);
     if (ring_.base_d)  cudaFree(ring_.base_d);
-    if (waterfall_d_)  cudaFree(waterfall_d_);
-    if (waterfall_host_) cudaFreeHost(waterfall_host_);
     cufftDestroy(rplan_);
     cudaEventDestroy(ring_.ready);
-    cudaEventDestroy(waterfall_ready_);
     cudaStreamDestroy(stream_);
-    cudaStreamDestroy(waterfall_stream_);
 }
 
 void MagBlock::pubBin(const char* topic, const void* data, size_t len)
@@ -94,10 +82,6 @@ void MagBlock::pubBin(const char* topic, const void* data, size_t len)
 
 int MagBlock::doCopy(uint64_t now)
 {
-    // Non-blocking: deliver last waterfall frame if ready.
-    if (waterfall_ready_ && cudaEventQuery(waterfall_ready_) == cudaSuccess)
-        pubBin("waterfall", waterfall_host_, WATERFALL_BINS);
-
     const size_t length = inShape_[1];
     cudaMemcpyAsync(&demodData_d_[buff_pos_],
                     &inData_d_[length * (now % inShape_[0])],
@@ -148,19 +132,6 @@ int MagBlock::doCopy(uint64_t now)
         // recorded on the stream (and will complete after the memcpy above).
         cuda_check_error(cudaEventRecord(ring_.ready, stream_));
         ring_.write_idx.fetch_add(1, std::memory_order_release);
-
-        // Waterfall: decimate the just-written slot.
-        if (waterfall_d_) {
-            cudaStreamWaitEvent(waterfall_stream_, ring_.ready, 0);
-            const uint8_t* slot_base =
-                &ring_.base_d[((wi) % RING_BLOCKS) * block_bytes];
-            ft8_waterfall_decimate(slot_base, waterfall_d_,
-                                   (int)rfft_length_, WATERFALL_BINS,
-                                   waterfall_stream_);
-            cudaMemcpyAsync(waterfall_host_, waterfall_d_, WATERFALL_BINS,
-                            cudaMemcpyDeviceToHost, waterfall_stream_);
-            cudaEventRecord(waterfall_ready_, waterfall_stream_);
-        }
     }
     return 1;
 }

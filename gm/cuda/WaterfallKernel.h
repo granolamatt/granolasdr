@@ -2,12 +2,12 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-// Decimates the t=0,f=0 sub-block of a ring slot to out_bins output bytes
-// using a quadratic frequency mapping: out[b] = slot[round((rfft_length-1)*(b/(out_bins-1))^2)].
-// Runs asynchronously on the given stream.
-void ft8_waterfall_decimate(
+// Decimate a [bin_start, bin_end) slice of ring slot sub-band 0 to out_bins
+// output bytes using linear average pooling.
+// ring_slot points to the first byte of the ring slot (sub-band 0 base).
+// Each output pixel averages ceil((bin_end-bin_start)/out_bins) input bins.
+void waterfall_decimate(
     const uint8_t* ring_slot_d,
-    uint8_t*       out_d,
-    int            rfft_length,
-    int            out_bins,
-    cudaStream_t   stream);
+    int bin_start, int bin_end,
+    uint8_t* out_d, int out_bins,
+    cudaStream_t stream);

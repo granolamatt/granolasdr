@@ -10,12 +10,18 @@
 #include "gm/cuda/MagBlock.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8Cuda.h"
+#include "gm/cuda/WaterfallCuda.h"
 #include "gm/hf/ft8.h"
 #include "gm/hf/js8.h"
 #include "gm/buffer/BufferFile.h"
 
 static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
+
+// Hz to bin index for the 1,048,576-bin / 6.553600 MHz ring.
+static int hzToBin(float hz) {
+    return (int)(hz / 6.25f + 0.5f);
+}
 
 // Runs zmq_proxy(XSUB, XPUB) — blocks forever, call in a detached thread.
 static void runProxy() {
@@ -28,18 +34,25 @@ static void runProxy() {
 }
 
 static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
-                        float min_score, bool enable_js8, float cfar_multiplier) {
+                        float min_score, bool enable_js8,
+                        int wf_bin_start, int wf_bin_end) {
 
-    // RAII order: MagBlock owns ring memory; FT8Cuda/JS8Cuda hold const refs.
-    // C++ destroys in reverse declaration order (scanners before ring).
+    // RAII order: MagBlock owns ring memory; all readers hold const refs.
+    // C++ destroys in reverse declaration order (readers before ring).
     gm::cuda::MagBlock magblock(&buf, kProxyXSubPort);
     magblock.start();
 
-    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, cfar_multiplier);
+    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
     ft8channel.start();
 
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort);
     ft8.start();
+
+    gm::cuda::WaterfallCuda waterfall(magblock.getRing(),
+                                      wf_bin_start, wf_bin_end,
+                                      gm::cuda::WaterfallCuda::DEFAULT_OUT_BINS,
+                                      kProxyXSubPort);
+    waterfall.start();
 
     std::unique_ptr<gm::cuda::JS8Cuda> js8channel;
     std::unique_ptr<gm::hf::JS8>       js8_obj;
@@ -54,14 +67,14 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     }
 }
 
-
 int main(int argc, char* argv[]) {
 
-    bool        enable_js8      = false;
-    std::string ctrl_host       = "127.0.0.1";
-    int         ctrl_port       = 8080;
-    float       min_score       = 3.0f;
-    float       cfar_multiplier = 0.5f;  // 0 = disable chi pre-filter
+    bool        enable_js8    = false;
+    std::string ctrl_host     = "127.0.0.1";
+    int         ctrl_port     = 8080;
+    float       min_score     = 3.0f;
+    float       wf_start_hz   = 0.0f;
+    float       wf_end_hz     = 6553600.0f;  // full band by default
     std::string record_file;
     std::string playback_file;
 
@@ -72,8 +85,10 @@ int main(int argc, char* argv[]) {
             ctrl_port = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
             min_score = std::stof(argv[++i]);
-        } else if (strcmp(argv[i], "--cfar-multiplier") == 0 && i + 1 < argc) {
-            cfar_multiplier = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--waterfall-start-hz") == 0 && i + 1 < argc) {
+            wf_start_hz = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--waterfall-end-hz") == 0 && i + 1 < argc) {
+            wf_end_hz = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
             record_file = argv[++i];
         } else if (strcmp(argv[i], "--playback") == 0 && i + 1 < argc) {
@@ -83,6 +98,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    int wf_bin_start = hzToBin(wf_start_hz);
+    int wf_bin_end   = hzToBin(wf_end_hz);
+    wf_bin_end       = std::min(wf_bin_end, (int)1048576);
+
     std::thread(runProxy).detach();
     printf("ZMQ proxy: XSUB tcp://*:%d  XPUB tcp://*:%d\n",
            kProxyXSubPort, kProxyXPubPort);
@@ -90,7 +109,8 @@ int main(int argc, char* argv[]) {
     if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
-        runPipeline(*playback.getBuffer(), min_score, enable_js8, cfar_multiplier);
+        runPipeline(*playback.getBuffer(), min_score, enable_js8,
+                    wf_bin_start, wf_bin_end);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -105,7 +125,8 @@ int main(int argc, char* argv[]) {
             recorder->start();
         }
 
-        runPipeline(*channelizer.getBuffer(), min_score, enable_js8, cfar_multiplier);
+        runPipeline(*channelizer.getBuffer(), min_score, enable_js8,
+                    wf_bin_start, wf_bin_end);
     }
 
     return 0;

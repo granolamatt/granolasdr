@@ -13,12 +13,11 @@
 namespace gm {
 namespace cuda {
 
-// MagBlock: RFFT + |·|² + uint8 decimation → DeviceRingBuffer + waterfall ZMQ.
-// Owns the mag ring that FT8Cuda and JS8Cuda read from.
+// MagBlock: RFFT + |·|² + uint8 decimation → DeviceRingBuffer.
+// Owns the mag ring that FT8Cuda, JS8Cuda, and WaterfallCuda read from.
 class MagBlock : public Thread {
 public:
-    static constexpr int RING_BLOCKS    = 200;
-    static constexpr int WATERFALL_BINS = 2048;
+    static constexpr int RING_BLOCKS = 200;
 
     explicit MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP,
                       int zmq_port = 0);
@@ -37,8 +36,6 @@ private:
     std::complex<float>* inData_d_;
 
     cudaStream_t    stream_{};
-    cudaStream_t    waterfall_stream_{};
-    cudaEvent_t     waterfall_ready_{};
     cufftHandle     rplan_{};
     gm::cuda::device::HostCuda cuda_h_;
 
@@ -49,10 +46,6 @@ private:
     std::complex<float>* demodFT8_d_{nullptr};
     std::complex<float>* demodShift_d_{nullptr};
     uint8_t*             magFT8_d_{nullptr};
-
-    // Waterfall
-    uint8_t* waterfall_d_{nullptr};
-    uint8_t* waterfall_host_{nullptr};
 
     gm::buffer::DeviceRingBuffer<uint8_t, RING_BLOCKS> ring_;
 

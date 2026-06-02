@@ -13,7 +13,6 @@
 #include <zmq.hpp>
 #include "gm/cuda/FT8ScanCuda.h"
 #include "gm/cuda/FT8SoftCuda.h"
-#include "gm/cuda/ChiFilter.h"
 #include "gm/Thread.h"
 #include "gm/buffer/DeviceRingBuffer.h"
 
@@ -52,8 +51,7 @@ public:
     FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
             float min_score = 5.0f,
             const std::string& tag = "EPOCH",
-            int zmq_port = 0,
-            float cfar_multiplier = 0.5f);
+            int zmq_port = 0);
     ~FT8Cuda();
 
     void run();
@@ -66,15 +64,11 @@ private:
     const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
     std::string tag_;
     float       min_score_;
-    float       cfar_multiplier_;
 
     static constexpr int CONTINUOUS_SLOTS = 8;
     int cont_stride_{6};
 
     cudaStream_t cont_scan_stream_{};
-    uint8_t*     block_active_d_{nullptr};   // chi pre-filter output [ceil(num_bins/256)]
-    uint32_t*    active_blocks_d_{nullptr};  // device counter: # active blocks per scan
-    uint32_t*    active_blocks_h_{nullptr};  // pinned host mirror
 
     // Continuous scan state
     ContScanResult cont_slots_[CONTINUOUS_SLOTS];

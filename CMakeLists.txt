@@ -47,6 +47,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/JS8LdpcCuda.cu"
     "gm/cuda/JS8SoftCuda.cu"
     "gm/cuda/WaterfallKernel.cu"
+    "gm/cuda/WaterfallCuda.cc"
     "gm/cuda/OverlapSave.cc"
     "gm/cuda/CopyBuffer.cc"
     "gm/buffer/BufferFile.cc"

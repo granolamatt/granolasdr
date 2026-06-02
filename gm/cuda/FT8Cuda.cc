@@ -13,12 +13,10 @@ namespace gm {
 namespace cuda {
 
 FT8Cuda::FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
-                 float min_score, const std::string& tag, int zmq_port,
-                 float cfar_multiplier)
+                 float min_score, const std::string& tag, int zmq_port)
     : ring_(ring)
     , tag_(tag)
     , min_score_(min_score)
-    , cfar_multiplier_(cfar_multiplier)
     , zmq_ctx_(1)
     , zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
@@ -28,18 +26,10 @@ FT8Cuda::FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
     cuda_check_error(cudaSetDevice(0));
     cuda_check_error(cudaStreamCreate(&cont_scan_stream_));
 
-    size_t nblocks = ((size_t)ring_.num_bins + 255) / 256;
-    cuda_check_error(cudaMalloc((void**)&block_active_d_, nblocks));
-    cuda_check_error(cudaMalloc((void**)&active_blocks_d_, sizeof(uint32_t)));
-    cuda_check_error(cudaHostAlloc((void**)&active_blocks_h_, sizeof(uint32_t), cudaHostAllocDefault));
-
     allocContSlots();
 
     printf("FT8: time_osr=%d freq_osr=%d num_bins=%zu (GPU LLR mode)\n",
            FT8_TIME_OSR, FT8_FREQ_OSR, ring_.num_bins);
-    printf("FT8: chi-filter %s (cfar_multiplier=%.2f), total blocks=%zu\n",
-           cfar_multiplier_ > 0.0f ? "ON" : "OFF", cfar_multiplier_,
-           nblocks);
 }
 
 FT8Cuda::~FT8Cuda()
@@ -47,9 +37,6 @@ FT8Cuda::~FT8Cuda()
     cont_scan_active_.store(false, std::memory_order_release);
     if (cont_worker_thread_.joinable()) cont_worker_thread_.join();
     freeContSlots();
-    if (block_active_d_)  cudaFree(block_active_d_);
-    if (active_blocks_d_) cudaFree(active_blocks_d_);
-    if (active_blocks_h_) cudaFreeHost(active_blocks_h_);
     cudaStreamDestroy(cont_scan_stream_);
 }
 
@@ -90,16 +77,6 @@ void FT8Cuda::launchContScan(uint64_t wi)
 
     cudaStreamWaitEvent(cont_scan_stream_, ring_.ready, 0);
 
-    const uint8_t* active = nullptr;
-    if (cfar_multiplier_ > 0.0f) {
-        cudaMemsetAsync(active_blocks_d_, 0, sizeof(uint32_t), cont_scan_stream_);
-        chi_prefilter(
-            ring_.base_d, dev_cont_snap, 200,
-            FT8_TIME_OSR * FT8_FREQ_OSR, (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
-            cfar_multiplier_, block_active_d_, cont_scan_stream_, active_blocks_d_);
-        active = block_active_d_;
-    }
-
     ft8_gpu_scan(
         ring_.base_d,
         dev_cont_snap, 200,
@@ -107,7 +84,7 @@ void FT8Cuda::launchContScan(uint64_t wi)
         slot.score_d, slot.count_d, CONT_CAND_MAX,
         (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
         FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
-        cont_scan_stream_, active);
+        cont_scan_stream_, nullptr);
 
     ft8_soft_symbols(
         ring_.base_d,
@@ -133,9 +110,6 @@ void FT8Cuda::launchContScan(uint64_t wi)
     cudaMemcpyAsync(slot.log174, slot.log174_d,
                    (size_t)CONT_CAND_MAX * FTX_LDPC_N * sizeof(float),
                    cudaMemcpyDeviceToHost, cont_scan_stream_);
-    if (cfar_multiplier_ > 0.0f)
-        cudaMemcpyAsync(active_blocks_h_, active_blocks_d_, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost, cont_scan_stream_);
 
     cudaEventRecord(slot.event, cont_scan_stream_);
     slot.timestamp = std::chrono::duration_cast<std::chrono::duration<double>>(
@@ -234,12 +208,6 @@ void FT8Cuda::contWorker()
                     cudaGetErrorString(ev));
         } else {
             uint32_t n = std::min(*slot.count, CONT_CAND_MAX);
-            if (ri % 10 == 0 && cfar_multiplier_ > 0.0f) {
-                size_t total_blocks = ((size_t)ring_.num_bins + 255) / 256;
-                fprintf(stderr, "[FT8] chi-filter: %u / %zu blocks active (%.1f%%)\n",
-                        *active_blocks_h_, total_blocks,
-                        100.0f * *active_blocks_h_ / (float)total_blocks);
-            }
             if (n > 0 && decode_callback_) {
                 *slot.count = n;
                 try {
