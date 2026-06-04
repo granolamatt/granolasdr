@@ -85,7 +85,7 @@ ctrl_port_(ctrl_port) {
         bins.resize(kNumHFBands);
         for (int i = 0; i < kNumHFBands; ++i)
             bins[i] = {kHFBands[i].wb_start, kHFBands[i].wb_end, kHFBands[i].bw};
-        fft_length = 65536;
+        fft_length = 2048;
 
         cuda_check_error(cudaMalloc((void**)&demodData_d, BUFFERS * fft_length / 2 * sizeof(std::complex<float>) + 1024));
 

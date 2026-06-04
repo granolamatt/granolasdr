@@ -21,7 +21,7 @@ static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
 static constexpr int kWsDictPort    = 8765;  // wsdict WebSocket server
 
-// Hz to bin index for the 1,048,576-bin / 6.553600 MHz ring.
+// Hz to bin index for the 32,768-bin / 204.8 kHz composite ring.
 static int hzToBin(float hz) {
     return (int)(hz / 6.25f + 0.5f);
 }
@@ -76,11 +76,11 @@ int main(int argc, char* argv[]) {
     std::string ctrl_host     = "127.0.0.1";
     int         ctrl_port     = 8080;
     float       min_score     = 3.0f;
-    // HFChannelizer packs amateur HF bands into composite 0–3.83 MHz;
+    // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–90 kHz;
     // bins above that are zero-filled.  Show only the live content region.
-    static constexpr float kCompositeContentHz = 3830000.0f;
-    float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 1915000 Hz
-    float       wf_bw_hz      = kCompositeContentHz;          // 3830000 Hz
+    static constexpr float kCompositeContentHz = 90000.0f;   // 900 bins × 100 Hz
+    float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 45000 Hz
+    float       wf_bw_hz      = kCompositeContentHz;          // 90000 Hz
     std::string record_file;
     std::string playback_file;
     int         zoom_band_start = -1;
@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
     int wf_bin_start = hzToBin(wf_center_hz - wf_bw_hz / 2.0f);
     int wf_bin_end   = hzToBin(wf_center_hz + wf_bw_hz / 2.0f);
     wf_bin_start     = std::max(0, wf_bin_start);
-    wf_bin_end       = std::min(wf_bin_end, (int)1048576);
+    wf_bin_end       = std::min(wf_bin_end, (int)32768);
     if (wf_bin_start >= wf_bin_end) {
         fprintf(stderr, "[WF] waterfall range invalid (center=%.0f bw=%.0f); showing full content band\n",
                 wf_center_hz, wf_bw_hz);

@@ -24,7 +24,7 @@ MagBlock::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP, int zmq
     cuda_check_error(cudaEventCreateWithFlags(&ring_.ready, cudaEventDisableTiming));
 
     cuda_h_      = gm::cuda::device::HostCuda(stream_);
-    rfft_length_ = 1048576;  // 2^20; 6553600 Hz / 6.25 Hz/bin
+    rfft_length_ = 32768;  // 2^15; 204800 Hz / 6.25 Hz/bin
 
     // demodData_d: double-buffer for overlap-save RFFT
     cuda_check_error(cudaMalloc((void**)&demodData_d_,
@@ -96,7 +96,8 @@ int MagBlock::doCopy(uint64_t now)
                 std::complex<float>* input = &demodData_d_[t * rfft_length_ / FT8_TIME_OSR];
                 if (f > 0) {
                     cuda_h_.freqShift(input, demodShift_d_, rfft_length_,
-                                      f * 6.25f / FT8_FREQ_OSR);
+                                      f * 6.25f / FT8_FREQ_OSR,
+                                      rfft_length_ * 6.25f);
                     input = demodShift_d_;
                 }
                 cufftResult rv = cufftExecC2C(rplan_,

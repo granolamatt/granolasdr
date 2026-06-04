@@ -327,8 +327,8 @@ __global__ void freqShiftKernelWork(thrust::complex<float>* input, thrust::compl
     }
 }
 
-void HostCuda::freqShift(std::complex<float>* input, std::complex<float>* output, int N, float shift_hz) {
-    const float phase_step = 2.0f * M_PI * shift_hz / 6553600.0f;
+void HostCuda::freqShift(std::complex<float>* input, std::complex<float>* output, int N, float shift_hz, float sample_rate_hz) {
+    const float phase_step = 2.0f * M_PI * shift_hz / sample_rate_hz;
     if (stream_set) {
         freqShiftKernelWork <<< 32, 256, 0, stream >>>(
             (thrust::complex<float>*)input, (thrust::complex<float>*)output, N, phase_step);
