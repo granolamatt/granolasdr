@@ -1,17 +1,22 @@
 #include <cuda_runtime.h>
+#include <cstdio>
 #include <cstdint>
-#include "gm/cuda/JS8ScanCuda.h"
+#include "gm/cuda/JS8FastScanCuda.h"
 
-// JS8 Normal (Mode A) Costas sync pattern — ORIGINAL type, all 3 blocks identical.
-// FT8 uses {3, 1, 4, 0, 6, 5, 2}; JS8 Normal uses {4, 2, 5, 6, 1, 3, 0}.
-static __constant__ uint8_t kCostas[7] = {4, 2, 5, 6, 1, 3, 0};
+// JS8 Fast/Slow/Turbo/Ultra share MODIFIED Costas arrays (3 distinct blocks).
+// Contrast with JS8 Normal (ORIGINAL type: 3 identical blocks = {4,2,5,6,1,3,0}).
+static __constant__ uint8_t kCostasModified[3][7] = {
+    {0, 6, 2, 3, 5, 4, 1},  // block 0
+    {1, 5, 0, 2, 3, 6, 4},  // block 1
+    {2, 5, 0, 6, 4, 1, 3},  // block 2
+};
 
-// Kernel is structurally identical to ft8SyncScanKernel; only kCostas differs.
-// See FT8ScanCuda.cu for full comments on the grid layout and shared-memory scheme.
+// Kernel is structurally identical to js8SyncScanKernel; only Costas indexing differs.
+// See JS8ScanCuda.cu / FT8ScanCuda.cu for full comments on grid layout.
 
 #define NUM_COSTAS_SLOTS 21
 
-__global__ void js8SyncScanKernel(
+__global__ void js8FastSyncScanKernel(
     const uint8_t* __restrict__ mag,
     int snap_start, int ring_size,
     int32_t*  __restrict__ cand_fo,
@@ -66,7 +71,7 @@ __global__ void js8SyncScanKernel(
             int block_abs = time_off + 36 * m + k;
             if (block_abs >= num_blocks) break;
 
-            int sm = kCostas[k];
+            int sm = kCostasModified[m][k];  // MODIFIED: block-dependent Costas
             int si = (m * 7 + k) * WINDOW + threadIdx.x;
 
             int cur = (int)smem[si + sm];
@@ -98,7 +103,7 @@ __global__ void js8SyncScanKernel(
     }
 }
 
-void js8_gpu_scan(
+void js8_fast_gpu_scan(
     const uint8_t* mag_d,
     int snap_start, int ring_size,
     int32_t*  cand_fo_d,
@@ -119,8 +124,13 @@ void js8_gpu_scan(
     int grid_y = 30 * time_osr * freq_osr;
     dim3 grid(grid_x, grid_y);
 
-    js8SyncScanKernel<<<grid, BLOCK_SZ, smem_bytes, stream>>>(
+    js8FastSyncScanKernel<<<grid, BLOCK_SZ, smem_bytes, stream>>>(
         mag_d, snap_start, ring_size,
         cand_fo_d, cand_to_d, cand_ts_d, cand_fs_d, cand_score_d, cand_count_d, max_cands,
         num_bins, num_blocks, time_osr, freq_osr, min_score);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        fprintf(stderr, "[JS8Fast] js8FastSyncScanKernel launch error: %s\n",
+                cudaGetErrorString(err));
 }

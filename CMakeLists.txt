@@ -55,6 +55,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/FT8SoftCuda.cu"
     "gm/cuda/FT8LdpcCuda.cu"
     "gm/cuda/JS8ScanCuda.cu"
+    "gm/cuda/JS8FastScanCuda.cu"
     "gm/cuda/JS8LdpcCuda.cu"
     "gm/cuda/JS8SoftCuda.cu"
     "gm/cuda/WaterfallKernel.cu"

@@ -10,7 +10,9 @@
 namespace gm {
 namespace cuda {
 
-MagBlock::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP, int zmq_port)
+template<int N>
+MagBlock<N>::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP,
+                      int rfft_len, int time_osr, int freq_osr, int zmq_port)
     : inPos_(inP), zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
     if (zmq_port > 0)
@@ -19,47 +21,46 @@ MagBlock::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP, int zmq
     inShape_  = inPos_->getShape();
     inData_d_ = (std::complex<float>*)inPos_->getBuffer();
 
+    rfft_length_ = (size_t)rfft_len;
+    time_osr_    = time_osr;
+    freq_osr_    = freq_osr;
+    bin_hz_      = 204800.0f / (float)rfft_length_;
+
     cuda_check_error(cudaSetDevice(0));
     cuda_check_error(cudaStreamCreate(&stream_));
     cuda_check_error(cudaEventCreateWithFlags(&ring_.ready, cudaEventDisableTiming));
 
-    cuda_h_      = gm::cuda::device::HostCuda(stream_);
-    rfft_length_ = 32768;  // 2^15; 204800 Hz / 6.25 Hz/bin
+    cuda_h_ = gm::cuda::device::HostCuda(stream_);
 
-    // demodData_d: double-buffer for overlap-save RFFT
     cuda_check_error(cudaMalloc((void**)&demodData_d_,
         4 * rfft_length_ * sizeof(std::complex<float>) + 1024));
 
-    // demodFT8_d: FT8_TIME_OSR × FT8_FREQ_OSR sub-band FFT outputs
     cuda_check_error(cudaMalloc((void**)&demodFT8_d_,
-        (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length_ * sizeof(std::complex<float>) + 1024));
+        (size_t)time_osr_ * freq_osr_ * rfft_length_ * sizeof(std::complex<float>) + 1024));
 
-    // magFT8_d: magnitude (uint8) output before ring write
     cuda_check_error(cudaMalloc((void**)&magFT8_d_,
-        (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length_ * sizeof(uint8_t) + 1024));
+        (size_t)time_osr_ * freq_osr_ * rfft_length_ * sizeof(uint8_t) + 1024));
 
-    // demodShift_d: frequency-shift staging buffer
     cuda_check_error(cudaMalloc((void**)&demodShift_d_,
         rfft_length_ * sizeof(std::complex<float>) + 1024));
 
-    // Device-side mag ring: RING_BLOCKS slots × slot_bytes each
-    const size_t slot_bytes =
-        (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length_ * sizeof(uint8_t);
-    const size_t dev_ring_bytes = (size_t)RING_BLOCKS * slot_bytes;
+    const size_t slot_bytes = (size_t)time_osr_ * freq_osr_ * rfft_length_ * sizeof(uint8_t);
+    const size_t dev_ring_bytes = (size_t)N * slot_bytes;
     cuda_check_error(cudaMalloc((void**)&ring_.base_d, dev_ring_bytes));
     cuda_check_error(cudaMemset(ring_.base_d, 0, dev_ring_bytes));
     ring_.slot_bytes = slot_bytes;
     ring_.num_bins   = rfft_length_;
-    printf("GPU mag ring: %.1f MB\n", (double)dev_ring_bytes / 1e6);
+    printf("GPU mag ring: %.1f MB  (N=%d  rfft=%zu  osr=%dx%d  bin=%.2f Hz)\n",
+           (double)dev_ring_bytes / 1e6, N, rfft_length_, time_osr_, freq_osr_, (double)bin_hz_);
 
-    // cuFFT plan: single 1D C2C of rfft_length
     cufftResult fftRes = cufftPlan1d(&rplan_, (int)rfft_length_, CUFFT_C2C, 1);
     if (fftRes) { fprintf(stderr, "MagBlock: cufftPlan1d failed\n"); exit(1); }
     fftRes = cufftSetStream(rplan_, stream_);
     if (fftRes) { fprintf(stderr, "MagBlock: cufftSetStream failed\n"); exit(1); }
 }
 
-MagBlock::~MagBlock()
+template<int N>
+MagBlock<N>::~MagBlock()
 {
     if (demodData_d_)  cudaFree(demodData_d_);
     if (demodFT8_d_)   cudaFree(demodFT8_d_);
@@ -71,7 +72,8 @@ MagBlock::~MagBlock()
     cudaStreamDestroy(stream_);
 }
 
-void MagBlock::pubBin(const char* topic, const void* data, size_t len)
+template<int N>
+void MagBlock<N>::pubBin(const char* topic, const void* data, size_t len)
 {
     std::lock_guard<std::mutex> lk(zmq_mu_);
     zmq::message_t t(topic, strlen(topic));
@@ -80,7 +82,8 @@ void MagBlock::pubBin(const char* topic, const void* data, size_t len)
     zmq_pub_.send(d, zmq::send_flags::none);
 }
 
-int MagBlock::doCopy(uint64_t now)
+template<int N>
+int MagBlock<N>::doCopy(uint64_t now)
 {
     const size_t length = inShape_[1];
     cudaMemcpyAsync(&demodData_d_[buff_pos_],
@@ -90,19 +93,18 @@ int MagBlock::doCopy(uint64_t now)
     buff_pos_ += (uint32_t)length;
 
     if (buff_pos_ > 2 * rfft_length_) {
-        // Run FT8_TIME_OSR × FT8_FREQ_OSR RFFTs with fractional frequency shifts.
-        for (int t = 0; t < FT8_TIME_OSR; ++t) {
-            for (int f = 0; f < FT8_FREQ_OSR; ++f) {
-                std::complex<float>* input = &demodData_d_[t * rfft_length_ / FT8_TIME_OSR];
+        for (int t = 0; t < time_osr_; ++t) {
+            for (int f = 0; f < freq_osr_; ++f) {
+                std::complex<float>* input = &demodData_d_[t * rfft_length_ / time_osr_];
                 if (f > 0) {
-                    cuda_h_.freqShift(input, demodShift_d_, rfft_length_,
-                                      f * 6.25f / FT8_FREQ_OSR,
-                                      rfft_length_ * 6.25f);
+                    cuda_h_.freqShift(input, demodShift_d_, (int)rfft_length_,
+                                      f * bin_hz_ / freq_osr_,
+                                      204800.0f);
                     input = demodShift_d_;
                 }
                 cufftResult rv = cufftExecC2C(rplan_,
                     (cufftComplex*)input,
-                    (cufftComplex*)&demodFT8_d_[(t * FT8_FREQ_OSR + f) * rfft_length_],
+                    (cufftComplex*)&demodFT8_d_[(t * freq_osr_ + f) * rfft_length_],
                     CUFFT_FORWARD);
                 if (rv) {
                     fprintf(stderr, "MagBlock: cufftExecC2C error (t=%d f=%d)\n", t, f);
@@ -116,28 +118,24 @@ int MagBlock::doCopy(uint64_t now)
                         buff_pos_ * sizeof(std::complex<float>),
                         cudaMemcpyDeviceToDevice, stream_);
 
-        // Compute magnitude → ring slot.
-        cuda_h_.magKernel(&demodFT8_d_[0], &magFT8_d_[0],
-                          FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length_);
+        const size_t slot_elems = (size_t)time_osr_ * freq_osr_ * rfft_length_;
+        cuda_h_.magKernel(&demodFT8_d_[0], &magFT8_d_[0], slot_elems);
 
-        const size_t block_bytes = (size_t)FT8_TIME_OSR * FT8_FREQ_OSR * rfft_length_;
         uint64_t wi = ring_.write_idx.load(std::memory_order_relaxed);
         cuda_check_error(cudaMemcpyAsync(
-            &ring_.base_d[(wi % RING_BLOCKS) * block_bytes],
+            ring_.slot(wi),
             &magFT8_d_[0],
-            block_bytes * sizeof(uint8_t),
+            ring_.slot_bytes,
             cudaMemcpyDeviceToDevice, stream_));
 
-        // Record ring_.ready BEFORE incrementing write_idx so that any reader
-        // who sees the new write_idx is guaranteed ring_.ready has been
-        // recorded on the stream (and will complete after the memcpy above).
         cuda_check_error(cudaEventRecord(ring_.ready, stream_));
         ring_.write_idx.fetch_add(1, std::memory_order_release);
     }
     return 1;
 }
 
-void MagBlock::run()
+template<int N>
+void MagBlock<N>::run()
 {
     uint64_t now = inPos_->getNow(1) + 1;
     while (isRunning()) {
@@ -155,6 +153,9 @@ void MagBlock::run()
         }
     }
 }
+
+template class MagBlock<200>;
+template class MagBlock<100>;
 
 } // namespace cuda
 } // namespace gm

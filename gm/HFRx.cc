@@ -10,6 +10,8 @@
 #include "gm/cuda/MagBlock.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8Cuda.h"
+#include "gm/cuda/JS8ScanCuda.h"
+#include "gm/cuda/JS8FastScanCuda.h"
 #include "gm/cuda/WaterfallCuda.h"
 #include "gm/hf/ft8.h"
 #include "gm/hf/js8.h"
@@ -20,6 +22,22 @@
 static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
 static constexpr int kWsDictPort    = 8765;  // wsdict WebSocket server
+
+// Normal ring: 32768-pt FFT, 6.25 Hz/bin, 0.16s/block
+static constexpr int   kNormalRfftLen  = 32768;
+static constexpr int   kNormalTimeOsr  = 4;
+static constexpr int   kNormalFreqOsr  = 4;
+static constexpr int   kNormalCapBlks  = 106;   // FT8_CAPTURE_BLOCKS
+static constexpr float kNormalSymPer   = 0.160f; // seconds per ring block
+static constexpr float kNormalCycleSec = 15.0f;
+
+// Fast ring: 20480-pt FFT, 10 Hz/bin, 0.10s/block
+static constexpr int   kFastRfftLen   = 20480;
+static constexpr int   kFastTimeOsr   = 2;
+static constexpr int   kFastFreqOsr   = 2;
+static constexpr int   kFastCapBlks   = 100;
+static constexpr float kFastSymPer    = 0.100f;
+static constexpr float kFastCycleSec  = 10.0f;
 
 // Hz to bin index for the 32,768-bin / 204.8 kHz composite ring.
 static int hzToBin(float hz) {
@@ -37,12 +55,13 @@ static void runProxy() {
 }
 
 static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
-                        float min_score, bool enable_js8,
+                        float min_score, bool enable_js8, bool enable_js8_fast,
                         int wf_bin_start, int wf_bin_end) {
 
-    // RAII order: MagBlock owns ring memory; all readers hold const refs.
-    // C++ destroys in reverse declaration order (readers before ring).
-    gm::cuda::MagBlock magblock(&buf, kProxyXSubPort);
+    // RAII order: MagBlocks own ring memory; all readers hold const refs.
+    // C++ destroys in reverse declaration order (readers before rings).
+    gm::cuda::MagBlock<200> magblock(&buf,
+        kNormalRfftLen, kNormalTimeOsr, kNormalFreqOsr, kProxyXSubPort);
     magblock.start();
 
     gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
@@ -57,12 +76,33 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                                       kWsDictPort);
     waterfall.start();
 
-    std::unique_ptr<gm::cuda::JS8Cuda> js8channel;
-    std::unique_ptr<gm::hf::JS8>       js8_obj;
+    std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
+    std::unique_ptr<gm::hf::JS8>            js8_obj;
     if (enable_js8) {
-        js8channel = std::make_unique<gm::cuda::JS8Cuda>(
-            magblock.getRing(), min_score, kProxyXSubPort);
-        js8_obj = std::make_unique<gm::hf::JS8>(js8channel.get(), kProxyXSubPort);
+        js8channel = std::make_unique<gm::cuda::JS8Cuda<200>>(
+            magblock.getRing(), min_score, kProxyXSubPort,
+            js8_gpu_scan, kNormalTimeOsr, kNormalFreqOsr, kNormalCapBlks);
+        js8_obj = std::make_unique<gm::hf::JS8>(
+            js8channel.get(), kProxyXSubPort,
+            kNormalSymPer, kNormalCycleSec, kNormalTimeOsr, kNormalRfftLen,
+            "JS8");
+    }
+
+    std::unique_ptr<gm::cuda::MagBlock<100>>  magblock_fast;
+    std::unique_ptr<gm::cuda::JS8Cuda<100>>   js8fast_channel;
+    std::unique_ptr<gm::hf::JS8>              js8fast_obj;
+    if (enable_js8_fast) {
+        magblock_fast = std::make_unique<gm::cuda::MagBlock<100>>(
+            &buf, kFastRfftLen, kFastTimeOsr, kFastFreqOsr, 0);
+        magblock_fast->start();
+
+        js8fast_channel = std::make_unique<gm::cuda::JS8Cuda<100>>(
+            magblock_fast->getRing(), min_score, kProxyXSubPort,
+            js8_fast_gpu_scan, kFastTimeOsr, kFastFreqOsr, kFastCapBlks);
+        js8fast_obj = std::make_unique<gm::hf::JS8>(
+            js8fast_channel.get(), kProxyXSubPort,
+            kFastSymPer, kFastCycleSec, kFastTimeOsr, kFastRfftLen,
+            "JS8 Fast");
     }
 
     while (true) {
@@ -72,10 +112,11 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
 
 int main(int argc, char* argv[]) {
 
-    bool        enable_js8    = false;
-    std::string ctrl_host     = "127.0.0.1";
-    int         ctrl_port     = 8080;
-    float       min_score     = 3.0f;
+    bool        enable_js8      = false;
+    bool        enable_js8_fast = false;
+    std::string ctrl_host       = "127.0.0.1";
+    int         ctrl_port       = 8080;
+    float       min_score       = 3.0f;
     // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–90 kHz;
     // bins above that are zero-filled.  Show only the live content region.
     static constexpr float kCompositeContentHz = 90000.0f;   // 900 bins × 100 Hz
@@ -103,6 +144,8 @@ int main(int argc, char* argv[]) {
             playback_file = argv[++i];
         } else if (strcmp(argv[i], "--js8") == 0) {
             enable_js8 = true;
+        } else if (strcmp(argv[i], "--js8-fast") == 0) {
+            enable_js8_fast = true;
         } else if (strcmp(argv[i], "--zoom-band") == 0 && i + 2 < argc) {
             zoom_band_start = std::stoi(argv[++i]);
             zoom_band_end   = std::stoi(argv[++i]);
@@ -121,7 +164,6 @@ int main(int argc, char* argv[]) {
     }
 
     if (zoom_band_start >= 0) {
-        // Build cumulative composite-bin table from kHFBands.
         int cum_bins[kNumHFBands + 1];
         cum_bins[0] = 0;
         for (int b = 0; b < kNumHFBands; ++b)
@@ -154,7 +196,7 @@ int main(int argc, char* argv[]) {
     if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
-        runPipeline(*playback.getBuffer(), min_score, enable_js8,
+        runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     wf_bin_start, wf_bin_end);
     } else {
         gm::rx888::rx888 mydsp;
@@ -170,7 +212,7 @@ int main(int argc, char* argv[]) {
             recorder->start();
         }
 
-        runPipeline(*channelizer.getBuffer(), min_score, enable_js8,
+        runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     wf_bin_start, wf_bin_end);
     }
 
