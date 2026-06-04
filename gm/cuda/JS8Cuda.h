@@ -41,7 +41,8 @@ public:
     explicit JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
                      float min_score, int zmq_port,
                      JS8ScanFn scan_fn,
-                     int time_osr, int freq_osr, int cap_blocks);
+                     int time_osr, int freq_osr, int cap_blocks,
+                     const char* label = "JS8");
     ~JS8Cuda() override;
 
     void setDecodeCallback(std::function<void(ContScanResult&)> cb) override {
@@ -53,11 +54,12 @@ public:
 
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring_;
-    float      min_score_;
-    JS8ScanFn  scan_fn_;
-    int        time_osr_;
-    int        freq_osr_;
-    int        cap_blocks_;
+    float       min_score_;
+    JS8ScanFn   scan_fn_;
+    int         time_osr_;
+    int         freq_osr_;
+    int         cap_blocks_;
+    const char* label_;
 
     cudaStream_t js8_scan_stream_{};
 

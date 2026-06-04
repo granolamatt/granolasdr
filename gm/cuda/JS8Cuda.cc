@@ -11,9 +11,11 @@ namespace cuda {
 template<int N>
 JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
                     float min_score, int zmq_port,
-                    JS8ScanFn scan_fn, int time_osr, int freq_osr, int cap_blocks)
+                    JS8ScanFn scan_fn, int time_osr, int freq_osr, int cap_blocks,
+                    const char* label)
     : ring_(ring), min_score_(min_score),
       scan_fn_(scan_fn), time_osr_(time_osr), freq_osr_(freq_osr), cap_blocks_(cap_blocks),
+      label_(label),
       zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
     if (zmq_port > 0)
@@ -205,13 +207,13 @@ void JS8Cuda<N>::workerLoop()
 
             uint32_t n = std::min(*slot.count, CAND_MAX);
             if (n > 0) {
-                fprintf(stderr, "[JS8] scan: %u candidates  %.1f ms\n", n, (double)scan_ms);
+                fprintf(stderr, "[%s] scan: %u candidates  %.1f ms\n", label_, n, (double)scan_ms);
                 if (decode_callback_) {
                     *slot.count = n;
                     try {
                         decode_callback_(slot);
                     } catch (...) {
-                        fprintf(stderr, "[JS8] decode_callback threw\n");
+                        fprintf(stderr, "[%s] decode_callback threw\n", label_);
                     }
                 }
                 {
@@ -224,10 +226,10 @@ void JS8Cuda<N>::workerLoop()
                     zmq_pub_.send(d, zmq::send_flags::none);
                 }
             } else if (ri % 60 == 0) {
-                fprintf(stderr, "[JS8] alive: %lu scans, 0 candidates\n", (unsigned long)ri);
+                fprintf(stderr, "[%s] alive: %lu scans, 0 candidates\n", label_, (unsigned long)ri);
             }
         } else {
-            fprintf(stderr, "[JS8] CUDA event error at slot %lu: %s\n",
+            fprintf(stderr, "[%s] CUDA event error at slot %lu: %s\n", label_,
                     (unsigned long)(ri % CONTINUOUS_SLOTS), cudaGetErrorString(ev));
         }
 
