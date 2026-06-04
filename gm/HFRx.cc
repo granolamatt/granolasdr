@@ -39,6 +39,14 @@ static constexpr int   kFastCapBlks   = 100;
 static constexpr float kFastSymPer    = 0.100f;
 static constexpr float kFastCycleSec  = 10.0f;
 
+// Slow ring: 65536-pt FFT, 3.125 Hz/bin, 0.32s/block  (204800/3.125=65536 exactly)
+static constexpr int   kSlowRfftLen   = 65536;
+static constexpr int   kSlowTimeOsr   = 2;
+static constexpr int   kSlowFreqOsr   = 2;
+static constexpr int   kSlowCapBlks   = 94;    // 30.0s / 0.320s = 93.75 → 94
+static constexpr float kSlowSymPer    = 0.320f;
+static constexpr float kSlowCycleSec  = 30.0f;
+
 // Hz to bin index for the 32,768-bin / 204.8 kHz composite ring.
 static int hzToBin(float hz) {
     return (int)(hz / 6.25f + 0.5f);
@@ -56,7 +64,7 @@ static void runProxy() {
 
 static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         float min_score, bool enable_js8, bool enable_js8_fast,
-                        int wf_bin_start, int wf_bin_end) {
+                        bool enable_js8_slow, int wf_bin_start, int wf_bin_end) {
 
     // RAII order: MagBlocks own ring memory; all readers hold const refs.
     // C++ destroys in reverse declaration order (readers before rings).
@@ -105,6 +113,23 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
             "JS8 Fast");
     }
 
+    std::unique_ptr<gm::cuda::MagBlock<100>>  magblock_slow;
+    std::unique_ptr<gm::cuda::JS8Cuda<100>>   js8slow_channel;
+    std::unique_ptr<gm::hf::JS8>              js8slow_obj;
+    if (enable_js8_slow) {
+        magblock_slow = std::make_unique<gm::cuda::MagBlock<100>>(
+            &buf, kSlowRfftLen, kSlowTimeOsr, kSlowFreqOsr, 0);
+        magblock_slow->start();
+
+        js8slow_channel = std::make_unique<gm::cuda::JS8Cuda<100>>(
+            magblock_slow->getRing(), min_score, kProxyXSubPort,
+            js8_fast_gpu_scan, kSlowTimeOsr, kSlowFreqOsr, kSlowCapBlks, "JS8 Slow");
+        js8slow_obj = std::make_unique<gm::hf::JS8>(
+            js8slow_channel.get(), kProxyXSubPort,
+            kSlowSymPer, kSlowCycleSec, kSlowTimeOsr, kSlowRfftLen,
+            "JS8 Slow");
+    }
+
     while (true) {
         usleep(1000000);
     }
@@ -114,6 +139,7 @@ int main(int argc, char* argv[]) {
 
     bool        enable_js8      = false;
     bool        enable_js8_fast = false;
+    bool        enable_js8_slow = false;
     std::string ctrl_host       = "127.0.0.1";
     int         ctrl_port       = 8080;
     float       min_score       = 3.0f;
@@ -146,6 +172,8 @@ int main(int argc, char* argv[]) {
             enable_js8 = true;
         } else if (strcmp(argv[i], "--js8-fast") == 0) {
             enable_js8_fast = true;
+        } else if (strcmp(argv[i], "--js8-slow") == 0) {
+            enable_js8_slow = true;
         } else if (strcmp(argv[i], "--zoom-band") == 0 && i + 2 < argc) {
             zoom_band_start = std::stoi(argv[++i]);
             zoom_band_end   = std::stoi(argv[++i]);
@@ -197,7 +225,7 @@ int main(int argc, char* argv[]) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
         runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast,
-                    wf_bin_start, wf_bin_end);
+                    enable_js8_slow, wf_bin_start, wf_bin_end);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -213,7 +241,7 @@ int main(int argc, char* argv[]) {
         }
 
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
-                    wf_bin_start, wf_bin_end);
+                    enable_js8_slow, wf_bin_start, wf_bin_end);
     }
 
     return 0;
