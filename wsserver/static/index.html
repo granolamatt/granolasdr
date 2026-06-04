@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>uhd-cuda pipeline</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg0: #0d0f14;
+    --bg1: #12151c;
+    --bg2: #181b24;
+    --bg3: #1e222e;
+    --border: #2a2f3d;
+    --text: #c8cdd9;
+    --dim: #6b7280;
+    --accent: #4af;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --burst-fg: #4af;
+    --burst-bg: #0f2030;
+    --font: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+    --sz: 12px;
+  }
+
+  html, body { height: 100%; background: var(--bg0); color: var(--text); font-family: var(--font); font-size: var(--sz); }
+
+  /* ---- Layout ---- */
+  #app { display: grid; grid-template-rows: 36px 1fr; height: 100vh; }
+  #header { background: var(--bg1); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 12px; gap: 16px; }
+  #main { display: grid; grid-template-columns: 280px 1fr; overflow: hidden; }
+  #left { border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+  #right { display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ---- Header ---- */
+  #header h1 { font-size: 11px; font-weight: 600; color: var(--dim); letter-spacing: 0.08em; text-transform: uppercase; }
+  .conn-badge { display: flex; align-items: center; gap: 5px; font-size: 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot-green { background: var(--green); }
+  .dot-red   { background: var(--red); }
+  .dot-yellow{ background: var(--yellow); }
+
+  /* ---- Spectrum ---- */
+  #spectrum-wrap { padding: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #spectrum-label { font-size: 10px; color: var(--dim); margin-bottom: 4px; }
+  #spectrum-canvas { width: 100%; height: 80px; display: block; background: var(--bg2); border: 1px solid var(--border); border-radius: 3px; }
+
+  /* ---- Channel table ---- */
+  #ch-header { padding: 6px 10px 4px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; border-bottom: 1px solid var(--border); }
+  #ch-header span { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  #btn-add { font-size: 10px; font-family: var(--font); background: none; border: 1px solid var(--border); color: var(--dim); padding: 2px 8px; border-radius: 3px; cursor: pointer; }
+  #btn-add:hover { border-color: var(--accent); color: var(--accent); }
+  #ch-table-wrap { flex: 1; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 0; }
+  thead th { font-size: 10px; color: var(--dim); font-weight: 400; text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+  .col-s  { width: 18px; }
+  .col-f  { width: 90px; }
+  .col-r  { width: 60px; color: var(--dim); }
+  .col-m  { width: 48px; }
+  .col-x  { width: 26px; text-align: right; }
+
+  .ch-row { cursor: pointer; border-bottom: 1px solid var(--border); }
+  .ch-row:hover { background: var(--bg3); }
+  .ch-row.selected { background: var(--bg3); }
+  .ch-row td { padding: 4px 6px; font-size: 11px; }
+  .ch-row.restarting { opacity: 0.55; }
+
+  .badge { font-size: 9px; padding: 1px 4px; border-radius: 2px; font-weight: 600; }
+  .badge-burst { background: var(--burst-bg); color: var(--burst-fg); border: 1px solid #2a4a6a; }
+  .badge-cont  { background: transparent; color: var(--dim); border: 1px solid var(--border); }
+
+  .btn-del { font-size: 10px; font-family: var(--font); background: none; border: none; color: var(--dim); cursor: pointer; padding: 0 2px; line-height: 1; }
+  .btn-del:hover { color: var(--red); }
+
+  /* ---- Right pane ---- */
+  #right-top { flex: 1; overflow-y: auto; padding: 12px; }
+  #detail-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--dim); font-size: 11px; }
+
+  /* ---- Detail pane ---- */
+  #detail { display: none; }
+  #detail.visible { display: block; }
+  #detail h2 { font-size: 11px; font-weight: 600; margin-bottom: 10px; }
+
+  .const-wrap { margin-bottom: 12px; }
+  #const-canvas { border: 1px solid var(--border); border-radius: 3px; background: var(--bg2); display: block; }
+  .const-label { font-size: 10px; color: var(--dim); margin-top: 4px; }
+
+  .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .form-row label { width: 120px; color: var(--dim); flex-shrink: 0; font-size: 11px; }
+  .form-row input[type="number"],
+  .form-row input[type="text"] {
+    flex: 1; background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--font); font-size: 11px; padding: 3px 6px; border-radius: 3px; outline: none;
+  }
+  .form-row input:focus { border-color: var(--accent); }
+  .form-row-check input { flex: none; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+
+  .btn-save { margin-top: 8px; font-family: var(--font); font-size: 11px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 4px 14px; border-radius: 3px; cursor: pointer; }
+  .btn-save:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- Config panel ---- */
+  #config-panel { border-top: 1px solid var(--border); padding: 10px 12px; flex-shrink: 0; }
+  #config-panel summary { font-size: 10px; color: var(--dim); cursor: pointer; text-transform: uppercase; letter-spacing: 0.06em; }
+  #config-fields { margin-top: 8px; }
+
+  /* ---- Status bar ---- */
+  #statusbar { border-top: 1px solid var(--border); padding: 3px 10px; font-size: 10px; color: var(--dim); flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>uhd-cuda</h1>
+    <div class="conn-badge" id="conn-badge"><span class="dot dot-yellow" id="conn-dot"></span><span id="conn-text">connecting…</span></div>
+  </div>
+
+  <div id="main">
+    <!-- Left: spectrum + channel table -->
+    <div id="left">
+      <div id="spectrum-wrap">
+        <div id="spectrum-label">spectrum — waiting…</div>
+        <canvas id="spectrum-canvas" height="80"></canvas>
+      </div>
+
+      <div id="ch-header">
+        <span>channels</span>
+        <button id="btn-add">+ add</button>
+      </div>
+
+      <div id="ch-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-s"></th>
+              <th>center_hz</th>
+              <th class="col-r">sym_rate</th>
+              <th class="col-m">mode</th>
+              <th class="col-x"></th>
+            </tr>
+          </thead>
+          <tbody id="ch-tbody"></tbody>
+        </table>
+      </div>
+
+      <details id="config-panel">
+        <summary>hardware config</summary>
+        <div id="config-fields">
+          <div class="form-row"><label>freq_hz</label><input type="number" id="cfg-freq" step="1000000"></div>
+          <div class="form-row"><label>gain_db</label><input type="number" id="cfg-gain" step="0.5"></div>
+          <div class="form-row"><label>sample_rate_hz</label><input type="number" id="cfg-rate" step="1000000"></div>
+          <button class="btn-save" id="cfg-save">save</button>
+        </div>
+      </details>
+    </div>
+
+    <!-- Right: detail pane -->
+    <div id="right">
+      <div id="right-top">
+        <div id="detail-placeholder"><span>select a channel</span></div>
+        <div id="detail">
+          <h2 id="detail-title">channel 0</h2>
+          <div class="const-wrap">
+            <canvas id="const-canvas" width="220" height="220"></canvas>
+            <div class="const-label" id="const-label">waiting for symbols…</div>
+          </div>
+          <form id="ch-form">
+            <div class="form-row"><label>center_hz</label><input type="number" id="f-center" step="1"></div>
+            <div class="form-row"><label>symbol_rate_hz</label><input type="number" id="f-rate" step="1"></div>
+            <div class="form-row form-row-check"><label>burst mode</label><input type="checkbox" id="f-burst"></div>
+            <button type="submit" class="btn-save">save</button>
+          </form>
+        </div>
+      </div>
+      <div id="statusbar" id="status-bar">pipeline: —</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// WsDictClient — auto-reconnecting WebSocket connection to wsdict server
+// ---------------------------------------------------------------------------
+class WsDictClient extends EventTarget {
+  constructor(url) {
+    super();
+    this.url = url;
+    this.ws = null;
+    this._subs = new Set();   // keys/patterns we've subscribed to
+    this._pending = new Map(); // id → resolve
+    this._seq = 0;
+    this._connect();
+  }
+
+  _connect() {
+    this.ws = new WebSocket(this.url);
+    this.ws.onopen = () => {
+      this.dispatchEvent(new CustomEvent('open'));
+      // Re-subscribe to all previously subscribed keys
+      if (this._subs.size > 0) {
+        this._send({ type: 'subscribe', keys: [...this._subs] });
+      }
+    };
+    this.ws.onmessage = e => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      this._dispatch(msg);
+    };
+    this.ws.onclose = () => {
+      this.dispatchEvent(new CustomEvent('close'));
+      setTimeout(() => this._connect(), 2000);
+    };
+    this.ws.onerror = () => this.ws.close();
+  }
+
+  _dispatch(msg) {
+    switch (msg.type) {
+      case 'hello':   break;
+      case 'subscribed': break;
+      case 'update':
+        this.dispatchEvent(new CustomEvent('update', { detail: msg }));
+        break;
+      case 'key_deleted':
+        this.dispatchEvent(new CustomEvent('key_deleted', { detail: msg }));
+        break;
+      case 'value': {
+        const res = this._pending.get(msg.id);
+        if (res) { res.resolve(msg.value); this._pending.delete(msg.id); }
+        break;
+      }
+      case 'error': {
+        const res = this._pending.get(msg.id);
+        if (res) { res.resolve(null); this._pending.delete(msg.id); }
+        break;
+      }
+    }
+  }
+
+  _send(msg) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  subscribe(keys) {
+    for (const k of keys) this._subs.add(k);
+    this._send({ type: 'subscribe', keys });
+  }
+
+  set(key, value) {
+    this._send({ type: 'set', key, value });
+  }
+
+  get(key) {
+    return new Promise(resolve => {
+      const id = 'g' + (++this._seq);
+      this._pending.set(id, { resolve });
+      this._send({ type: 'get', key, id });
+      setTimeout(() => {
+        if (this._pending.has(id)) { this._pending.delete(id); resolve(null); }
+      }, 5000);
+    });
+  }
+
+  delete(key) {
+    this._send({ type: 'delete', key });
+  }
+
+  get connected() {
+    return this.ws && this.ws.readyState === WebSocket.OPEN;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
+const ws = new WsDictClient(`ws://${location.host}/ws`);
+
+const state = {
+  channels: [],      // [{center_hz, symbol_rate_hz, is_burst}, ...]
+  config: null,      // {device, freq_hz, gain_db, sample_rate_hz, duration_sec}
+  specMeta: null,    // {fft_size, sample_rate, n_averaged}
+  specData: null,    // Float32Array
+  selectedCh: null,  // integer index or null
+  symbols: {},       // {N: Float32Array of interleaved re,im}
+};
+
+// ---------------------------------------------------------------------------
+// Connection status
+// ---------------------------------------------------------------------------
+const connDot  = document.getElementById('conn-dot');
+const connText = document.getElementById('conn-text');
+
+ws.addEventListener('open', () => {
+  connDot.className = 'dot dot-green';
+  connText.textContent = location.host;
+  ws.subscribe(['uhd:config', 'uhd:channels', 'uhd:spectrum:data', 'uhd:spectrum:meta', 'uhd:channel/*']);
+});
+ws.addEventListener('close', () => {
+  connDot.className = 'dot dot-red';
+  connText.textContent = 'reconnecting…';
+});
+
+// ---------------------------------------------------------------------------
+// Key update handler
+// ---------------------------------------------------------------------------
+ws.addEventListener('update', e => {
+  const { key, value } = e.detail;
+
+  if (key === 'uhd:channels') {
+    state.channels = Array.isArray(value) ? value : [];
+    renderChannelTable();
+    renderDetailIfSelected();
+  } else if (key === 'uhd:config') {
+    state.config = value;
+    renderConfig();
+  } else if (key === 'uhd:spectrum:meta') {
+    state.specMeta = value;
+    renderSpectrumLabel();
+  } else if (key === 'uhd:spectrum:data') {
+    if (typeof value === 'string') {
+      const bin = atob(value);
+      const arr = new Float32Array(bin.length / 4);
+      const dv = new DataView(new ArrayBuffer(bin.length));
+      for (let i = 0; i < bin.length; i++) dv.setUint8(i, bin.charCodeAt(i));
+      for (let i = 0; i < arr.length; i++) arr[i] = dv.getFloat32(i * 4, true);
+      state.specData = arr;
+      drawSpectrum();
+    }
+  } else if (key.startsWith('uhd:channel:') && key.endsWith(':symbols')) {
+    const n = parseInt(key.split(':')[2]);
+    if (typeof value === 'string') {
+      const bin = atob(value);
+      const arr = new Float32Array(bin.length / 4);
+      const dv = new DataView(new ArrayBuffer(bin.length));
+      for (let i = 0; i < bin.length; i++) dv.setUint8(i, bin.charCodeAt(i));
+      for (let i = 0; i < arr.length; i++) arr[i] = dv.getFloat32(i * 4, true);
+      state.symbols[n] = arr;
+    }
+    if (n === state.selectedCh) drawConstellation();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Channel table
+// ---------------------------------------------------------------------------
+const tbody = document.getElementById('ch-tbody');
+
+function renderChannelTable() {
+  tbody.innerHTML = '';
+  state.channels.forEach((ch, i) => {
+    const tr = document.createElement('tr');
+    tr.className = 'ch-row' + (i === state.selectedCh ? ' selected' : '');
+    tr.dataset.idx = i;
+
+    const rateK = (ch.symbol_rate_hz / 1000).toFixed(1) + 'k';
+    const modeBadge = ch.is_burst
+      ? '<span class="badge badge-burst">burst</span>'
+      : '<span class="badge badge-cont">cont</span>';
+
+    tr.innerHTML = `
+      <td class="col-s"><span class="dot dot-green"></span></td>
+      <td>${ch.center_hz >= 0 ? '+' : ''}${ch.center_hz}</td>
+      <td class="col-r">${rateK}</td>
+      <td class="col-m">${modeBadge}</td>
+      <td class="col-x"><button class="btn-del" data-idx="${i}">✕</button></td>
+    `;
+    tr.addEventListener('click', evt => {
+      if (evt.target.classList.contains('btn-del')) return;
+      selectChannel(i);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Add / delete channels
+// ---------------------------------------------------------------------------
+document.getElementById('btn-add').addEventListener('click', async () => {
+  const channels = [...state.channels, { center_hz: 0, symbol_rate_hz: 2_000_000, is_burst: false }];
+  ws.set('uhd:channels', channels);
+});
+
+tbody.addEventListener('click', e => {
+  const btn = e.target.closest('[data-idx]');
+  if (!btn || !btn.classList.contains('btn-del')) return;
+  const idx = parseInt(btn.dataset.idx);
+  const channels = state.channels.filter((_, i) => i !== idx);
+  ws.set('uhd:channels', channels);
+  if (state.selectedCh === idx) deselectChannel();
+  else if (state.selectedCh > idx) state.selectedCh--;
+});
+
+// ---------------------------------------------------------------------------
+// Detail pane
+// ---------------------------------------------------------------------------
+const detail      = document.getElementById('detail');
+const placeholder = document.getElementById('detail-placeholder');
+const detailTitle = document.getElementById('detail-title');
+const fCenter     = document.getElementById('f-center');
+const fRate       = document.getElementById('f-rate');
+const fBurst      = document.getElementById('f-burst');
+
+function selectChannel(n) {
+  state.selectedCh = n;
+  renderChannelTable();
+  renderDetailIfSelected();
+  // Subscribe to this channel's symbols
+  ws.subscribe([`uhd:channel:${n}:symbols`]);
+}
+
+function deselectChannel() {
+  state.selectedCh = null;
+  detail.classList.remove('visible');
+  placeholder.style.display = '';
+}
+
+function renderDetailIfSelected() {
+  if (state.selectedCh === null || state.selectedCh >= state.channels.length) {
+    deselectChannel();
+    return;
+  }
+  const n = state.selectedCh;
+  const ch = state.channels[n];
+  detail.classList.add('visible');
+  placeholder.style.display = 'none';
+  detailTitle.textContent = `channel ${n}`;
+  fCenter.value = ch.center_hz;
+  fRate.value   = ch.symbol_rate_hz;
+  fBurst.checked = !!ch.is_burst;
+  drawConstellation();
+}
+
+document.getElementById('ch-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const n = state.selectedCh;
+  if (n === null) return;
+  const channels = [...state.channels];
+  channels[n] = {
+    center_hz:      parseInt(fCenter.value) || 0,
+    symbol_rate_hz: parseInt(fRate.value)   || 2_000_000,
+    is_burst:       fBurst.checked,
+  };
+  ws.set('uhd:channels', channels);
+});
+
+// ---------------------------------------------------------------------------
+// Spectrum canvas
+// ---------------------------------------------------------------------------
+const specCanvas  = document.getElementById('spectrum-canvas');
+const specCtx     = specCanvas.getContext('2d');
+const specLabel   = document.getElementById('spectrum-label');
+
+function renderSpectrumLabel() {
+  if (!state.specMeta) return;
+  const { sample_rate, n_averaged, fft_size } = state.specMeta;
+  specLabel.textContent =
+    `spectrum  sr=${(sample_rate/1e6).toFixed(0)} MHz  bins=${fft_size}  avg=${n_averaged}`;
+}
+
+function drawSpectrum() {
+  const psd = state.specData;
+  if (!psd || psd.length === 0) return;
+
+  const W = specCanvas.parentElement.clientWidth - 16;
+  const H = 80;
+  specCanvas.width  = W;
+  specCanvas.height = H;
+
+  // dB normalised to peak
+  let maxV = -Infinity, minV = Infinity;
+  for (let i = 0; i < psd.length; i++) {
+    const v = 10 * Math.log10(Math.max(psd[i], 1e-20));
+    if (v > maxV) maxV = v;
+    if (v < minV) minV = v;
+  }
+  const range = Math.max(maxV - minV, 1);
+
+  specCtx.clearRect(0, 0, W, H);
+  specCtx.beginPath();
+  specCtx.strokeStyle = '#00d4ff';
+  specCtx.lineWidth = 0.8;
+
+  for (let i = 0; i < psd.length; i++) {
+    const x = (i / psd.length) * W;
+    const db = 10 * Math.log10(Math.max(psd[i], 1e-20));
+    const y = H - 2 - ((db - minV) / range) * (H - 4);
+    if (i === 0) specCtx.moveTo(x, y); else specCtx.lineTo(x, y);
+  }
+  specCtx.stroke();
+
+  // Channel markers
+  if (state.config && state.specMeta) {
+    const sr = state.specMeta.sample_rate;
+    specCtx.strokeStyle = '#f8514988';
+    specCtx.lineWidth = 1;
+    state.channels.forEach((ch, i) => {
+      const x = ((ch.center_hz / sr) + 0.5) * W;
+      specCtx.beginPath();
+      specCtx.moveTo(x, 0);
+      specCtx.lineTo(x, H);
+      specCtx.stroke();
+    });
+  }
+}
+
+window.addEventListener('resize', drawSpectrum);
+
+// ---------------------------------------------------------------------------
+// Constellation canvas
+// ---------------------------------------------------------------------------
+const constCanvas = document.getElementById('const-canvas');
+const constCtx    = constCanvas.getContext('2d');
+const constLabel  = document.getElementById('const-label');
+
+function drawConstellation() {
+  const n = state.selectedCh;
+  constCtx.clearRect(0, 0, 220, 220);
+  constCtx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg2').trim();
+  constCtx.fillRect(0, 0, 220, 220);
+
+  const flat = state.symbols[n];
+  if (!flat || flat.length < 2) {
+    constCtx.fillStyle = '#4a5568';
+    constCtx.font = '11px monospace';
+    constCtx.textAlign = 'center';
+    constCtx.fillText('waiting for symbols…', 110, 115);
+    constLabel.textContent = 'waiting for symbols…';
+    return;
+  }
+
+  // 99th-percentile normalization
+  const nPts = flat.length >> 1;
+  const mags = new Float32Array(nPts);
+  for (let i = 0; i < nPts; i++) mags[i] = Math.hypot(flat[2*i], flat[2*i+1]);
+  const sorted = Float32Array.from(mags).sort();
+  const p99 = sorted[Math.floor(sorted.length * 0.99)] || 1;
+
+  constCtx.fillStyle = '#4af';
+  constCtx.globalAlpha = 0.65;
+  const cx = 110, cy = 110, scale = 90 / p99;
+  for (let i = 0; i < nPts; i++) {
+    const x = cx + flat[2*i]   * scale;
+    const y = cy - flat[2*i+1] * scale;
+    constCtx.beginPath();
+    constCtx.arc(x, y, 1.8, 0, 2 * Math.PI);
+    constCtx.fill();
+  }
+  constCtx.globalAlpha = 1;
+  constLabel.textContent = `${nPts} symbols`;
+}
+
+// ---------------------------------------------------------------------------
+// Hardware config panel
+// ---------------------------------------------------------------------------
+function renderConfig() {
+  if (!state.config) return;
+  document.getElementById('cfg-freq').value = state.config.freq_hz  ?? '';
+  document.getElementById('cfg-gain').value = state.config.gain_db  ?? '';
+  document.getElementById('cfg-rate').value = state.config.sample_rate_hz ?? '';
+}
+
+document.getElementById('cfg-save').addEventListener('click', () => {
+  if (!state.config) return;
+  const cfg = {
+    ...state.config,
+    freq_hz:        parseFloat(document.getElementById('cfg-freq').value) || state.config.freq_hz,
+    gain_db:        parseFloat(document.getElementById('cfg-gain').value) || state.config.gain_db,
+    sample_rate_hz: parseFloat(document.getElementById('cfg-rate').value) || state.config.sample_rate_hz,
+  };
+  ws.set('uhd:config', cfg);
+});
+
+// ---------------------------------------------------------------------------
+// Status bar: reflect n_averaged changes as pipeline-running indicator
+// ---------------------------------------------------------------------------
+const statusbar = document.getElementById('statusbar');
+let lastNAvg = -1;
+let staleTimer = null;
+
+setInterval(() => {
+  if (!state.specMeta) return;
+  const n = state.specMeta.n_averaged;
+  if (n !== lastNAvg) {
+    lastNAvg = n;
+    statusbar.textContent = 'pipeline: running';
+    statusbar.style.color = 'var(--green)';
+    clearTimeout(staleTimer);
+    staleTimer = setTimeout(() => {
+      statusbar.textContent = 'pipeline: stalled';
+      statusbar.style.color = 'var(--yellow)';
+    }, 15000);
+  }
+}, 3000);
+</script>
+</body>
+</html>
