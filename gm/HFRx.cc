@@ -14,9 +14,12 @@
 #include "gm/hf/ft8.h"
 #include "gm/hf/js8.h"
 #include "gm/buffer/BufferFile.h"
+#include "gm/hf/hf_bands.h"
+#include "wsdict_server.h"
 
 static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
+static constexpr int kWsDictPort    = 8765;  // wsdict WebSocket server
 
 // Hz to bin index for the 1,048,576-bin / 6.553600 MHz ring.
 static int hzToBin(float hz) {
@@ -45,13 +48,13 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort);
     ft8channel.start();
 
-    gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort);
+    gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort, kWsDictPort);
     ft8.start();
 
     gm::cuda::WaterfallCuda waterfall(magblock.getRing(),
                                       wf_bin_start, wf_bin_end,
                                       gm::cuda::WaterfallCuda::DEFAULT_OUT_BINS,
-                                      kProxyXSubPort);
+                                      kWsDictPort);
     waterfall.start();
 
     std::unique_ptr<gm::cuda::JS8Cuda> js8channel;
@@ -73,10 +76,15 @@ int main(int argc, char* argv[]) {
     std::string ctrl_host     = "127.0.0.1";
     int         ctrl_port     = 8080;
     float       min_score     = 3.0f;
-    float       wf_start_hz   = 0.0f;
-    float       wf_end_hz     = 6553600.0f;  // full band by default
+    // HFChannelizer packs amateur HF bands into composite 0–3.83 MHz;
+    // bins above that are zero-filled.  Show only the live content region.
+    static constexpr float kCompositeContentHz = 3830000.0f;
+    float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 1915000 Hz
+    float       wf_bw_hz      = kCompositeContentHz;          // 3830000 Hz
     std::string record_file;
     std::string playback_file;
+    int         zoom_band_start = -1;
+    int         zoom_band_end   = -1;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--control-host") == 0 && i + 1 < argc) {
@@ -85,26 +93,63 @@ int main(int argc, char* argv[]) {
             ctrl_port = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
             min_score = std::stof(argv[++i]);
-        } else if (strcmp(argv[i], "--waterfall-start-hz") == 0 && i + 1 < argc) {
-            wf_start_hz = std::stof(argv[++i]);
-        } else if (strcmp(argv[i], "--waterfall-end-hz") == 0 && i + 1 < argc) {
-            wf_end_hz = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--waterfall-center-hz") == 0 && i + 1 < argc) {
+            wf_center_hz = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--waterfall-bw-hz") == 0 && i + 1 < argc) {
+            wf_bw_hz = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
             record_file = argv[++i];
         } else if (strcmp(argv[i], "--playback") == 0 && i + 1 < argc) {
             playback_file = argv[++i];
         } else if (strcmp(argv[i], "--js8") == 0) {
             enable_js8 = true;
+        } else if (strcmp(argv[i], "--zoom-band") == 0 && i + 2 < argc) {
+            zoom_band_start = std::stoi(argv[++i]);
+            zoom_band_end   = std::stoi(argv[++i]);
         }
     }
 
-    int wf_bin_start = hzToBin(wf_start_hz);
-    int wf_bin_end   = hzToBin(wf_end_hz);
+    int wf_bin_start = hzToBin(wf_center_hz - wf_bw_hz / 2.0f);
+    int wf_bin_end   = hzToBin(wf_center_hz + wf_bw_hz / 2.0f);
+    wf_bin_start     = std::max(0, wf_bin_start);
     wf_bin_end       = std::min(wf_bin_end, (int)1048576);
+    if (wf_bin_start >= wf_bin_end) {
+        fprintf(stderr, "[WF] waterfall range invalid (center=%.0f bw=%.0f); showing full content band\n",
+                wf_center_hz, wf_bw_hz);
+        wf_bin_start = 0;
+        wf_bin_end   = hzToBin(kCompositeContentHz);
+    }
+
+    if (zoom_band_start >= 0) {
+        // Build cumulative composite-bin table from kHFBands.
+        int cum_bins[kNumHFBands + 1];
+        cum_bins[0] = 0;
+        for (int b = 0; b < kNumHFBands; ++b)
+            cum_bins[b + 1] = cum_bins[b] + kHFBands[b].bw * 16;
+
+        zoom_band_start = std::max(0, std::min(zoom_band_start, kNumHFBands - 1));
+        zoom_band_end   = std::max(zoom_band_start, std::min(zoom_band_end, kNumHFBands));
+        wf_bin_start = cum_bins[zoom_band_start];
+        wf_bin_end   = cum_bins[zoom_band_end];
+        printf("Waterfall: --zoom-band %d-%d  (%s–%s)  bins [%d, %d)\n",
+               zoom_band_start, zoom_band_end,
+               kHFBands[zoom_band_start].name,
+               kHFBands[std::min(zoom_band_end, kNumHFBands - 1)].name,
+               wf_bin_start, wf_bin_end);
+    } else {
+        printf("Waterfall: center=%.0f Hz  bw=%.0f Hz  bins [%d, %d)\n",
+               wf_center_hz, wf_bw_hz, wf_bin_start, wf_bin_end);
+    }
 
     std::thread(runProxy).detach();
     printf("ZMQ proxy: XSUB tcp://*:%d  XPUB tcp://*:%d\n",
            kProxyXSubPort, kProxyXPubPort);
+
+    if (wsdict_server_start(kWsDictPort, "control", nullptr) != 0) {
+        fprintf(stderr, "Failed to start wsdict server on port %d\n", kWsDictPort);
+        return 1;
+    }
+    printf("wsdict server: http://localhost:%d  (WebSocket at /ws)\n", kWsDictPort);
 
     if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);

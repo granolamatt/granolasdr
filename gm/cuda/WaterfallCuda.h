@@ -1,29 +1,37 @@
 #pragma once
-#include <mutex>
 #include <cuda_runtime.h>
-#include <zmq.hpp>
 #include "gm/Thread.h"
 #include "gm/buffer/DeviceRingBuffer.h"
+#include "gm/hf/ft8_capture.h"  // FT8_TIME_OSR
 
 namespace gm {
 namespace cuda {
 
-// WaterfallCuda: graph block that decimates the mag ring to a per-slot waterfall
-// row and publishes it to ZMQ "waterfall" as a binary uint8 blob.
+// WaterfallCuda: publishes ROWS_PER_SLOT pre-colored RGBA rows to wsdict
+// on every MagBlock ring write, using all FT8_TIME_OSR time sub-arrays
+// within the slot.  Each sub-array represents a 40 ms time step, giving
+// FT8_TIME_OSR × ring_rate ≈ 25 rows/second at 6.25 slots/s.
 //
-// Constructed with a bin range [bin_start, bin_end) into the 1M-bin ring,
-// which maps to out_bins output pixels via linear average pooling.
-// Runs every ring write — one waterfall row per ring slot.
+// Output format per wsdict message: FT8_TIME_OSR × out_bins × 4 uint8 RGBA,
+// rows in chronological order (row 0 = oldest, row 3 = newest).
 //
-// Hz to bin: bin = round(hz / 6.25) for the 1,048,576-bin / 6.5 MHz ring.
+// Hz-to-bin for the 1,048,576-bin / 6.5536 MHz ring: bin = round(hz / 6.25)
 class WaterfallCuda : public Thread {
 public:
     static constexpr int DEFAULT_OUT_BINS = 2048;
+    static constexpr int WS_PORT          = 8765;
+    static constexpr int RING_KEYS        = 8;
+    static constexpr int ROWS_PER_SLOT    = FT8_TIME_OSR;  // 4
 
+    // wf_floor / wf_ceil: uint8 magnitude window for colormap normalization.
+    // Values outside this range are clamped. Typical HF noise floor ≈ 200,
+    // strong signals ≈ 240; start with floor=195 ceil=248 and adjust as needed.
     WaterfallCuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
                   int bin_start, int bin_end,
-                  int out_bins = DEFAULT_OUT_BINS,
-                  int zmq_port = 0);
+                  int out_bins  = DEFAULT_OUT_BINS,
+                  int ws_port   = WS_PORT,
+                  uint8_t wf_floor = 195,
+                  uint8_t wf_ceil  = 248);
     ~WaterfallCuda();
 
     void run();
@@ -31,19 +39,19 @@ public:
 
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
-    int bin_start_;
-    int bin_end_;
-    int out_bins_;
+    int     bin_start_;
+    int     bin_end_;
+    int     out_bins_;
+    int     ws_port_;
+    uint8_t wf_floor_;
+    uint8_t wf_ceil_;
 
     cudaStream_t stream_{};
     cudaEvent_t  ready_{};
 
-    uint8_t* out_d_{nullptr};
-    uint8_t* out_h_{nullptr};
-
-    zmq::context_t zmq_ctx_;
-    zmq::socket_t  zmq_pub_;
-    std::mutex     zmq_mu_;
+    // Device/pinned output: ROWS_PER_SLOT × out_bins × 4 bytes (RGBA).
+    uint8_t* rgba_d_{nullptr};
+    uint8_t* rgba_h_{nullptr};
 };
 
 } // namespace cuda

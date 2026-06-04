@@ -27,7 +27,18 @@ find_package(pybind11 REQUIRED)
 
 set (CMAKE_BUILD_TYPE Debug)
 #set (CMAKE_BUILD_TYPE RelWithDebInfo)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${PYTHON_INCLUDE_DIRS} "/opt/cuda/include" "/opt/cuda/targets/x86_64-linux/include/cccl")
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/third_party ${PYTHON_INCLUDE_DIRS} "/opt/cuda/include" "/opt/cuda/targets/x86_64-linux/include/cccl")
+
+# wsserver — Rust WebSocket dict server, built as a static library
+set(WSSERVER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/wsserver)
+set(WSSERVER_LIB ${WSSERVER_DIR}/target/release/libwsserver.a)
+add_custom_command(
+    OUTPUT ${WSSERVER_LIB}
+    COMMAND cargo build --release --lib
+    WORKING_DIRECTORY ${WSSERVER_DIR}
+    COMMENT "Building wsserver Rust static library"
+)
+add_custom_target(wsserver_lib DEPENDS ${WSSERVER_LIB})
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 120)
@@ -91,7 +102,8 @@ target_link_libraries (rx888_capture lib_granolamatt ${GM_LIBS})
 # -fsanitize=address
 
 add_executable(hf_rx "gm/HFRx.cc")
-target_link_libraries (hf_rx -lm lib_granolamatt gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a ${GM_LIBS})
+add_dependencies(hf_rx wsserver_lib)
+target_link_libraries (hf_rx -lm lib_granolamatt gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a ${GM_LIBS} ${WSSERVER_LIB} dl gcc_s util rt)
 
 add_executable(zmqclient gm/zmqcode/client.cc)
 target_link_libraries (zmqclient ${LIBLOC} zmq)

@@ -9,6 +9,7 @@
 #include "gm/hf/ft8_capture.h"
 #include "gm/hf/band_map.h"
 #include "gm/cuda/FT8Cuda.h"
+#include "wsdict.h"
 
 #include "ft8_lib/ft8/decode.h"
 #include "ft8_lib/ft8/constants.h"
@@ -101,7 +102,7 @@ static ftx_callsign_hash_interface_t hash_if = {
 namespace gm {
 namespace hf {
 
-    FT8::FT8(gm::cuda::FT8Cuda* ft8cuda_in, int zmq_port)
+    FT8::FT8(gm::cuda::FT8Cuda* ft8cuda_in, int zmq_port, int wsdict_port)
       : ft8cuda_(ft8cuda_in)
       , zmq_port_(zmq_port)
       , zmq_ctx_(1)
@@ -121,6 +122,15 @@ namespace hf {
             printf("FT8 ZMQ publisher → %s  topic=ft8/decode\n", endpoint.c_str());
         } else {
             printf("FT8 ZMQ disabled (stdout only)\n");
+        }
+
+        if (wsdict_port > 0) {
+            try {
+                ws_client_ = std::make_unique<WsDictClient>("127.0.0.1", wsdict_port);
+                printf("FT8 wsdict → port=%d  key=granolasdr:ft8:decode\n", wsdict_port);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[FT8] wsdict connect failed: %s\n", e.what());
+            }
         }
 
         timing_log_ = fopen("ft8_timing.csv", "a");
@@ -157,6 +167,16 @@ namespace hf {
                 auto result = zmq_pub_.send(payload, zmq::send_flags::dontwait);
                 if (!result)
                     fprintf(stderr, "[FT8] ZMQ send queue full, dropped: %s\n", callsign);
+            }
+            if (ws_client_) {
+                try {
+                    nlohmann::json v = nlohmann::json::parse(buf, buf + len);
+                    v["mode"] = "FT8";
+                    ws_client_->set("granolasdr:ft8:decode", v);
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[FT8] wsdict publish: %s\n", e.what());
+                    ws_client_.reset();
+                }
             }
         }
 
