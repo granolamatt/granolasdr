@@ -59,6 +59,23 @@ _SEND_TMPL = bytes.fromhex(
 TEMPLATES = _RECV_TMPL + _SEND_TMPL
 
 
+_FT8_SKIP = frozenset({"CQ", "DX", "DE", "QRZ", "TU;"})
+
+def _extract_ft8_sender(text: str) -> str:
+    """Return the sender callsign from a full FT8 decoded message string.
+
+    FT8 messages look like 'BA6HT 9M8DEN -14' or 'CQ W1AW FN31'.
+    The sender is the first token that is not a CQ/DX keyword, does not start
+    with '<' (hashed callsign), and contains at least one letter and one digit.
+    """
+    for word in text.split():
+        if word in _FT8_SKIP or word.startswith('<'):
+            continue
+        if any(c.isalpha() for c in word) and any(c.isdigit() for c in word):
+            return word
+    return ""
+
+
 def _str(s: str) -> bytes:
     """Encode string as 1-byte length prefix + ASCII bytes (max 254 chars)."""
     b = s.encode("ascii")[:254]
@@ -188,11 +205,15 @@ def main():
                 continue
             topic, payload = frames
             try:
-                mode = "JS8" if topic == b"js8/decode" else "FT8"
                 msg = json.loads(payload)
-                msg.setdefault("mode", mode)
-                call = msg.get("call", "")
-                if call and not call.startswith("Error"):
+                if topic == b"js8/decode":
+                    msg["mode"] = "JS8"
+                    call = msg.get("call", "")
+                else:
+                    msg["mode"] = "FT8"
+                    call = _extract_ft8_sender(msg.get("call", ""))
+                    msg["call"] = call
+                if call:
                     pending.append(msg)
             except json.JSONDecodeError:
                 pass

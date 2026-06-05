@@ -29,6 +29,7 @@ static const struct { const char* name; uint32_t freq_hz; } kFT8Presets[] = {
     {"15m",  21074000},
     {"12m",  24915000},
     {"10m",  28074000},
+    {"6m",  50313000},
 };
 static const int kNumFT8Presets = (int)(sizeof(kFT8Presets) / sizeof(kFT8Presets[0]));
 
@@ -85,7 +86,7 @@ ctrl_port_(ctrl_port) {
         bins.resize(kNumHFBands);
         for (int i = 0; i < kNumHFBands; ++i)
             bins[i] = {kHFBands[i].wb_start, kHFBands[i].wb_end, kHFBands[i].bw};
-        fft_length = 2048;
+        fft_length = 4096;
 
         cuda_check_error(cudaMalloc((void**)&demodData_d, BUFFERS * fft_length / 2 * sizeof(std::complex<float>) + 1024));
 
@@ -220,7 +221,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             offset += b[2];
         }
 
-        // 65,536-pt composite IFFT → 32,768 valid samples at 6.5536 MS/s.
+        // 4096-pt composite C2C IFFT → 2048 valid samples (center half) at 409.6 kHz.
         rval = cufftExecC2C(iplan, (cufftComplex*)&channelData_d[0],
             (cufftComplex*)&channelData_d[0], CUFFT_INVERSE);
         if (rval) {

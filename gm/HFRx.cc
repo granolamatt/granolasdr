@@ -23,31 +23,31 @@ static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
 static constexpr int kWsDictPort    = 8765;  // wsdict WebSocket server
 
-// Normal ring: 32768-pt FFT, 6.25 Hz/bin, 0.16s/block
-static constexpr int   kNormalRfftLen  = 32768;
+// Normal ring: 65536-pt FFT, 6.25 Hz/bin, 0.16s/block
+static constexpr int   kNormalRfftLen  = 65536;
 static constexpr int   kNormalTimeOsr  = 4;
 static constexpr int   kNormalFreqOsr  = 4;
 static constexpr int   kNormalCapBlks  = 106;   // FT8_CAPTURE_BLOCKS
 static constexpr float kNormalSymPer   = 0.160f; // seconds per ring block
 static constexpr float kNormalCycleSec = 15.0f;
 
-// Fast ring: 20480-pt FFT, 10 Hz/bin, 0.10s/block
-static constexpr int   kFastRfftLen   = 20480;
+// Fast ring: 40960-pt FFT, 10 Hz/bin, 0.10s/block
+static constexpr int   kFastRfftLen   = 40960;
 static constexpr int   kFastTimeOsr   = 2;
 static constexpr int   kFastFreqOsr   = 2;
 static constexpr int   kFastCapBlks   = 100;
 static constexpr float kFastSymPer    = 0.100f;
 static constexpr float kFastCycleSec  = 10.0f;
 
-// Slow ring: 65536-pt FFT, 3.125 Hz/bin, 0.32s/block  (204800/3.125=65536 exactly)
-static constexpr int   kSlowRfftLen   = 65536;
+// Slow ring: 131072-pt FFT, 3.125 Hz/bin, 0.32s/block  (409600/3.125=131072 exactly)
+static constexpr int   kSlowRfftLen   = 131072;
 static constexpr int   kSlowTimeOsr   = 2;
 static constexpr int   kSlowFreqOsr   = 2;
 static constexpr int   kSlowCapBlks   = 94;    // 30.0s / 0.320s = 93.75 → 94
 static constexpr float kSlowSymPer    = 0.320f;
 static constexpr float kSlowCycleSec  = 30.0f;
 
-// Hz to bin index for the 32,768-bin / 204.8 kHz composite ring.
+// Hz to bin index for the 65,536-bin / 409.6 kHz composite ring.
 static int hzToBin(float hz) {
     return (int)(hz / 6.25f + 0.5f);
 }
@@ -143,9 +143,9 @@ int main(int argc, char* argv[]) {
     std::string ctrl_host       = "127.0.0.1";
     int         ctrl_port       = 8080;
     float       min_score       = 3.0f;
-    // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–90 kHz;
+    // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–211 kHz;
     // bins above that are zero-filled.  Show only the live content region.
-    static constexpr float kCompositeContentHz = 90000.0f;   // 900 bins × 100 Hz
+    static constexpr float kCompositeContentHz = 211000.0f;  // 2110 bins × 100 Hz
     float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 45000 Hz
     float       wf_bw_hz      = kCompositeContentHz;          // 90000 Hz
     std::string record_file;
@@ -183,7 +183,7 @@ int main(int argc, char* argv[]) {
     int wf_bin_start = hzToBin(wf_center_hz - wf_bw_hz / 2.0f);
     int wf_bin_end   = hzToBin(wf_center_hz + wf_bw_hz / 2.0f);
     wf_bin_start     = std::max(0, wf_bin_start);
-    wf_bin_end       = std::min(wf_bin_end, (int)32768);
+    wf_bin_end       = std::min(wf_bin_end, (int)65536);
     if (wf_bin_start >= wf_bin_end) {
         fprintf(stderr, "[WF] waterfall range invalid (center=%.0f bw=%.0f); showing full content band\n",
                 wf_center_hz, wf_bw_hz);

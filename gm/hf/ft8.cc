@@ -154,6 +154,9 @@ namespace hf {
     void FT8::publishDecoded(const char* callsign, float freq_hz, float snr,
                               double unix_time, float time_offset)
     {
+        printf("DECODED: %s time_offset=%.3fs freq=%.0fHz snr=%.1f unix=%.0f\n",
+               callsign, (double)time_offset, (double)freq_hz, (double)snr, unix_time);
+
         char buf[256];
         int len = snprintf(buf, sizeof(buf),
             "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
