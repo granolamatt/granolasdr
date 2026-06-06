@@ -74,6 +74,17 @@ def _receiver_block(rx_call: str, rx_grid: str, rig: str) -> bytes:
     return struct.pack(">HH", 0x9992, 4 + len(payload)) + payload
 
 
+def _dedup_reports(reports: list[dict]) -> list[dict]:
+    """One report per (callsign, band): keep the entry with the best SNR.
+    Band bucket is freq // 1_000_000 so 20m and 10m are always distinct."""
+    best: dict[tuple, dict] = {}
+    for r in reports:
+        key = (r["call"], int(r["freq"]) // 1_000_000)
+        if key not in best or r["snr"] > best[key]["snr"]:
+            best[key] = r
+    return list(best.values())
+
+
 def _sender_block(reports: list[dict]) -> bytes:
     """99 93 ll ll + one record per report."""
     records = b""
@@ -174,9 +185,10 @@ def main():
                 last_template_time = time.time()
 
             try:
-                upload(rx_call, rx_grid, rx_rig, pending, seq, session_id, include_tmpl,
+                to_send = _dedup_reports(pending)
+                upload(rx_call, rx_grid, rx_rig, to_send, seq, session_id, include_tmpl,
                        PSK_HOST, psk_port)
-                seq += len(pending)   # seq = cumulative report count, not packet count
+                seq += len(to_send)   # seq = cumulative report count, not packet count
                 packets_sent += 1
                 pending.clear()
                 last_upload = time.time()
