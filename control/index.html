@@ -89,8 +89,11 @@
 <ul id="decode-list"></ul>
 
 <!-- wideband waterfall -->
-<h2>waterfall — HF bands composite (160m–10m packed)</h2>
-<canvas id="waterfall" width="2048" height="1200" style="width:100%;image-rendering:pixelated;display:block;border:1px solid #333;"></canvas>
+<h2>waterfall — HF bands composite (160m–6m packed)</h2>
+<div style="position:relative;display:block;">
+  <canvas id="waterfall" width="2048" height="1200" style="width:100%;image-rendering:pixelated;display:block;border:1px solid #333;"></canvas>
+  <div id="wf-separators" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
+</div>
 <div id="wf-bands" style="position:relative;height:16px;font-size:0.7em;color:#666;margin-bottom:4px;"></div>
 
 <div class="status-bar">
@@ -283,11 +286,18 @@ const WF_TOTAL_COMPOSITE_HZ = 211000;
 function renderWfBandLabels() {
   const div = document.getElementById('wf-bands');
   const spans = WF_COMPOSITE_BANDS.map(([start, end, name]) => {
-    const centerPx  = (start + end) / 2 / WF_TOTAL_COMPOSITE_HZ * WF_OUT_BINS;
-    const pct       = (centerPx / (WF_OUT_BINS - 1) * 100).toFixed(2);
+    const centerPx = (start + end) / 2 / WF_TOTAL_COMPOSITE_HZ * WF_OUT_BINS;
+    const pct      = (centerPx / (WF_OUT_BINS - 1) * 100).toFixed(2);
     return `<span style="position:absolute;left:${pct}%;transform:translateX(-50%);color:#7ec8e3">${name}</span>`;
   });
   div.innerHTML = spans.join('');
+
+  // Vertical separator lines at each band boundary.
+  const sep = document.getElementById('wf-separators');
+  sep.innerHTML = WF_COMPOSITE_BANDS.slice(1).map(([start]) => {
+    const pct = (start / WF_TOTAL_COMPOSITE_HZ * 100).toFixed(2);
+    return `<div style="position:absolute;top:0;bottom:0;left:${pct}%;width:1px;background:rgba(120,120,180,0.45);"></div>`;
+  }).join('');
 }
 
 let wfCanvas, wfCtx, wfDebugDone = false;
