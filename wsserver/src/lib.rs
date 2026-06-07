@@ -11,7 +11,7 @@ use axum::routing::get;
 use tower_http::services::ServeDir;
 
 use crate::dict::Dict;
-use crate::server::{ws_handler, AppState};
+use crate::server::{run_ttl_sweep, ws_handler, AppState};
 use crate::subs::Subscriptions;
 
 // ── Rust API ─────────────────────────────────────────────────────────────────
@@ -25,12 +25,10 @@ static SERVER: OnceLock<Mutex<Option<ServerHandle>>> = OnceLock::new();
 
 /// Start the wsdict server in a background thread on the given port.
 /// Blocks until the server is bound and listening, then returns.
-/// state_file: optional path to persist uhd:config / uhd:channels across restarts.
-pub fn start(port: u16, static_dir: &str, state_file: Option<&str>) -> Result<(), String> {
+pub fn start(port: u16, static_dir: &str, _state_file: Option<&str>) -> Result<(), String> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let static_dir = static_dir.to_string();
-    let state_path = state_file.map(std::path::PathBuf::from);
 
     let thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -39,9 +37,25 @@ pub fn start(port: u16, static_dir: &str, state_file: Option<&str>) -> Result<()
             .expect("wsserver: failed to build tokio runtime");
         rt.block_on(async move {
             let state = Arc::new(AppState {
-                dict: Dict::new_with_state(state_path),
+                dict: Dict::new(),
                 subs: Subscriptions::new(),
             });
+
+            // Spawn TTL sweep with panic-restart loop.
+            {
+                let sweep_state = state.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let result =
+                            tokio::spawn(run_ttl_sweep(sweep_state.clone())).await;
+                        if let Err(e) = result {
+                            tracing::warn!(error = ?e, "TTL sweep panicked, restarting in 1s");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                });
+            }
+
             let app = axum::Router::new()
                 .route("/ws", get(ws_handler))
                 .nest_service("/", ServeDir::new(&static_dir))
@@ -94,7 +108,7 @@ pub fn stop() {
 
 /// Start the wsdict server. Blocks until listening. Returns 0 on success, -1 on failure.
 /// static_dir: path to static files (NULL → "static").
-/// state_file: path for persistent dict state (NULL → no persistence).
+/// state_file: reserved, pass NULL.
 #[no_mangle]
 pub extern "C" fn wsdict_server_start(
     port: u16,

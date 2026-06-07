@@ -175,7 +175,11 @@ namespace hf {
                 try {
                     nlohmann::json v = nlohmann::json::parse(buf, buf + len);
                     v["mode"] = "FT8";
-                    ws_client_->set("granolasdr:ft8:decode", v);
+                    // One key per callsign; '/' → '-' so key doesn't contain glob separator.
+                    // 900s (15 min) TTL matches the display window and survives page refresh.
+                    std::string call_key = callsign;
+                    std::replace(call_key.begin(), call_key.end(), '/', '-');
+                    ws_client_->set_with_ttl("granolasdr:ft8:heard:" + call_key, v, 900000);
                 } catch (const std::exception& e) {
                     fprintf(stderr, "[FT8] wsdict publish: %s\n", e.what());
                     ws_client_.reset();

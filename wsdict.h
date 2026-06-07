@@ -1,13 +1,12 @@
 #pragma once
-// wsdict.h — WebSocket dict C++ client + pipeline config loading.
-// Replaces redis_config.h. All implementation is inline (header-only).
+// wsdict.h — C++ client for the websocket_dict server.
+// Canonical location: websocket_dict/include/wsdict.h
+// Include in consumer projects: #include "path/to/websocket_dict/include/wsdict.h"
 //
-// Server: websocket_dict at ws://127.0.0.1:8765/ws
-// Keys:
-//   uhd:config     — JSON object: device, freq_hz, gain_db, sample_rate_hz, duration_sec
-//   uhd:channels   — JSON array of channel objects: [{center_hz, symbol_rate_hz, is_burst}, ...]
-//   uhd:spectrum:data — base64-encoded float32 PSD bins
-//   uhd:spectrum:meta — JSON object: fft_size, sample_rate, n_averaged
+// Protocol: ws://127.0.0.1:8765/ws  (port configurable)
+// All messages are JSON over WebSocket text frames (RFC 6455).
+//
+// Thread safety: one WsDictClient per thread. Do not share instances.
 
 #include <nlohmann/json.hpp>
 
@@ -69,13 +68,32 @@ public:
     // Send {"type":"set","key":key,"value":value}. Fire-and-forget.
     inline void set(const std::string& key, const nlohmann::json& value);
 
+    // Send set with TTL. The key expires after ttl_ms milliseconds.
+    // Minimum precision: ~100ms (server sweep interval).
+    inline void set_with_ttl(const std::string& key,
+                              const nlohmann::json& value,
+                              int ttl_ms);
+
     // Send get and return the value, or null json if key not found.
     inline nlohmann::json get(const std::string& key);
 
-    // Subscribe to keys / glob patterns (e.g. "uhd:channel/*").
-    // Reads and discards the "subscribed" ack. After this, recv_message()
-    // returns update messages. The server also pushes current values for any
-    // existing subscribed keys immediately after "subscribed".
+    // List all currently live keys. Returns a vector of key strings.
+    //
+    // LIMITATION: must be called on a dedicated non-subscribed connection.
+    // On a subscribed connection, async push messages (update, key_expired)
+    // can arrive before the "keys" response and would be silently discarded.
+    // Create a short-lived WsDictClient just for this call.
+    inline std::vector<std::string> list();
+
+    // Subscribe to keys / glob patterns. After this, recv_message() delivers
+    // update, key_expired, and key_deleted messages. The server immediately
+    // pushes current values for all currently matching keys.
+    //
+    // Glob patterns:
+    //   events/*     — single segment: events/a but not events/a/b
+    //   program/**   — any depth: program/a, program/a/b, program/a/b/c
+    //   **           — all keys
+    //   plot_*       — prefix match within a single segment
     inline void subscribe(const std::vector<std::string>& keys);
 
     // Block until next server→client message. Returns parsed JSON.
@@ -114,7 +132,7 @@ inline WsDictClient::WsDictClient(const char* host, int port)
             host + ":" + std::to_string(port) + "?");
     }
 
-    // HTTP/1.1 WebSocket upgrade — generate a random 16-byte key
+    // HTTP/1.1 WebSocket upgrade
     std::mt19937 rng(std::random_device{}());
     uint8_t kb[16];
     for (auto& b : kb) b = static_cast<uint8_t>(rng());
@@ -261,6 +279,16 @@ inline void WsDictClient::set(const std::string& key, const nlohmann::json& valu
     send_frame(msg.dump());
 }
 
+inline void WsDictClient::set_with_ttl(const std::string& key,
+                                        const nlohmann::json& value,
+                                        int ttl_ms)
+{
+    nlohmann::json msg = {
+        {"type", "set"}, {"key", key}, {"value", value}, {"ttl_ms", ttl_ms}
+    };
+    send_frame(msg.dump());
+}
+
 inline nlohmann::json WsDictClient::get(const std::string& key)
 {
     std::string id = "g" + std::to_string(++req_id_);
@@ -278,12 +306,26 @@ inline nlohmann::json WsDictClient::get(const std::string& key)
     }
 }
 
+inline std::vector<std::string> WsDictClient::list()
+{
+    nlohmann::json msg = {{"type", "list"}};
+    send_frame(msg.dump());
+    // Read until we get the "keys" response.
+    // Safe only on a non-subscribed connection — see LIMITATION in the declaration.
+    while (true) {
+        nlohmann::json resp = nlohmann::json::parse(recv_frame());
+        if (resp.value("type", "") == "keys") {
+            return resp["keys"].get<std::vector<std::string>>();
+        }
+    }
+}
+
 inline void WsDictClient::subscribe(const std::vector<std::string>& keys)
 {
     nlohmann::json msg = {{"type", "subscribe"}, {"keys", keys}};
     send_frame(msg.dump());
     recv_frame();  // read and discard the "subscribed" ack
-    // Note: server may also push initial "update" messages for existing keys.
+    // Note: server immediately pushes current values for matching keys.
     // The caller is responsible for reading those via recv_message().
 }
 
@@ -293,7 +335,7 @@ inline nlohmann::json WsDictClient::recv_message()
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline config data types (formerly in redis_config.h)
+// Pipeline config data types
 // ---------------------------------------------------------------------------
 
 struct ChannelConfig {
@@ -309,11 +351,10 @@ struct PipelineConfig {
     double                   sample_rate_hz{200e6};
     double                   duration_sec  {0.0};
     int                      waterfall_interval_ms{500};
-    // "uhd" → UhdSource (default); "gpu_direct" → GpuDirectSource emulator
     std::string              source              {"uhd"};
     bool                     gpu_direct_open_loop{false};
-    int                      gpu_direct_udp_port {0};     // 0=synthetic, >0=UDP recv from dvbs2tx
-    uint16_t                 gpu_direct_fc_epid  {0};     // FPGA SEP EPID for STRC FC packets (0=disabled)
+    int                      gpu_direct_udp_port {0};
+    uint16_t                 gpu_direct_fc_epid  {0};
     std::vector<ChannelConfig> channels;
 };
 
@@ -328,7 +369,6 @@ inline void write_defaults_if_missing(const char* host = "127.0.0.1", int port =
         try {
             WsDictClient c(host, port);
 
-            // Only write if uhd:config is absent
             nlohmann::json existing = c.get("uhd:config");
             if (!existing.is_null()) return;
 
@@ -378,22 +418,20 @@ inline PipelineConfig load_config(const char* host = "127.0.0.1", int port = 876
         try {
             WsDictClient c(host, port);
 
-            // uhd:config
             nlohmann::json j = c.get("uhd:config");
             if (!j.is_null()) {
-                if (j.contains("device"))         cfg.device         = j["device"].get<std::string>();
-                if (j.contains("freq_hz"))        cfg.freq_hz        = j["freq_hz"].get<double>();
-                if (j.contains("gain_db"))        cfg.gain_db        = j["gain_db"].get<double>();
+                if (j.contains("device"))                cfg.device                = j["device"].get<std::string>();
+                if (j.contains("freq_hz"))               cfg.freq_hz               = j["freq_hz"].get<double>();
+                if (j.contains("gain_db"))               cfg.gain_db               = j["gain_db"].get<double>();
                 if (j.contains("sample_rate_hz"))        cfg.sample_rate_hz        = j["sample_rate_hz"].get<double>();
                 if (j.contains("duration_sec"))          cfg.duration_sec          = j["duration_sec"].get<double>();
                 if (j.contains("waterfall_interval_ms")) cfg.waterfall_interval_ms = j["waterfall_interval_ms"].get<int>();
-                if (j.contains("source"))               cfg.source               = j["source"].get<std::string>();
-                if (j.contains("gpu_direct_open_loop")) cfg.gpu_direct_open_loop = j["gpu_direct_open_loop"].get<bool>();
-                if (j.contains("gpu_direct_udp_port"))  cfg.gpu_direct_udp_port  = j["gpu_direct_udp_port"].get<int>();
-                if (j.contains("gpu_direct_fc_epid"))   cfg.gpu_direct_fc_epid   = static_cast<uint16_t>(j["gpu_direct_fc_epid"].get<int>());
+                if (j.contains("source"))                cfg.source                = j["source"].get<std::string>();
+                if (j.contains("gpu_direct_open_loop"))  cfg.gpu_direct_open_loop  = j["gpu_direct_open_loop"].get<bool>();
+                if (j.contains("gpu_direct_udp_port"))   cfg.gpu_direct_udp_port   = j["gpu_direct_udp_port"].get<int>();
+                if (j.contains("gpu_direct_fc_epid"))    cfg.gpu_direct_fc_epid    = static_cast<uint16_t>(j["gpu_direct_fc_epid"].get<int>());
             }
 
-            // uhd:channels — JSON array
             nlohmann::json chs = c.get("uhd:channels");
             if (!chs.is_null() && chs.is_array()) {
                 for (const auto& ch_j : chs) {
@@ -413,11 +451,11 @@ inline PipelineConfig load_config(const char* host = "127.0.0.1", int port = 876
         }
     }
 
-    std::cout << "[config] device="         << cfg.device
-              << "  freq="    << cfg.freq_hz / 1e6   << " MHz"
-              << "  gain="    << cfg.gain_db          << " dB"
-              << "  rate="    << cfg.sample_rate_hz / 1e6 << " Msps"
-              << "  channels=" << cfg.channels.size() << "\n";
+    std::cout << "[config] device="  << cfg.device
+              << "  freq="    << cfg.freq_hz / 1e6        << " MHz"
+              << "  gain="    << cfg.gain_db               << " dB"
+              << "  rate="    << cfg.sample_rate_hz / 1e6  << " Msps"
+              << "  channels=" << cfg.channels.size()      << "\n";
     for (size_t i = 0; i < cfg.channels.size(); i++) {
         std::cout << "  ch[" << i << "]"
                   << "  center=" << cfg.channels[i].center_hz / 1e6 << " MHz"
@@ -429,11 +467,7 @@ inline PipelineConfig load_config(const char* host = "127.0.0.1", int port = 876
 
 // ---------------------------------------------------------------------------
 // start_config_watcher — background thread that restarts the pipeline when
-// uhd:config or uhd:channels changes.
-//
-// Strategy: fetch baseline values, then subscribe. Compare each incoming
-// update against the baseline — initial subscription pushes match the
-// baseline and are ignored; a genuine change triggers restart_cb().
+// uhd:config or uhd:channels changes or expires.
 // ---------------------------------------------------------------------------
 
 inline std::thread start_config_watcher(std::function<void()> restart_cb,
@@ -484,6 +518,14 @@ inline std::thread start_config_watcher(std::function<void()> restart_cb,
                         if (key == "uhd:config" || key == "uhd:channels") {
                             std::cout << "[config watcher] " << key
                                       << " deleted — restarting pipeline\n";
+                            restart_cb();
+                            return;
+                        }
+                    } else if (type == "key_expired") {
+                        std::string key = msg["key"];
+                        if (key == "uhd:config" || key == "uhd:channels") {
+                            std::cout << "[config watcher] " << key
+                                      << " expired — restarting pipeline\n";
                             restart_cb();
                             return;
                         }

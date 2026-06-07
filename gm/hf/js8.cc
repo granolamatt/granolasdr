@@ -404,7 +404,7 @@ namespace hf {
 
 JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
          float symbol_period, float cycle_secs, int time_osr, int rfft_size,
-         const char* mode_name)
+         const char* mode_name, int wsdict_port)
     : zmq_port_(zmq_port),
       symbol_period_(symbol_period), cycle_secs_(cycle_secs),
       time_osr_(time_osr), rfft_size_(rfft_size), mode_name_(mode_name),
@@ -416,6 +416,20 @@ JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
         snprintf(endpoint, sizeof(endpoint), "tcp://localhost:%d", zmq_port_);
         zmq_pub_.connect(endpoint);
         printf("[%s] ZMQ publisher → %s  topic=js8/decode\n", mode_name_, endpoint);
+    }
+
+    if (wsdict_port > 0) {
+        // Build wsdict key from mode name: "JS8" → "js8", "JS8 Fast" → "js8fast"
+        std::string key_part = mode_name_;
+        for (char& c : key_part) c = (char)tolower((unsigned char)c);
+        key_part.erase(std::remove(key_part.begin(), key_part.end(), ' '), key_part.end());
+        wsdict_key_ = "granolasdr:" + key_part + ":heard:";
+        try {
+            ws_client_ = std::make_unique<WsDictClient>("127.0.0.1", wsdict_port);
+            printf("[%s] wsdict → port=%d  key_prefix=%s\n", mode_name_, wsdict_port, wsdict_key_.c_str());
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[%s] wsdict connect failed: %s\n", mode_name_, e.what());
+        }
     }
 
     js8cuda->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
@@ -454,6 +468,20 @@ void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
             auto result = zmq_pub_.send(payload, zmq::send_flags::dontwait);
             if (!result)
                 fprintf(stderr, "[%s] ZMQ send queue full, dropped: %s\n", mode_name_, text);
+        }
+    }
+    if (ws_client_ && from_call && from_call[0]) {
+        std::lock_guard<std::mutex> lk(ws_mutex_);
+        try {
+            nlohmann::json v = nlohmann::json::parse(buf, buf + len);
+            // One key per callsign; '/' → '-' so key doesn't contain glob separator.
+            // 900s (15 min) TTL matches the display window and survives page refresh.
+            std::string call_key(from_call);
+            std::replace(call_key.begin(), call_key.end(), '/', '-');
+            ws_client_->set_with_ttl(wsdict_key_ + call_key, v, 900000);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[%s] wsdict publish: %s\n", mode_name_, e.what());
+            ws_client_.reset();
         }
     }
 }

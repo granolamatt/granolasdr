@@ -26,7 +26,8 @@ __global__ void js8FastSyncScanKernel(
     int16_t*  __restrict__ cand_score,
     uint32_t* __restrict__ cand_count,
     uint32_t max_cands,
-    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score)
+    int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
+    bool legacy_costas)
 {
     const int BLOCK_SZ = blockDim.x;
     const int WINDOW   = BLOCK_SZ + 8;
@@ -64,42 +65,69 @@ __global__ void js8FastSyncScanKernel(
 
     if (fo > num_bins - 8) return;
 
-    int score = 0, num_valid = 0;
-
-    for (int m = 0; m < 3; ++m) {
-        for (int k = 0; k < 7; ++k) {
-            int block_abs = time_off + 36 * m + k;
-            if (block_abs >= num_blocks) break;
-
-            int sm = kCostasModified[m][k];  // MODIFIED: block-dependent Costas
-            int si = (m * 7 + k) * WINDOW + threadIdx.x;
-
-            int cur = (int)smem[si + sm];
-
-            int best_other = 0;
-            for (int j = 0; j < 8; ++j) {
-                if (j == sm) continue;
-                int v = (int)smem[si + j];
-                if (v > best_other) best_other = v;
+    if (legacy_costas) {
+        int score = 0, num_avg = 0;
+        for (int m = 0; m < 3; ++m) {
+            for (int k = 0; k < 7; ++k) {
+                int block_abs = time_off + 36 * m + k;
+                if (block_abs >= num_blocks) break;
+                int sm  = kCostasModified[m][k];
+                int si  = (m * 7 + k) * WINDOW + threadIdx.x;
+                int cur = (int)smem[si + sm];
+                if (sm > 0) { score += cur - (int)smem[si + sm - 1]; ++num_avg; }
+                if (sm < 7) { score += cur - (int)smem[si + sm + 1]; ++num_avg; }
+                if (k > 0 && block_abs > 0) {
+                    int si_prev = (m * 7 + k - 1) * WINDOW + threadIdx.x;
+                    score += cur - (int)smem[si_prev + sm]; ++num_avg;
+                }
+                if (k < 6 && block_abs + 1 < num_blocks) {
+                    int si_next = (m * 7 + k + 1) * WINDOW + threadIdx.x;
+                    score += cur - (int)smem[si_next + sm]; ++num_avg;
+                }
             }
-
-            score += cur - best_other;
-            ++num_valid;
         }
-    }
-
-    if (num_valid == 0) return;
-    float fscore = (float)score / (float)num_valid;
-    if (fscore < min_score) return;
-
-    uint32_t idx = atomicAdd(cand_count, 1u);
-    if (idx < max_cands) {
-        cand_fo[idx]    = fo;
-        cand_to[idx]    = (uint8_t)time_off;
-        cand_ts[idx]    = (uint8_t)time_sub;
-        cand_fs[idx]    = (uint8_t)freq_sub;
-        int16_t s16     = (fscore >= 32767.0f) ? 32767 : (int16_t)fscore;
-        cand_score[idx] = s16;
+        if (num_avg == 0) return;
+        score /= num_avg;
+        if (score < (int)min_score) return;
+        uint32_t idx = atomicAdd(cand_count, 1u);
+        if (idx < max_cands) {
+            cand_fo[idx]    = fo;
+            cand_to[idx]    = (uint8_t)time_off;
+            cand_ts[idx]    = (uint8_t)time_sub;
+            cand_fs[idx]    = (uint8_t)freq_sub;
+            cand_score[idx] = (int16_t)(score > 32767 ? 32767 : score);
+        }
+    } else {
+        int score = 0, num_valid = 0;
+        for (int m = 0; m < 3; ++m) {
+            for (int k = 0; k < 7; ++k) {
+                int block_abs = time_off + 36 * m + k;
+                if (block_abs >= num_blocks) break;
+                int sm = kCostasModified[m][k];
+                int si = (m * 7 + k) * WINDOW + threadIdx.x;
+                int cur = (int)smem[si + sm];
+                int best_other = 0;
+                for (int j = 0; j < 8; ++j) {
+                    if (j == sm) continue;
+                    int v = (int)smem[si + j];
+                    if (v > best_other) best_other = v;
+                }
+                score += cur - best_other;
+                ++num_valid;
+            }
+        }
+        if (num_valid == 0) return;
+        float fscore = (float)score / (float)num_valid;
+        if (fscore < min_score) return;
+        uint32_t idx = atomicAdd(cand_count, 1u);
+        if (idx < max_cands) {
+            cand_fo[idx]    = fo;
+            cand_to[idx]    = (uint8_t)time_off;
+            cand_ts[idx]    = (uint8_t)time_sub;
+            cand_fs[idx]    = (uint8_t)freq_sub;
+            int16_t s16     = (fscore >= 32767.0f) ? 32767 : (int16_t)fscore;
+            cand_score[idx] = s16;
+        }
     }
 }
 
@@ -114,7 +142,8 @@ void js8_fast_gpu_scan(
     uint32_t* cand_count_d,
     uint32_t  max_cands,
     int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool legacy_costas)
 {
     cudaMemsetAsync(cand_count_d, 0, sizeof(uint32_t), stream);
 
@@ -127,7 +156,7 @@ void js8_fast_gpu_scan(
     js8FastSyncScanKernel<<<grid, BLOCK_SZ, smem_bytes, stream>>>(
         mag_d, snap_start, ring_size,
         cand_fo_d, cand_to_d, cand_ts_d, cand_fs_d, cand_score_d, cand_count_d, max_cands,
-        num_bins, num_blocks, time_osr, freq_osr, min_score);
+        num_bins, num_blocks, time_osr, freq_osr, min_score, legacy_costas);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)

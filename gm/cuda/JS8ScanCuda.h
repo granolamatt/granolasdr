@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 // Upper bound on GPU candidates returned per JS8 scan.
-static const uint32_t JS8_GPU_CAND_MAX = 2048;
+static const uint32_t JS8_GPU_CAND_MAX = 50000;
 
 // Launch the JS8 sync score scan kernel.
 //
@@ -24,4 +24,5 @@ void js8_gpu_scan(
     uint32_t* cand_count_d,
     uint32_t  max_cands,
     int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    bool legacy_costas = false);

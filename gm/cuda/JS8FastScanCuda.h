@@ -22,4 +22,5 @@ void js8_fast_gpu_scan(
     uint32_t* cand_count_d,
     uint32_t  max_cands,
     int num_bins, int num_blocks, int time_osr, int freq_osr, float min_score,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    bool legacy_costas = false);

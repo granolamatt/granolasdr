@@ -8,18 +8,6 @@
   body { font-family: monospace; background: #1a1a1a; color: #e0e0e0; max-width: 900px; margin: 40px auto; padding: 0 16px; }
   h1 { color: #7ec8e3; font-size: 1.2em; margin-bottom: 20px; }
   h2 { color: #aaa; font-size: 0.95em; margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 1px; }
-  /* sinks */
-  .sink { border: 1px solid #333; border-radius: 4px; padding: 14px; margin-bottom: 10px; }
-  .sink-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-  .sink-id { color: #7ec8e3; font-weight: bold; min-width: 50px; }
-  .sink-label { color: #aaa; font-size: 0.9em; flex: 1; }
-  .sink-freq { color: #98e890; font-size: 1.1em; }
-  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  input[type=number] { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 5px 8px; width: 120px; font-family: monospace; }
-  select { background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 5px 8px; font-family: monospace; }
-  button { background: #2a4a5a; color: #e0e0e0; border: 1px solid #7ec8e3; border-radius: 3px; padding: 5px 12px; cursor: pointer; font-family: monospace; }
-  button:hover { background: #3a6a8a; }
-  .error { color: #e87070; font-size: 0.85em; margin-top: 4px; }
   /* dashboard panels */
   .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 600px) { .panels { grid-template-columns: 1fr; } }
@@ -90,14 +78,14 @@
   <div class="panel">
     <h2>bands — 15 min window</h2>
     <table id="band-table">
-      <thead><tr><th>band</th><th>decodes</th><th>best SNR</th></tr></thead>
+      <thead><tr><th>band</th><th>stations</th><th>best SNR</th></tr></thead>
       <tbody id="band-tbody"></tbody>
     </table>
   </div>
 </div>
 
 <!-- decode stream -->
-<h2>decode stream <span style="color:#555;font-size:0.8em">(newest first, last 200)</span></h2>
+<h2>decode stream <span style="color:#555;font-size:0.8em">(newest first, last 200 — persists across refresh)</span></h2>
 <ul id="decode-list"></ul>
 
 <!-- wideband waterfall -->
@@ -105,13 +93,8 @@
 <canvas id="waterfall" width="2048" height="1200" style="width:100%;image-rendering:pixelated;display:block;border:1px solid #333;"></canvas>
 <div id="wf-bands" style="position:relative;height:16px;font-size:0.7em;color:#666;margin-bottom:4px;"></div>
 
-<!-- tunable sinks -->
-<h2>tunable sinks</h2>
-<div id="sinks"></div>
-
 <div class="status-bar">
   <span><span id="sse-dot"></span>WS bus <span id="sse-status">disconnected</span></span>
-  <span>last poll: <span id="status-bar">—</span></span>
 </div>
 
 <script>
@@ -134,54 +117,43 @@ function freqToBand(hz) {
   return '?';
 }
 
-// Per-band accumulator for current 15-min window.
-const bandMap = new Map(); // name → {count, bestSnr}
-let windowStart = 0;
-
-function windowBoundary(unix) {
-  return Math.floor(unix / 900) * 900;
-}
-
-function maybeResetWindow(unix) {
-  const wb = windowBoundary(unix);
-  if (windowStart === 0) windowStart = wb;
-  if (wb > windowStart) { bandMap.clear(); windowStart = wb; }
-}
-
-// Dedup: same callsign + freq-bin + 15-s epoch = duplicate from cont/epoch overlap.
-const seenDecodes = new Map(); // key → expiry unix
-function isDuplicate(ev) {
-  const bin = Math.round(ev.freq / 6.25);
-  const epoch = Math.floor(ev.unix / 15);
-  const key = `${ev.call}|${bin}|${epoch}`;
-  const now = Date.now() / 1000;
-  if (seenDecodes.has(key) && seenDecodes.get(key) > now) return true;
-  seenDecodes.set(key, now + 30); // expire after 30 s
-  // Prune old entries periodically to avoid unbounded growth.
-  if (seenDecodes.size > 500) {
-    for (const [k, exp] of seenDecodes) if (exp <= now) seenDecodes.delete(k);
-  }
-  return false;
-}
-
-function addDecode(ev) {
-  if (isDuplicate(ev)) return;
-  maybeResetWindow(ev.unix);
-  const band = freqToBand(ev.freq);
-  const cur = bandMap.get(band) || { count: 0, bestSnr: -99 };
-  cur.count++;
-  if (ev.snr > cur.bestSnr) cur.bestSnr = ev.snr;
-  bandMap.set(band, cur);
-  renderBandTable();
-  prependDecode(ev, band);
-}
+// Per-callsign map kept in sync with wsdict server-side expiring keys.
+// One entry per callsign (wsdict key → decode object); TTL=900s on server.
+// On reconnect the server pushes all live keys, so stats survive page refresh.
+const heardMap = new Map();
+let initialLoadDone = false;
+let initialLoadTimer = null;
 
 function renderBandTable() {
+  const bandData = new Map();
+  for (const val of heardMap.values()) {
+    const band = freqToBand(val.freq);
+    const cur = bandData.get(band) || { count: 0, bestSnr: -99 };
+    cur.count++;
+    if (val.snr > cur.bestSnr) cur.bestSnr = val.snr;
+    bandData.set(band, cur);
+  }
   const tbody = document.getElementById('band-tbody');
-  const sorted = [...bandMap.entries()].sort((a, b) => b[1].count - a[1].count);
+  const sorted = [...bandData.entries()].sort((a, b) => b[1].count - a[1].count);
   tbody.innerHTML = sorted.map(([band, {count, bestSnr}]) =>
     `<tr><td class="band-active">${band}</td><td>${count}</td><td>${bestSnr > -99 ? bestSnr.toFixed(1) : '—'}</td></tr>`
   ).join('') || '<tr><td colspan="3" style="color:#555">no decodes this window</td></tr>';
+}
+
+// Called 500ms after subscribe to flush the initial server-push batch into the
+// decode list (sorted by time so newest ends up at top after prependDecode calls).
+function finishInitialLoad() {
+  initialLoadDone = true;
+  const entries = [...heardMap.values()].sort((a, b) => a.unix - b.unix);
+  for (const val of entries.slice(-200)) {
+    prependDecode(val, freqToBand(val.freq));
+  }
+}
+
+function addHeard(key, val) {
+  heardMap.set(key, val);
+  renderBandTable();
+  if (initialLoadDone) prependDecode(val, freqToBand(val.freq));
 }
 
 function prependDecode(ev, band) {
@@ -189,7 +161,7 @@ function prependDecode(ev, band) {
   const snrStr = (ev.snr >= 0 ? '+' : '') + ev.snr.toFixed(1);
   const freqStr = (ev.freq / 1e6).toFixed(4);
   const t = new Date(ev.unix * 1000).toISOString().substr(11, 8);
-  const isJs8 = ev.mode === 'JS8';
+  const isJs8 = ev.mode && ev.mode.startsWith('JS8');
   const modeHtml = isJs8
     ? `<span class="dc-mode-js8">JS8</span>`
     : `<span class="dc-mode-ft8">FT8</span>`;
@@ -218,14 +190,10 @@ function escHtml(s) {
 }
 
 // wsdict WebSocket connection (wsdict server built into hf_rx, port 8765)
-const WF_KEYS = Array.from({length: 8}, (_, i) => `granolasdr:waterfall:${i}`);
-const SUBSCRIBE_KEYS = [
-  ...WF_KEYS,
-  'granolasdr:ft8:decode',
-  'granolasdr:js8:decode',
-  'granolasdr:ft8:timing',
-  'granolasdr:js8:timing',
-];
+// Subscribe with a glob pattern — covers waterfall, decode, timing, and any future keys.
+// Keys use colon separators (granolasdr:ft8:decode, granolasdr:waterfall:0, etc.)
+// granolasdr:* matches all of them since none contain forward slashes.
+const SUBSCRIBE_PATTERN = 'granolasdr:*';
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -241,7 +209,13 @@ function connectBus() {
   const ws = new WebSocket(`ws://${host}:8765/ws`);
   ws.onopen = () => {
     dot.className = 'on'; status.textContent = 'connected';
-    ws.send(JSON.stringify({type: 'subscribe', keys: SUBSCRIBE_KEYS}));
+    heardMap.clear();
+    initialLoadDone = false;
+    if (initialLoadTimer) clearTimeout(initialLoadTimer);
+    // Give the server 500ms to push all current heard keys before treating
+    // further updates as live decodes (which also get added to the decode list).
+    initialLoadTimer = setTimeout(finishInitialLoad, 500);
+    ws.send(JSON.stringify({type: 'subscribe', keys: [SUBSCRIBE_PATTERN]}));
   };
   ws.onerror = () => { dot.className = ''; status.textContent = 'error'; };
   ws.onclose = () => {
@@ -251,10 +225,19 @@ function connectBus() {
   ws.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch(_) { return; }
-    if (msg.type !== 'update') return;
-    const key = msg.key;
-    const val = msg.value;
-    if (WF_KEYS.includes(key)) {
+    const {type, key, value: val} = msg;
+
+    if (type === 'key_expired') {
+      if (key && key.includes(':heard:')) {
+        heardMap.delete(key);
+        renderBandTable();
+      }
+      return;
+    }
+
+    if (type !== 'update') return;
+
+    if (key.startsWith('granolasdr:waterfall:')) {
       const rgba = b64ToBytes(val);
       if (!wfDebugDone && rgba.length > 0) {
         wfDebugDone = true;
@@ -262,8 +245,8 @@ function connectBus() {
         console.log(`[Waterfall] first batch: len=${rgba.length} rows=${rows} (${WF_OUT_BINS}px × 4 RGBA)`);
       }
       requestAnimationFrame(() => appendWaterfallBatch(rgba));
-    } else if (key === 'granolasdr:ft8:decode' || key === 'granolasdr:js8:decode') {
-      if (val && typeof val === 'object') addDecode(val);
+    } else if (key.includes(':heard:')) {
+      if (val && typeof val === 'object') addHeard(key, val);
     } else if (key === 'granolasdr:ft8:timing') {
       if (val && typeof val === 'object') updateTiming(val);
     } else if (key === 'granolasdr:js8:timing') {
@@ -272,76 +255,6 @@ function connectBus() {
   };
 }
 
-// Tunable sinks (existing REST poll)
-const PRESETS = [];
-async function loadPresets() {
-  try {
-    const r = await fetch('/api/presets');
-    if (r.ok) {
-      const d = await r.json();
-      PRESETS.splice(0, Infinity, ...d.presets);
-    }
-  } catch(e) {}
-}
-function sinkHtml(s) {
-  const opts = PRESETS.map(p =>
-    `<option value="${p.freq_hz}">${p.name} (${(p.freq_hz/1e6).toFixed(4)} MHz)</option>`
-  ).join('');
-  return `
-  <div class="sink" id="sink-${s.id}">
-    <div class="sink-header">
-      <span class="sink-id">Sink ${s.id}</span>
-      <span class="sink-label" id="label-${s.id}">${escHtml(s.label)}</span>
-      <span class="sink-freq" id="freq-${s.id}">${(s.freq_hz/1e6).toFixed(4)} MHz</span>
-    </div>
-    <div class="controls">
-      <input type="number" id="hz-${s.id}" value="${s.freq_hz}" step="100" min="0" max="69952000">
-      <button onclick="tuneHz(${s.id})">Tune</button>
-      <select id="preset-${s.id}"><option value="">— preset —</option>${opts}</select>
-      <button onclick="tunePreset(${s.id})">Apply</button>
-    </div>
-    <div class="error" id="err-${s.id}"></div>
-  </div>`;
-}
-async function refreshStatus() {
-  try {
-    const r = await fetch('/api/status');
-    if (!r.ok) return;
-    const d = await r.json();
-    const container = document.getElementById('sinks');
-    for (const s of d.sinks) {
-      const existing = document.getElementById(`sink-${s.id}`);
-      if (!existing) { container.insertAdjacentHTML('beforeend', sinkHtml(s)); }
-      else {
-        document.getElementById(`label-${s.id}`).textContent = s.label;
-        document.getElementById(`freq-${s.id}`).textContent = (s.freq_hz/1e6).toFixed(4) + ' MHz';
-        const inp = document.getElementById(`hz-${s.id}`);
-        if (document.activeElement !== inp) inp.value = s.freq_hz;
-      }
-    }
-    document.getElementById('status-bar').textContent = new Date().toLocaleTimeString();
-  } catch(e) { /* /api/status not available in wsdict-only mode */ }
-}
-async function tuneHz(id) {
-  const hz = parseInt(document.getElementById(`hz-${id}`).value, 10);
-  if (!isNaN(hz)) await doTune(id, hz, null);
-}
-async function tunePreset(id) {
-  const sel = document.getElementById(`preset-${id}`);
-  const hz = parseInt(sel.value, 10);
-  if (!isNaN(hz) && sel.value) await doTune(id, hz, sel.options[sel.selectedIndex].text.split(' ')[0] + ' FT8');
-}
-async function doTune(id, freq_hz, label) {
-  const errEl = document.getElementById(`err-${id}`);
-  errEl.textContent = '';
-  const body = { sink: id, freq_hz };
-  if (label) body.label = label;
-  try {
-    const r = await fetch('/api/tune', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    const d = await r.json();
-    if (!r.ok) errEl.textContent = d.error || 'error'; else refreshStatus();
-  } catch(e) { errEl.textContent = e.message; }
-}
 
 // Waterfall: scrolling canvas, 2048 pixels wide, newest row at bottom.
 // X-axis is composite frequency (HFChannelizer packs HF bands back-to-back).
@@ -410,10 +323,7 @@ function appendWaterfallBatch(rgba) {
   wfCtx.putImageData(frame, 0, 0);
 }
 
-async function init() {
-  await loadPresets();
-  await refreshStatus();
-  setInterval(refreshStatus, 2000);
+function init() {
   initWaterfall();
   connectBus();
 }

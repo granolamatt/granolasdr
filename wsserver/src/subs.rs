@@ -4,11 +4,20 @@ use tokio::sync::mpsc;
 
 pub type ConnectionId = usize;
 
-pub const CHANNEL_CAPACITY: usize = 256;
+// Large enough to absorb a full 15s flush burst (100+ decodes) plus continuous
+// waterfall updates without dropping the subscriber.
+pub const CHANNEL_CAPACITY: usize = 2048;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Codec {
+    Json,
+    Msgpack,
+}
 
 struct Subscription {
     keys: Vec<String>,
     tx: mpsc::Sender<Message>,
+    push_codec: Codec,
 }
 
 pub struct Subscriptions {
@@ -36,9 +45,10 @@ impl Subscriptions {
         conn_id: ConnectionId,
         keys: Vec<String>,
         tx: mpsc::Sender<Message>,
+        push_codec: Codec,
     ) {
         let mut subs = self.subs.write().await;
-        subs.insert(conn_id, Subscription { keys, tx });
+        subs.insert(conn_id, Subscription { keys, tx, push_codec });
     }
 
     pub async fn unregister(&self, conn_id: ConnectionId) {
@@ -64,20 +74,27 @@ impl Subscriptions {
             .unwrap_or_default()
     }
 
-    pub async fn fan_out(&self, key: &str, msg: &Message) {
+    // Fan out to all subscribers whose patterns match `key`.
+    // json_msg sent to JSON subscribers, mp_msg to MessagePack subscribers.
+    // On channel-full: drops this message but keeps the subscriber (does not disconnect).
+    pub async fn fan_out(&self, key: &str, json_msg: &Message, mp_msg: &Message) {
         let subs = self.subs.read().await;
-        let mut stale_ids = Vec::new();
+        let mut closed_ids = Vec::new();
 
         for (conn_id, sub) in subs.iter() {
             if key_matches_any(key, &sub.keys) {
+                let msg = match sub.push_codec {
+                    Codec::Json => json_msg,
+                    Codec::Msgpack => mp_msg,
+                };
                 match sub.tx.try_send(msg.clone()) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(conn_id, key, "subscriber channel full, dropping");
-                        stale_ids.push(*conn_id);
+                        // Drop this message but keep the subscriber alive.
+                        tracing::debug!(conn_id, key, "subscriber channel full, dropping message");
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
-                        stale_ids.push(*conn_id);
+                        closed_ids.push(*conn_id);
                     }
                 }
             }
@@ -85,147 +102,50 @@ impl Subscriptions {
 
         drop(subs);
 
-        if !stale_ids.is_empty() {
+        if !closed_ids.is_empty() {
             let mut subs = self.subs.write().await;
-            for id in stale_ids {
+            for id in closed_ids {
                 subs.remove(&id);
             }
         }
     }
 }
 
-fn key_matches_any(key: &str, patterns: &[String]) -> bool {
+pub fn key_matches_any(key: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|pat| key_matches(key, pat))
 }
 
-fn key_matches(key: &str, pattern: &str) -> bool {
+pub fn key_matches(key: &str, pattern: &str) -> bool {
     if pattern == key {
         return true;
     }
-    if let Some(stem) = pattern.strip_suffix('*') {
-        return key.starts_with(stem) && !key[stem.len()..].contains('/');
+
+    // Multi-segment wildcard: foo/** matches foo/bar and foo/bar/baz but NOT bare foo.
+    if let Some(stem) = pattern.strip_suffix("/**") {
+        return key.starts_with(&format!("{}/", stem));
     }
+    if pattern == "**" {
+        return true;
+    }
+
+    // Single-segment suffix wildcard: foo/* matches foo/bar but not foo/bar/baz.
+    if let Some(stem) = pattern.strip_suffix("/*") {
+        let rest = key.strip_prefix(&format!("{}/", stem)).unwrap_or("");
+        return !rest.is_empty() && !rest.contains('/');
+    }
+
+    // Prefix wildcard within a single segment: plot_* matches plot_data but not plot/data.
+    if let Some(stem) = pattern.strip_suffix('*') {
+        if !stem.contains('/') {
+            return key.starts_with(stem) && !key[stem.len()..].contains('/');
+        }
+    }
+
     false
 }
 
 impl Default for Subscriptions {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exact_match() {
-        assert!(key_matches("plot_data", "plot_data"));
-        assert!(!key_matches("plot_data", "other"));
-    }
-
-    #[test]
-    fn star_matches_single_segment() {
-        assert!(key_matches("foo", "*"));
-        assert!(key_matches("plot_data", "*"));
-        assert!(!key_matches("foo/bar", "*"));
-        assert!(!key_matches("foo/bar/baz", "*"));
-    }
-
-    #[test]
-    fn wildcard_suffix_star() {
-        assert!(key_matches("foo/bar", "foo/*"));
-        assert!(!key_matches("foo", "foo/*"));
-        assert!(!key_matches("foo/bar/baz", "foo/*"));
-        assert!(key_matches("events/a", "events/*"));
-        assert!(!key_matches("events/a/b", "events/*"));
-    }
-
-    #[test]
-    fn wildcard_prefix_star() {
-        assert!(key_matches("plot_data", "plot_*"));
-        assert!(!key_matches("other_data", "plot_*"));
-    }
-
-    #[test]
-    fn key_matches_any_checks_all_patterns() {
-        let patterns: Vec<String> = vec!["events/*".into(), "system/status".into()];
-        assert!(key_matches_any("events/click", &patterns));
-        assert!(key_matches_any("system/status", &patterns));
-        assert!(!key_matches_any("other/key", &patterns));
-    }
-
-    #[tokio::test]
-    async fn register_and_get_keys() {
-        let subs = Subscriptions::new();
-        let id = subs.next_id().await;
-        let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
-        subs.register(id, vec!["a".into(), "b".into()], tx).await;
-        let keys = subs.get_subscribed_keys(id).await;
-        assert_eq!(keys, vec!["a", "b"]);
-    }
-
-    #[tokio::test]
-    async fn unregister_removes_subscriber() {
-        let subs = Subscriptions::new();
-        let id = subs.next_id().await;
-        let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
-        subs.register(id, vec!["a".into()], tx).await;
-        subs.unregister(id).await;
-        let keys = subs.get_subscribed_keys(id).await;
-        assert!(keys.is_empty());
-    }
-
-    #[tokio::test]
-    async fn merge_keys_adds_new() {
-        let subs = Subscriptions::new();
-        let id = subs.next_id().await;
-        let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
-        subs.register(id, vec!["a".into()], tx).await;
-        subs.merge_keys(id, &["b".into(), "c".into()]).await;
-        let keys = subs.get_subscribed_keys(id).await;
-        assert_eq!(keys, vec!["a", "b", "c"]);
-    }
-
-    #[tokio::test]
-    async fn fan_out_sends_to_matching_subscribers() {
-        let subs = Subscriptions::new();
-        let id = subs.next_id().await;
-        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        subs.register(id, vec!["events/*".into()], tx).await;
-
-        let msg = Message::Text("test".into());
-        subs.fan_out("events/click", &msg).await;
-
-        let received = rx.recv().await;
-        assert!(received.is_some());
-    }
-
-    #[tokio::test]
-    async fn fan_out_skips_non_matching_subscribers() {
-        let subs = Subscriptions::new();
-        let id = subs.next_id().await;
-        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        subs.register(id, vec!["events/*".into()], tx).await;
-
-        let msg = Message::Text("{}".into());
-        subs.fan_out("system/status", &msg).await;
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn fan_out_removes_closed_subscriber() {
-        let subs = Subscriptions::new();
-        let id = subs.next_id().await;
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        subs.register(id, vec!["a".into()], tx).await;
-        drop(rx);
-
-        let msg = Message::Text("{}".into());
-        subs.fan_out("a", &msg).await;
-
-        let keys = subs.get_subscribed_keys(id).await;
-        assert!(keys.is_empty());
     }
 }

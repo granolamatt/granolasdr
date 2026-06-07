@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::dict::Dict;
 use crate::protocol::{validate_key, ClientMessage, ServerMessage};
-use crate::subs::{ConnectionId, Subscriptions, CHANNEL_CAPACITY};
+use crate::subs::{key_matches_any, Codec, ConnectionId, Subscriptions, CHANNEL_CAPACITY};
 
 pub struct AppState {
     pub dict: Dict,
@@ -47,6 +47,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         tx,
         state: state.clone(),
         subscribed: false,
+        push_codec: Codec::Json,
     };
 
     loop {
@@ -54,6 +55,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             result = stream.next() => {
                 match result {
                     Some(Ok(Message::Text(text))) => conn.handle_text(&text).await,
+                    Some(Ok(Message::Binary(data))) => conn.handle_binary(&data[..]).await,
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
                         let _ = conn.tx.send(Message::Pong(data)).await;
@@ -74,11 +76,42 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
     tracing::info!(conn_id, "connection closed");
 }
 
+// TTL sweep — runs forever; caller wraps in a restart loop.
+pub async fn run_ttl_sweep(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let expired = state.dict.sweep_expired().await;
+        for key in expired {
+            let (json_msg, mp_msg) = {
+                let msg = ServerMessage::KeyExpired { key: key.as_str() };
+                encode_both(&msg)
+            };
+            state.subs.fan_out(&key, &json_msg, &mp_msg).await;
+        }
+    }
+}
+
+fn encode_for_codec<T: serde::Serialize>(msg: &T, codec: Codec) -> Message {
+    match codec {
+        Codec::Json => Message::Text(serde_json::to_string(msg).expect("json encode")),
+        Codec::Msgpack => {
+            Message::Binary(rmp_serde::to_vec_named(msg).expect("msgpack encode").into())
+        }
+    }
+}
+
+fn encode_both<T: serde::Serialize>(msg: &T) -> (Message, Message) {
+    let json = Message::Text(serde_json::to_string(msg).expect("json encode"));
+    let mp = Message::Binary(rmp_serde::to_vec_named(msg).expect("msgpack encode").into());
+    (json, mp)
+}
+
 struct Connection {
     conn_id: ConnectionId,
     tx: mpsc::Sender<Message>,
     state: Arc<AppState>,
     subscribed: bool,
+    push_codec: Codec,
 }
 
 impl Connection {
@@ -86,50 +119,63 @@ impl Connection {
         let msg: ClientMessage = match serde_json::from_str(text) {
             Ok(m) => m,
             Err(e) => {
-                tracing::debug!(conn_id = self.conn_id, error = %e, "parse error");
+                tracing::debug!(conn_id = self.conn_id, error = %e, "json parse error");
                 self.send_err("invalid JSON", "", None).await;
                 return;
             }
         };
+        self.dispatch(msg, Codec::Json).await;
+    }
 
+    async fn handle_binary(&mut self, data: &[u8]) {
+        let msg: ClientMessage = match rmp_serde::from_slice(data) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(conn_id = self.conn_id, error = %e, "msgpack parse error");
+                self.send_err("invalid msgpack", "", None).await;
+                return;
+            }
+        };
+        self.dispatch(msg, Codec::Msgpack).await;
+    }
+
+    async fn dispatch(&mut self, msg: ClientMessage, frame_codec: Codec) {
         match msg {
-            ClientMessage::Subscribe { keys, id } => self.handle_subscribe(keys, id).await,
-            ClientMessage::Set { key, value } => self.handle_set(key, value).await,
-            ClientMessage::Get { key, id } => self.handle_get(key, id).await,
+            ClientMessage::Subscribe { keys, id } => {
+                self.handle_subscribe(keys, id, frame_codec).await
+            }
+            ClientMessage::Set { key, value, ttl_ms } => {
+                self.handle_set(key, value, ttl_ms).await
+            }
+            ClientMessage::Get { key, id } => self.handle_get(key, id, frame_codec).await,
             ClientMessage::Delete { key, id } => self.handle_delete(key, id).await,
+            ClientMessage::List => self.handle_list(frame_codec).await,
         }
     }
 
-    async fn handle_subscribe(&mut self, keys: Vec<String>, id: Option<serde_json::Value>) {
+    async fn handle_subscribe(
+        &mut self,
+        keys: Vec<String>,
+        id: Option<serde_json::Value>,
+        frame_codec: Codec,
+    ) {
         if let Err(e) = keys.iter().try_for_each(|k| validate_key(k)) {
             self.send_err("invalid key", &e, id.as_ref()).await;
             return;
         }
 
         if !self.subscribed {
+            self.push_codec = frame_codec;
             self.state
                 .subs
-                .register(self.conn_id, keys.clone(), self.tx.clone())
+                .register(self.conn_id, keys.clone(), self.tx.clone(), frame_codec)
                 .await;
             self.subscribed = true;
 
-            let text = serde_json::to_string(&ServerMessage::Subscribed {
-                keys: &keys,
-                id: id.as_ref(),
-            })
-            .unwrap();
-            let _ = self.tx.send(Message::Text(text)).await;
+            let subscribed_msg = ServerMessage::Subscribed { keys: &keys, id: id.as_ref() };
+            let _ = self.tx.send(encode_for_codec(&subscribed_msg, self.push_codec)).await;
 
-            for key in &keys {
-                if let Some(value) = self.state.dict.get(key).await {
-                    let text = serde_json::to_string(&ServerMessage::Update {
-                        key,
-                        value: &value,
-                    })
-                    .unwrap();
-                    let _ = self.tx.send(Message::Text(text)).await;
-                }
-            }
+            self.push_current_values(&keys).await;
         } else {
             let existing = self.state.subs.get_subscribed_keys(self.conn_id).await;
             let new_keys: Vec<String> = keys
@@ -140,46 +186,55 @@ impl Connection {
 
             self.state.subs.merge_keys(self.conn_id, &keys).await;
             let all_keys = self.state.subs.get_subscribed_keys(self.conn_id).await;
-            let text = serde_json::to_string(&ServerMessage::Subscribed {
-                keys: &all_keys,
-                id: id.as_ref(),
-            })
-            .unwrap();
-            let _ = self.tx.send(Message::Text(text)).await;
 
-            for key in &new_keys {
-                if let Some(value) = self.state.dict.get(key).await {
-                    let text = serde_json::to_string(&ServerMessage::Update {
-                        key,
-                        value: &value,
-                    })
-                    .unwrap();
-                    let _ = self.tx.send(Message::Text(text)).await;
+            let subscribed_msg = ServerMessage::Subscribed { keys: &all_keys, id: id.as_ref() };
+            let _ = self.tx.send(encode_for_codec(&subscribed_msg, self.push_codec)).await;
+
+            self.push_current_values(&new_keys).await;
+        }
+    }
+
+    async fn push_current_values(&self, patterns: &[String]) {
+        let all_dict_keys = self.state.dict.keys().await;
+        for dict_key in &all_dict_keys {
+            if key_matches_any(dict_key, patterns) {
+                if let Some(value) = self.state.dict.get(dict_key).await {
+                    let msg = ServerMessage::Update { key: dict_key, value: &value };
+                    let _ = self.tx.send(encode_for_codec(&msg, self.push_codec)).await;
                 }
             }
         }
     }
 
-    async fn handle_set(&self, key: String, value: serde_json::Value) {
+    async fn handle_set(&self, key: String, value: serde_json::Value, ttl_ms: Option<u64>) {
         if let Err(e) = validate_key(&key) {
             self.send_err("invalid key", &e, None).await;
             return;
         }
 
-        self.state.dict.set(key.clone(), value.clone()).await;
+        if let Some(ttl) = ttl_ms {
+            if ttl == 0 {
+                self.send_err("ttl_ms must be > 0", &key, None).await;
+                return;
+            }
+            self.state.dict.set_with_ttl(key.clone(), value.clone(), ttl).await;
+        } else {
+            self.state.dict.set(key.clone(), value.clone()).await;
+        }
 
-        let update = serde_json::to_string(&ServerMessage::Update {
-            key: &key,
-            value: &value,
-        })
-        .unwrap();
-        self.state
-            .subs
-            .fan_out(&key, &Message::Text(update))
-            .await;
+        let (json_msg, mp_msg) = {
+            let msg = ServerMessage::Update { key: &key, value: &value };
+            encode_both(&msg)
+        };
+        self.state.subs.fan_out(&key, &json_msg, &mp_msg).await;
     }
 
-    async fn handle_get(&self, key: String, id: Option<serde_json::Value>) {
+    async fn handle_get(
+        &self,
+        key: String,
+        id: Option<serde_json::Value>,
+        frame_codec: Codec,
+    ) {
         if let Err(e) = validate_key(&key) {
             self.send_err("invalid key", &e, id.as_ref()).await;
             return;
@@ -187,13 +242,8 @@ impl Connection {
 
         match self.state.dict.get(&key).await {
             Some(value) => {
-                let text = serde_json::to_string(&ServerMessage::Value {
-                    key: &key,
-                    value: &value,
-                    id: id.as_ref(),
-                })
-                .unwrap();
-                let _ = self.tx.send(Message::Text(text)).await;
+                let msg = ServerMessage::Value { key: &key, value: &value, id: id.as_ref() };
+                let _ = self.tx.send(encode_for_codec(&msg, frame_codec)).await;
             }
             None => {
                 self.send_err("key not found", &key, id.as_ref()).await;
@@ -208,14 +258,20 @@ impl Connection {
         }
 
         if self.state.dict.delete(&key).await {
-            let del = serde_json::to_string(&ServerMessage::KeyDeleted { key: &key }).unwrap();
-            self.state
-                .subs
-                .fan_out(&key, &Message::Text(del))
-                .await;
+            let (json_msg, mp_msg) = {
+                let msg = ServerMessage::KeyDeleted { key: &key };
+                encode_both(&msg)
+            };
+            self.state.subs.fan_out(&key, &json_msg, &mp_msg).await;
         } else {
             self.send_err("key not found", &key, id.as_ref()).await;
         }
+    }
+
+    async fn handle_list(&self, frame_codec: Codec) {
+        let keys = self.state.dict.keys().await;
+        let msg = ServerMessage::Keys { keys: &keys };
+        let _ = self.tx.send(encode_for_codec(&msg, frame_codec)).await;
     }
 
     async fn send_err(&self, message: &str, key: &str, id: Option<&serde_json::Value>) {

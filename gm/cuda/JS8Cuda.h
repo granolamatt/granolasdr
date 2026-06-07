@@ -28,7 +28,8 @@ using JS8ScanFn = void(*)(
     int32_t*, uint8_t*, uint8_t*, uint8_t*,
     int16_t*, uint32_t*, uint32_t,
     int, int, int, int, float,
-    cudaStream_t);
+    cudaStream_t,
+    bool);
 
 // JS8 decode orchestrator. N = ring depth (200 for Normal, 100 for Fast).
 // scan_fn   : js8_gpu_scan (ORIGINAL Costas) or js8_fast_gpu_scan (MODIFIED Costas).
@@ -42,7 +43,8 @@ public:
                      float min_score, int zmq_port,
                      JS8ScanFn scan_fn,
                      int time_osr, int freq_osr, int cap_blocks,
-                     const char* label = "JS8");
+                     const char* label = "JS8",
+                     bool legacy_costas = false);
     ~JS8Cuda() override;
 
     void setDecodeCallback(std::function<void(ContScanResult&)> cb) override {
@@ -55,6 +57,7 @@ public:
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring_;
     float       min_score_;
+    bool        legacy_costas_;
     JS8ScanFn   scan_fn_;
     int         time_osr_;
     int         freq_osr_;

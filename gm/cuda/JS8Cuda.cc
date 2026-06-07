@@ -12,8 +12,8 @@ template<int N>
 JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
                     float min_score, int zmq_port,
                     JS8ScanFn scan_fn, int time_osr, int freq_osr, int cap_blocks,
-                    const char* label)
-    : ring_(ring), min_score_(min_score),
+                    const char* label, bool legacy_costas)
+    : ring_(ring), min_score_(min_score), legacy_costas_(legacy_costas),
       scan_fn_(scan_fn), time_osr_(time_osr), freq_osr_(freq_osr), cap_blocks_(cap_blocks),
       label_(label),
       zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
@@ -151,7 +151,7 @@ void JS8Cuda<N>::scanLoop()
             slot.score_d, slot.count_d, CAND_MAX,
             (int)ring_.num_bins, cap_blocks_,
             time_osr_, freq_osr_, min_score_,
-            js8_scan_stream_);
+            js8_scan_stream_, legacy_costas_);
 
         js8_soft_symbols(
             ring_.base_d, snap_start, N,

@@ -106,6 +106,14 @@ add_executable(hf_rx "gm/HFRx.cc")
 add_dependencies(hf_rx wsserver_lib)
 target_link_libraries (hf_rx -lm lib_granolamatt gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a ${GM_LIBS} ${WSSERVER_LIB} dl gcc_s util rt)
 
+# Keep the control/ static files in sync with the build directory.
+add_custom_command(TARGET hf_rx POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/control
+        ${CMAKE_CURRENT_BINARY_DIR}/control
+    COMMENT "Syncing control/ static files to build directory"
+)
+
 add_executable(zmqclient gm/zmqcode/client.cc)
 target_link_libraries (zmqclient ${LIBLOC} zmq)
 

@@ -20,7 +20,7 @@ namespace gm {
 namespace cuda {
 
 // Per-slot continuous scan candidate cap.
-static const uint32_t CONT_CAND_MAX = 1000;
+static const uint32_t CONT_CAND_MAX = 100000;
 
 // One slot in the continuous Costas scan pipeline.
 struct ContScanResult {
@@ -51,7 +51,8 @@ public:
     FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
             float min_score = 5.0f,
             const std::string& tag = "EPOCH",
-            int zmq_port = 0);
+            int zmq_port = 0,
+            bool legacy_costas = false);
     ~FT8Cuda();
 
     void run();
@@ -64,6 +65,7 @@ private:
     const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
     std::string tag_;
     float       min_score_;
+    bool        legacy_costas_;
 
     static constexpr int CONTINUOUS_SLOTS = 8;
     int cont_stride_{6};

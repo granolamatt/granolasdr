@@ -13,10 +13,11 @@ namespace gm {
 namespace cuda {
 
 FT8Cuda::FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
-                 float min_score, const std::string& tag, int zmq_port)
+                 float min_score, const std::string& tag, int zmq_port, bool legacy_costas)
     : ring_(ring)
     , tag_(tag)
     , min_score_(min_score)
+    , legacy_costas_(legacy_costas)
     , zmq_ctx_(1)
     , zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
@@ -84,7 +85,7 @@ void FT8Cuda::launchContScan(uint64_t wi)
         slot.score_d, slot.count_d, CONT_CAND_MAX,
         (int)ring_.num_bins, FT8_CAPTURE_BLOCKS,
         FT8_TIME_OSR, FT8_FREQ_OSR, min_score_,
-        cont_scan_stream_, nullptr);
+        cont_scan_stream_, nullptr, legacy_costas_);
 
     ft8_soft_symbols(
         ring_.base_d,
