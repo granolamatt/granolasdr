@@ -65,7 +65,7 @@ static void runProxy() {
 static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         float min_score, bool enable_js8, bool enable_js8_fast,
                         bool enable_js8_slow, int wf_bin_start, int wf_bin_end,
-                        bool legacy_costas) {
+                        bool legacy_costas, uint8_t wf_floor, uint8_t wf_ceil) {
 
     // RAII order: MagBlocks own ring memory; all readers hold const refs.
     // C++ destroys in reverse declaration order (readers before rings).
@@ -82,7 +82,7 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     gm::cuda::WaterfallCuda waterfall(magblock.getRing(),
                                       wf_bin_start, wf_bin_end,
                                       gm::cuda::WaterfallCuda::DEFAULT_OUT_BINS,
-                                      kWsDictPort);
+                                      kWsDictPort, wf_floor, wf_ceil);
     waterfall.start();
 
     std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
@@ -145,6 +145,8 @@ int main(int argc, char* argv[]) {
     bool        enable_js8_fast = false;
     bool        enable_js8_slow = false;
     bool        legacy_costas   = false;
+    uint8_t     wf_floor        = 143;   // tune: raise to darken noise floor
+    uint8_t     wf_ceil         = 175;   // tune: lower to saturate signals sooner
     std::string ctrl_host       = "127.0.0.1";
     int         ctrl_port       = 8080;
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
@@ -184,6 +186,10 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--zoom-band") == 0 && i + 2 < argc) {
             zoom_band_start = std::stoi(argv[++i]);
             zoom_band_end   = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--wf-floor") == 0 && i + 1 < argc) {
+            wf_floor = (uint8_t)std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--wf-ceil") == 0 && i + 1 < argc) {
+            wf_ceil  = (uint8_t)std::stoi(argv[++i]);
         }
     }
 
@@ -239,7 +245,7 @@ int main(int argc, char* argv[]) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
         runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast,
-                    enable_js8_slow, wf_bin_start, wf_bin_end, legacy_costas);
+                    enable_js8_slow, wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -255,7 +261,7 @@ int main(int argc, char* argv[]) {
         }
 
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
-                    enable_js8_slow, wf_bin_start, wf_bin_end, legacy_costas);
+                    enable_js8_slow, wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil);
     }
 
     return 0;
