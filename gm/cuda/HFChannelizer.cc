@@ -243,15 +243,21 @@ int HFChannelizer::doCopy(uint64_t now) {
                 snap_off += bw;
             }
 
-            // Update EMA of linear magnitude per bin.
-            // α=1 on the first update (cold start), 0.3 for the next 4 (warm-up),
-            // then 0.03 for slow tracking (~5-min time constant at 10-s update rate).
-            float alpha = (norm_update_count_ == 0) ? 1.0f :
-                          (norm_update_count_ <  5)  ? 0.3f : 0.03f;
+            // Asymmetric EMA: track noise floor downward quickly (signals drop away),
+            // drift upward very slowly (genuine band noise increase takes ~30 min).
+            // Warm-up phase uses faster rates for both directions to seed the estimate.
+            bool warm = (norm_update_count_ < 5);
+            float a_down = warm ? 0.30f : 0.10f;
+            float a_up   = warm ? 0.10f : 0.005f;
             for (int i = 0; i < norm_total_bins_; i++) {
                 float re = norm_snap_h_[i].real(), im = norm_snap_h_[i].imag();
                 float mag = std::sqrt(re*re + im*im);
-                norm_ema_h_[i] = (1.0f - alpha) * norm_ema_h_[i] + alpha * mag;
+                if (norm_update_count_ == 0) {
+                    norm_ema_h_[i] = mag;  // cold-start: seed directly
+                } else {
+                    float a = (mag < norm_ema_h_[i]) ? a_down : a_up;
+                    norm_ema_h_[i] = (1.0f - a) * norm_ema_h_[i] + a * mag;
+                }
             }
             norm_update_count_++;
 
@@ -264,6 +270,31 @@ int HFChannelizer::doCopy(uint64_t now) {
                 norm_fit_gains(norm_logmag_h_.data() + comp_off, bw, NORM_POLY_DEG,
                                norm_gains_h_.data() + comp_off);
                 comp_off += bw;
+            }
+
+            // Cross-band leveling: compute the geometric mean of all band-center EMA
+            // magnitudes and add a per-band scalar so every band arrives at the same
+            // brightness.  Without this, active bands (more signals → higher EMA) remain
+            // brighter than quiet bands even after intra-band flattening.
+            {
+                double global_log = 0.0;
+                int off = 0;
+                for (const auto& b : bins) {
+                    int bw = (int)b[2];
+                    global_log += std::log10(norm_ema_h_[off + bw / 2] + 1e-30f);
+                    off += bw;
+                }
+                global_log /= (double)bins.size();
+
+                off = 0;
+                for (const auto& b : bins) {
+                    int bw = (int)b[2];
+                    double band_log = std::log10(norm_ema_h_[off + bw / 2] + 1e-30f);
+                    float scale = (float)std::pow(10.0, global_log - band_log);
+                    for (int i = 0; i < bw; i++)
+                        norm_gains_h_[off + i] *= scale;
+                    off += bw;
+                }
             }
 
             // H2D the updated gains (async — ordered before apply_gains_kernel below).
