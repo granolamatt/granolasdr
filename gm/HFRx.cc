@@ -145,8 +145,8 @@ int main(int argc, char* argv[]) {
     bool        enable_js8_fast = false;
     bool        enable_js8_slow = false;
     bool        legacy_costas   = false;
-    uint8_t     wf_floor        = 143;   // tune: raise to darken noise floor
-    uint8_t     wf_ceil         = 175;   // tune: lower to saturate signals sooner
+    uint8_t     wf_floor        = 170;   // tune: raise to darken noise floor
+    uint8_t     wf_ceil         = 210;   // tune: lower to saturate signals sooner
     std::string ctrl_host       = "127.0.0.1";
     int         ctrl_port       = 8080;
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
