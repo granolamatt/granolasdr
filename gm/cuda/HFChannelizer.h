@@ -93,6 +93,22 @@ private:
     zmq::context_t audio_zmq_ctx;
     zmq::socket_t* audio_sockets[NUM_SINKS];
 
+    // Spectral noise-floor normalization: every NORM_INTERVAL frames, snapshot
+    // per-band magnitudes from fftData_d, fit a degree-NORM_POLY_DEG Legendre
+    // polynomial to each band's log-magnitude, and compute per-bin gains that
+    // flatten the noise floor to the band's center-frequency level.
+    static const int NORM_INTERVAL = 64;   // ~10 s at 6.25 Hz frame rate
+    static const int NORM_POLY_DEG = 3;
+
+    int   norm_frame_{0};
+    int   norm_update_count_{0};           // number of EMA updates applied so far
+    int   norm_total_bins_{0};             // Σ b[2] for all bands (2110)
+    float* norm_gains_d_{nullptr};         // device: one gain per composite bin
+    std::vector<float>               norm_gains_h_;   // host mirror
+    std::vector<std::complex<float>> norm_snap_h_;    // D2H workspace
+    std::vector<float>               norm_ema_h_;     // EMA of linear |mag| per bin
+    std::vector<float>               norm_logmag_h_;  // log10(ema) per bin for poly fit
+
 public:
     gm::buffer::BufferFileParams getBufferFileParams() const;
 };

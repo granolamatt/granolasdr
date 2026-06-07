@@ -8,6 +8,7 @@
 
 #include "gm/cuda/HFChannelizer.h"
 #include "gm/cuda/HostCuda.h"
+#include "gm/cuda/SpectrumNorm.h"
 #include "gm/buffer/BufferPosition.h"
 #include "gm/rx888/rx888.h"
 
@@ -88,6 +89,19 @@ ctrl_port_(ctrl_port) {
             bins[i] = {kHFBands[i].wb_start, kHFBands[i].wb_end, kHFBands[i].bw};
         fft_length = 4096;
 
+        // Spectral normalization setup: allocate per-composite-bin gain buffers.
+        norm_total_bins_ = 0;
+        for (const auto& b : bins) norm_total_bins_ += (int)b[2];
+        norm_gains_h_.assign(norm_total_bins_, 1.0f);
+        norm_snap_h_.resize(norm_total_bins_);
+        norm_ema_h_.assign(norm_total_bins_, 0.0f);
+        norm_logmag_h_.resize(norm_total_bins_);
+        cuda_check_error(cudaMalloc((void**)&norm_gains_d_,
+                                    norm_total_bins_ * sizeof(float)));
+        cuda_check_error(cudaMemcpy(norm_gains_d_, norm_gains_h_.data(),
+                                    norm_total_bins_ * sizeof(float),
+                                    cudaMemcpyHostToDevice));
+
         cuda_check_error(cudaMalloc((void**)&demodData_d, BUFFERS * fft_length / 2 * sizeof(std::complex<float>) + 1024));
 
         hfBufferPosition.setBuffer(demodData_d, {BUFFERS, fft_length / 2});
@@ -146,6 +160,7 @@ HFChannelizer::~HFChannelizer() {
     }
     if (audio_pinned) cudaFreeHost(audio_pinned);
     if (audioBins_d) cudaFree(audioBins_d);
+    if (norm_gains_d_) cudaFree(norm_gains_d_);
     if (inData_d) cudaFree(inData_d);
     if (fftInData_d) cudaFree(fftInData_d);
     if (fftData_d) cudaFree(fftData_d);
@@ -211,6 +226,51 @@ int HFChannelizer::doCopy(uint64_t now) {
             }
         }
 
+        // Noise-floor normalization: every NORM_INTERVAL frames, snapshot the wideband
+        // FFT magnitudes for each band, update a slow EMA (α≈0.03 → ~5-min time
+        // constant at 10 s/update), fit a per-band polynomial, and recompute gains.
+        // Gains are applied to channelData_d after composite assembly, before the IFFT,
+        // so both the waterfall and the decoders receive a spectrally flattened signal.
+        if (++norm_frame_ % NORM_INTERVAL == 0) {
+            cudaStreamSynchronize(stream);  // wait for R2C FFT to finish
+
+            // D2H: collect complex band bins from the wideband FFT output.
+            int snap_off = 0;
+            for (const auto& b : bins) {
+                int bw = (int)b[2];
+                cudaMemcpy(&norm_snap_h_[snap_off], &fftData_d[b[0]],
+                           bw * sizeof(std::complex<float>), cudaMemcpyDeviceToHost);
+                snap_off += bw;
+            }
+
+            // Update EMA of linear magnitude per bin.
+            // α=1 on the first update (cold start), 0.3 for the next 4 (warm-up),
+            // then 0.03 for slow tracking (~5-min time constant at 10-s update rate).
+            float alpha = (norm_update_count_ == 0) ? 1.0f :
+                          (norm_update_count_ <  5)  ? 0.3f : 0.03f;
+            for (int i = 0; i < norm_total_bins_; i++) {
+                float re = norm_snap_h_[i].real(), im = norm_snap_h_[i].imag();
+                float mag = std::sqrt(re*re + im*im);
+                norm_ema_h_[i] = (1.0f - alpha) * norm_ema_h_[i] + alpha * mag;
+            }
+            norm_update_count_++;
+
+            // Fit polynomial to log10(EMA) per band; compute equalization gains.
+            int comp_off = 0;
+            for (const auto& b : bins) {
+                int bw = (int)b[2];
+                for (int i = 0; i < bw; i++)
+                    norm_logmag_h_[comp_off + i] = std::log10f(norm_ema_h_[comp_off + i] + 1e-30f);
+                norm_fit_gains(norm_logmag_h_.data() + comp_off, bw, NORM_POLY_DEG,
+                               norm_gains_h_.data() + comp_off);
+                comp_off += bw;
+            }
+
+            // H2D the updated gains (async — ordered before apply_gains_kernel below).
+            cudaMemcpyAsync(norm_gains_d_, norm_gains_h_.data(),
+                            norm_total_bins_ * sizeof(float), cudaMemcpyHostToDevice, stream);
+        }
+
         // Composite assembly: pack all band bins into channelData_d[0..total_bw-1].
         uint32_t offset = 0;
         cuda_check_error(cudaMemsetAsync(channelData_d, 0, fft_length*sizeof(std::complex<float>), stream));
@@ -220,6 +280,10 @@ int HFChannelizer::doCopy(uint64_t now) {
                 b[2]*sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
             offset += b[2];
         }
+
+        // Apply per-bin equalization gains to the packed composite (before IFFT).
+        norm_apply_gains((cufftComplex*)channelData_d, norm_gains_d_,
+                         norm_total_bins_, stream);
 
         // 4096-pt composite C2C IFFT → 2048 valid samples (center half) at 409.6 kHz.
         rval = cufftExecC2C(iplan, (cufftComplex*)&channelData_d[0],
