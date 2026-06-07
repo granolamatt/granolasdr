@@ -24,14 +24,16 @@ public:
     static constexpr int ROWS_PER_SLOT    = FT8_TIME_OSR;  // 4
 
     // wf_floor / wf_ceil: uint8 magnitude window for colormap normalization.
-    // Values outside this range are clamped. Typical HF noise floor ≈ 200,
-    // strong signals ≈ 240; start with floor=195 ceil=248 and adjust as needed.
+    // magKernel stores 20*log10(amplitude/50e6) mapped as scaled = 2*db + 240.
+    // Typical HF noise floor ≈ 160, strong signals ≈ 240.
+    // floor=130 keeps the noise floor visible; ceil=220 clips loud carriers so
+    // they don't dominate the palette; adjust to taste.
     WaterfallCuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
                   int bin_start, int bin_end,
                   int out_bins  = DEFAULT_OUT_BINS,
                   int ws_port   = WS_PORT,
-                  uint8_t wf_floor = 195,
-                  uint8_t wf_ceil  = 248);
+                  uint8_t wf_floor = 30,
+                  uint8_t wf_ceil  = 220);
     ~WaterfallCuda();
 
     void run();

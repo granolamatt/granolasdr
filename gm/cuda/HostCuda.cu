@@ -80,7 +80,7 @@ __global__ void magKernelWork(thrust::complex<float>* data_d, uint8_t* mag_d, si
 
     for (int cnt = idx; cnt < size; cnt += numThreads)
     {
-        float mag = abs(data_d[cnt]) / 50e6;
+        float mag = abs(data_d[cnt]) / 400e6;
         float db = 10.0f * log10f(1E-12f + mag);
         int scaled = (int)(2*db + 240);
         mag_d[cnt] = (uint8_t)((scaled < 0) ? 0 : ((scaled > 255) ? 255 : scaled));
