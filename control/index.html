@@ -12,10 +12,6 @@
   .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 600px) { .panels { grid-template-columns: 1fr; } }
   .panel { border: 1px solid #333; border-radius: 4px; padding: 12px; }
-  /* GPU timing */
-  .timing-row { display: flex; gap: 20px; }
-  .timing-val { font-size: 1.4em; color: #98e890; }
-  .timing-lbl { font-size: 0.75em; color: #666; }
   /* band summary */
   #band-table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
   #band-table th { color: #666; font-weight: normal; text-align: left; padding: 3px 6px; border-bottom: 1px solid #333; }
@@ -29,10 +25,6 @@
   .dc-band { color: #666; display: inline-block; width: 36px; }
   .dc-mode-js8 { color: #e8a040; font-size: 0.85em; display: inline-block; width: 32px; }
   .dc-mode-ft8 { color: #555;    font-size: 0.85em; display: inline-block; width: 32px; }
-  /* JS8 timing row */
-  .timing-row-label { font-size: 0.75em; color: #555; margin-top: 10px; margin-bottom: 4px; }
-  .timing-val-sm { font-size: 1.1em; color: #c8a060; }
-  .timing-lbl-sm { font-size: 0.7em; color: #555; }
   /* status bar */
   .status-bar { font-size: 0.75em; color: #555; margin-top: 16px; display: flex; gap: 20px; }
   #sse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #555; margin-right: 4px; }
@@ -43,35 +35,10 @@
 <h1>granolasdr</h1>
 
 <div class="panels">
-  <!-- GPU timing -->
+  <!-- decode stream -->
   <div class="panel">
-    <h2>GPU timing</h2>
-    <div class="timing-row-label">FT8</div>
-    <div class="timing-row">
-      <div>
-        <div class="timing-val" id="t-scan">—</div>
-        <div class="timing-lbl">scan ms</div>
-      </div>
-      <div>
-        <div class="timing-val" id="t-ldpc">—</div>
-        <div class="timing-lbl">ldpc ms</div>
-      </div>
-      <div>
-        <div class="timing-val" id="t-cands">—</div>
-        <div class="timing-lbl">candidates</div>
-      </div>
-    </div>
-    <div class="timing-row-label" id="js8-timing-row" style="display:none">JS8</div>
-    <div class="timing-row" id="js8-timing-vals" style="display:none">
-      <div>
-        <div class="timing-val-sm" id="t-js8-scan">—</div>
-        <div class="timing-lbl-sm">scan ms</div>
-      </div>
-      <div>
-        <div class="timing-val-sm" id="t-js8-cands">—</div>
-        <div class="timing-lbl-sm">candidates</div>
-      </div>
-    </div>
+    <h2>decode stream <span style="color:#555;font-size:0.8em">(newest first — persists across refresh)</span></h2>
+    <ul id="decode-list"></ul>
   </div>
 
   <!-- per-band summary (15-min window) -->
@@ -83,10 +50,6 @@
     </table>
   </div>
 </div>
-
-<!-- decode stream -->
-<h2>decode stream <span style="color:#555;font-size:0.8em">(newest first, last 200 — persists across refresh)</span></h2>
-<ul id="decode-list"></ul>
 
 <!-- wideband waterfall -->
 <h2>waterfall — HF bands composite (160m–6m packed)</h2>
@@ -175,19 +138,6 @@ function prependDecode(ev, band) {
   while (ul.children.length > 200) ul.removeChild(ul.lastChild);
 }
 
-function updateTiming(ev) {
-  document.getElementById('t-scan').textContent = ev.scan_ms.toFixed(1);
-  document.getElementById('t-ldpc').textContent = ev.ldpc_ms.toFixed(1);
-  document.getElementById('t-cands').textContent = ev.n;
-}
-
-function updateJS8Timing(ev) {
-  document.getElementById('js8-timing-row').style.display = '';
-  document.getElementById('js8-timing-vals').style.display = '';
-  document.getElementById('t-js8-scan').textContent = ev.scan_ms.toFixed(1);
-  document.getElementById('t-js8-cands').textContent = ev.n;
-}
-
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
@@ -250,10 +200,6 @@ function connectBus() {
       requestAnimationFrame(() => appendWaterfallBatch(rgba));
     } else if (key.includes(':heard:')) {
       if (val && typeof val === 'object') addHeard(key, val);
-    } else if (key === 'granolasdr:ft8:timing') {
-      if (val && typeof val === 'object') updateTiming(val);
-    } else if (key === 'granolasdr:js8:timing') {
-      if (val && typeof val === 'object') updateJS8Timing(val);
     }
   };
 }
