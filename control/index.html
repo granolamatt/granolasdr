@@ -25,6 +25,19 @@
   .dc-band { color: #666; display: inline-block; width: 36px; }
   .dc-mode-js8 { color: #e8a040; font-size: 0.85em; display: inline-block; width: 32px; }
   .dc-mode-ft8 { color: #555;    font-size: 0.85em; display: inline-block; width: 32px; }
+  /* audio sinks */
+  #audio-table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+  #audio-table th { color: #666; font-weight: normal; text-align: left; padding: 3px 6px; border-bottom: 1px solid #333; }
+  #audio-table td { padding: 4px 6px; vertical-align: middle; }
+  .audio-sink-id { color: #555; width: 30px; }
+  .audio-current { color: #98e890; min-width: 160px; }
+  .audio-input { background: #111; border: 1px solid #444; color: #e0e0e0; border-radius: 3px; padding: 2px 6px; width: 90px; font-family: monospace; font-size: 0.95em; }
+  .audio-input:focus { outline: none; border-color: #7ec8e3; }
+  .audio-select { background: #111; border: 1px solid #444; color: #e0e0e0; border-radius: 3px; padding: 2px 4px; font-family: monospace; font-size: 0.88em; }
+  .audio-btn { background: #222; border: 1px solid #444; color: #7ec8e3; border-radius: 3px; padding: 2px 10px; cursor: pointer; font-family: monospace; font-size: 0.85em; }
+  .audio-btn:hover { background: #2a3a4a; border-color: #7ec8e3; }
+  .audio-btn:active { background: #1a2a3a; }
+  .audio-zmq { color: #444; font-size: 0.8em; }
   /* status bar */
   .status-bar { font-size: 0.75em; color: #555; margin-top: 16px; display: flex; gap: 20px; }
   #sse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #555; margin-right: 4px; }
@@ -49,6 +62,15 @@
       <tbody id="band-tbody"></tbody>
     </table>
   </div>
+</div>
+
+<!-- audio sinks -->
+<h2>audio channels</h2>
+<div class="panel">
+  <table id="audio-table">
+    <thead><tr><th>sink</th><th>current</th><th>freq MHz</th><th>preset</th><th></th><th class="audio-zmq">zmq port</th></tr></thead>
+    <tbody id="audio-tbody"></tbody>
+  </table>
 </div>
 
 <!-- wideband waterfall -->
@@ -140,6 +162,76 @@ function prependDecode(ev, band) {
 
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Audio sink control ────────────────────────────────────────────────────────
+const CTRL_BASE = `http://${location.hostname}:8080`;
+let audioPresets = [];
+
+async function audioFetch(path, opts) {
+  try {
+    const r = await fetch(CTRL_BASE + path, opts);
+    return await r.json();
+  } catch(e) {
+    console.warn('[Audio]', path, e.message);
+    return null;
+  }
+}
+
+async function refreshAudioStatus() {
+  const data = await audioFetch('/api/status');
+  if (!data) return;
+  for (const s of data.sinks) {
+    const lbl = document.getElementById(`audio-lbl-${s.id}`);
+    const inp = document.getElementById(`audio-freq-${s.id}`);
+    if (lbl) lbl.textContent = `${s.label} · ${(s.freq_hz/1e6).toFixed(4)} MHz`;
+    if (inp && document.activeElement !== inp)
+      inp.value = (s.freq_hz / 1e6).toFixed(4);
+  }
+}
+
+function onAudioPresetChange(sink) {
+  const sel = document.getElementById(`audio-preset-${sink}`);
+  const inp = document.getElementById(`audio-freq-${sink}`);
+  const preset = audioPresets.find(p => p.name === sel.value);
+  if (preset) inp.value = (preset.freq_hz / 1e6).toFixed(4);
+}
+
+async function tuneAudioSink(sink) {
+  const inp = document.getElementById(`audio-freq-${sink}`);
+  const sel = document.getElementById(`audio-preset-${sink}`);
+  const freq_hz = Math.round(parseFloat(inp.value) * 1e6);
+  if (!freq_hz || freq_hz < 500000 || freq_hz > 70000000) return;
+  const label = sel.value ? `${sel.value} · ${inp.value} MHz` : `${inp.value} MHz`;
+  const data = await audioFetch('/api/tune', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sink, freq_hz, label}),
+  });
+  if (data && data.ok) { sel.value = ''; refreshAudioStatus(); }
+}
+
+function buildAudioTable() {
+  const presetOpts = ['<option value="">— preset —</option>',
+    ...audioPresets.map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)}</option>`)
+  ].join('');
+  document.getElementById('audio-tbody').innerHTML = [0,1,2,3].map(i =>
+    `<tr>
+      <td class="audio-sink-id">${i}</td>
+      <td id="audio-lbl-${i}" class="audio-current">—</td>
+      <td><input id="audio-freq-${i}" class="audio-input" type="number" step="0.001" min="0.5" max="70" placeholder="MHz"></td>
+      <td><select id="audio-preset-${i}" class="audio-select" onchange="onAudioPresetChange(${i})">${presetOpts}</select></td>
+      <td><button class="audio-btn" onclick="tuneAudioSink(${i})">tune</button></td>
+      <td class="audio-zmq">${5581 + i}</td>
+    </tr>`
+  ).join('');
+  refreshAudioStatus();
+}
+
+async function initAudio() {
+  const data = await audioFetch('/api/presets');
+  audioPresets = data ? data.presets : [];
+  buildAudioTable();
 }
 
 // wsdict WebSocket connection (wsdict server built into hf_rx, port 8765)
@@ -282,6 +374,7 @@ function appendWaterfallBatch(rgba) {
 
 function init() {
   initWaterfall();
+  initAudio();
   connectBus();
 }
 init();
