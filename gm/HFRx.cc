@@ -144,7 +144,7 @@ int main(int argc, char* argv[]) {
     bool        enable_js8      = false;
     bool        enable_js8_fast = false;
     bool        enable_js8_slow = false;
-    bool        legacy_costas   = false;
+    bool        legacy_costas   = true;
     uint8_t     wf_floor        = 170;   // tune: raise to darken noise floor
     uint8_t     wf_ceil         = 210;   // tune: lower to saturate signals sooner
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
@@ -175,8 +175,8 @@ int main(int argc, char* argv[]) {
             enable_js8_fast = true;
         } else if (strcmp(argv[i], "--js8-slow") == 0) {
             enable_js8_slow = true;
-        } else if (strcmp(argv[i], "--legacy-costas") == 0) {
-            legacy_costas = true;
+        } else if (strcmp(argv[i], "--max-log-costas") == 0) {
+            legacy_costas = false;
         } else if (strcmp(argv[i], "--zoom-band") == 0 && i + 2 < argc) {
             zoom_band_start = std::stoi(argv[++i]);
             zoom_band_end   = std::stoi(argv[++i]);

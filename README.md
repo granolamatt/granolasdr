@@ -215,8 +215,8 @@ A ZMQ proxy opens on port 5599 (producers) and 5600 (consumers). Subscribe to po
 | `--js8` | off | Enable JS8 Normal mode decoder (15s, 6.25 Hz/bin) |
 | `--js8-fast` | off | Enable JS8 Fast mode decoder (10s, 10 Hz/bin) |
 | `--js8-slow` | off | Enable JS8 Slow mode decoder (30s, 3.125 Hz/bin) |
-| `--legacy-costas` | off | Use legacy frequency+neighbor Costas metric instead of max-log 8-FSK |
-| `--min-score FLOAT` | `3.0` | Minimum Costas sync scan score threshold (`5.0` with `--legacy-costas`) |
+| `--max-log-costas` | off | Use max-log 8-FSK Costas metric instead of the default legacy frequency+neighbor |
+| `--min-score FLOAT` | `5.0` | Minimum Costas sync scan score threshold (`3.0` with `--max-log-costas`) |
 | `--wf-floor UINT8` | `170` | Waterfall lower clamp (raise to darken noise floor) |
 | `--wf-ceil UINT8` | `210` | Waterfall upper clamp (lower to saturate signals sooner) |
 | `--record FILE` | off | Record channelizer output to a `.dat` file for later playback |
