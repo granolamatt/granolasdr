@@ -264,7 +264,7 @@ int HFChannelizer::doCopy(uint64_t now) {
             for (const auto& b : bins) {
                 int bw = (int)b[2];
                 for (int i = 0; i < bw; i++)
-                    norm_logmag_h_[comp_off + i] = std::log10f(norm_ema_h_[comp_off + i] + 1e-30f);
+                    norm_logmag_h_[comp_off + i] = std::log10(norm_ema_h_[comp_off + i] + 1e-30f);
                 norm_fit_gains(norm_logmag_h_.data() + comp_off, bw, NORM_POLY_DEG,
                                norm_gains_h_.data() + comp_off);
                 comp_off += bw;
