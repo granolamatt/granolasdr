@@ -70,6 +70,7 @@
   .badge-cpu  { background: #001a3d; color: #58a6ff; border: 1px solid #58a6ff; }
   .badge-py   { background: #3d1a00; color: #f0883e; border: 1px solid #f0883e; }
   .badge-opt  { background: #1a1a3d; color: #79c0ff; border: 1px solid #79c0ff; }
+  .badge-norm { background: #3d1a00; color: #f0883e; border: 1px solid #f0883e; }
 
   .stage-title {
     font-size: 16px;
@@ -151,7 +152,9 @@
     color: #e6edf3;
     text-align: right;
   }
-  .param-val.hl { color: #79c0ff; }
+  .param-val.hl  { color: #79c0ff; }
+  .param-val.hl2 { color: #3fb950; }
+  .param-val.hl3 { color: #f0883e; }
 
   .arrow-wrap {
     display: flex;
@@ -197,12 +200,19 @@
     border-top: 8px solid #30363d;
   }
 
-  /* split layout for FT8/JS8 parallel columns */
+  /* split layout */
   .split-wrap {
     width: 100%;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
+    align-items: start;
+  }
+  .split-wrap-3 {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
     align-items: start;
   }
 
@@ -258,9 +268,11 @@
 
   .stage.hw   { border-left: 3px solid #e3b341; }
   .stage.cuda { border-left: 3px solid #3fb950; }
+  .stage.norm { border-left: 3px solid #f0883e; }
   .stage.cpu  { border-left: 3px solid #58a6ff; }
   .stage.py   { border-left: 3px solid #f0883e; }
   .stage.opt  { border-left: 3px solid #79c0ff; }
+  .stage.wf   { border-left: 3px solid #56cfe1; }
 
   code {
     font-family: monospace;
@@ -283,7 +295,7 @@
 <div class="outer">
 
 <h1>hf_rx Pipeline</h1>
-<div class="subtitle">Wideband HF FT8 + JS8 decoder · RX888 → CUDA → ft8_lib → ZMQ proxy → PSKReporter</div>
+<div class="subtitle">Wideband HF FT8 + JS8 decoder · RX888 → CUDA → ft8_lib → ZMQ proxy + wsdict → PSKReporter</div>
 
 <div class="pipeline">
 
@@ -298,28 +310,28 @@
       <div class="col">
         <div class="col-label">Operation</div>
         <ul class="steps">
-          <li>Direct-conversion ADC, 14-bit real samples</li>
+          <li>Direct-conversion ADC, 16-bit real samples</li>
           <li>USB 3.0 isochronous bulk transfer</li>
-          <li>Writes interleaved <code>int16_t</code> to ring buffer</li>
-          <li>Signals consumer via <code>BufferPosition</code></li>
+          <li>Writes <code>int16_t</code> to ring buffer, block = 700,000 samples</li>
+          <li>Signals consumer via <code>BufferPosition&lt;int16_t&gt;</code></li>
         </ul>
       </div>
       <div class="col">
         <div class="col-label">Parameters</div>
         <div class="params">
           <div class="param"><span class="param-name">Sample rate</span><span class="param-val hl">140 MS/s (real)</span></div>
+          <div class="param"><span class="param-name">Block size</span><span class="param-val">700,000 samples = 5 ms</span></div>
           <div class="param"><span class="param-name">Type</span><span class="param-val">int16_t</span></div>
-          <div class="param"><span class="param-name">Ring slots</span><span class="param-val">16 × NLARGE samples</span></div>
           <div class="param"><span class="param-name">Coverage</span><span class="param-val">0 – 70 MHz</span></div>
         </div>
-        <p class="note"><code>--playback FILE</code>: <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> replays a recorded session; bypasses RX888 and HFChannelizer entirely.</p>
+        <p class="note"><code>--playback FILE</code>: <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> replays a recorded session, bypassing RX888 and HFChannelizer entirely.</p>
       </div>
     </div>
   </div>
 
   <div class="arrow-wrap">
     <div class="arrow-line"></div>
-    <div class="arrow-label"><strong>int16_t ring</strong> · 16 slots · 140 MS/s real</div>
+    <div class="arrow-label"><strong>int16_t ring</strong> · 700,000 samples/block · 5 ms · 140 MS/s real</div>
     <div class="arrow-line2"></div>
   </div>
 
@@ -327,42 +339,87 @@
   <div class="stage cuda">
     <div class="stage-header">
       <span class="badge badge-cuda">CUDA THREAD</span>
-      <span class="stage-title">HFChannelizer</span>
+      <span class="stage-title">HFChannelizer — Wideband FFT, Band Select &amp; Audio</span>
       <span class="stage-subtitle">gm/cuda/HFChannelizer.cc</span>
     </div>
     <div class="stage-body">
       <div class="col">
         <div class="col-label">Processing steps</div>
         <ul class="steps">
-          <li>Cast <code>int16_t → float</code>, copy to GPU</li>
-          <li>Overlap input by one slot for continuity</li>
-          <li>Wideband <strong>R2C FFT</strong>: 1,048,576 points (cuFFT)</li>
-          <li>Zero composite IFFT buffer</li>
-          <li>Copy 10 HF band slices into composite buffer</li>
-          <li>Inverse <strong>C2C FFT</strong>: 32,768 points</li>
-          <li>Extract center half (16,384 samples), async copy to ring</li>
-          <li>4 tunable audio sinks → 48 kHz ZMQ streams</li>
+          <li>Cast <code>int16_t → float32</code>, H2D copy</li>
+          <li>Overlap-save: copy tail to head of fftInData_d</li>
+          <li><strong>R2C FFT: 1,400,000 points</strong> (cuFFT) → 700,001 bins, 0–70 MHz</li>
+          <li>4 tunable audio sinks: 480-bin gather → batched C2C IFFT → 48 kHz ZMQ</li>
+          <li>Zero composite buffer (4096-pt)</li>
+          <li>Copy 11 HF band slices into composite buffer (2110 of 4096 bins)</li>
+          <li>Every 64 frames: SpectrumNorm equalization in-place on channelData_d</li>
+          <li><strong>C2C IFFT: 4096 points</strong> → extract center 2048 samples</li>
+          <li>D2D async copy to output ring → MagBlock wakes</li>
         </ul>
       </div>
       <div class="col">
         <div class="col-label">Parameters</div>
         <div class="params">
-          <div class="param"><span class="param-name">Wideband FFT</span><span class="param-val hl">1,048,576 pts R2C</span></div>
-          <div class="param"><span class="param-name">Bin resolution</span><span class="param-val">≈ 133.5 Hz/bin</span></div>
-          <div class="param"><span class="param-name">Composite IFFT</span><span class="param-val">32,768 pts C2C</span></div>
-          <div class="param"><span class="param-name">Output rate</span><span class="param-val hl">4.375 MS/s complex</span></div>
-          <div class="param"><span class="param-name">Output slot</span><span class="param-val">16,384 samples</span></div>
-          <div class="param"><span class="param-name">Slot duration</span><span class="param-val">3.75 ms</span></div>
-          <div class="param"><span class="param-name">Ring slots</span><span class="param-val">16 (≈ 60 ms)</span></div>
+          <div class="param"><span class="param-name">Wideband FFT</span><span class="param-val hl">1,400,000 pts R2C</span></div>
+          <div class="param"><span class="param-name">Bin resolution</span><span class="param-val hl2">100 Hz/bin (exact)</span></div>
+          <div class="param"><span class="param-name">Composite IFFT</span><span class="param-val hl">4096 pts C2C</span></div>
+          <div class="param"><span class="param-name">Composite bins used</span><span class="param-val">2,110 of 4,096</span></div>
+          <div class="param"><span class="param-name">Output rate</span><span class="param-val hl">409.6 kHz complex</span></div>
+          <div class="param"><span class="param-name">Output slot</span><span class="param-val">2,048 samples</span></div>
+          <div class="param"><span class="param-name">Block duration</span><span class="param-val">5 ms (200 Hz)</span></div>
+          <div class="param"><span class="param-name">Audio sinks</span><span class="param-val">4 × 48 kHz ZMQ PUB</span></div>
+          <div class="param"><span class="param-name">Audio retune</span><span class="param-val hl3">wsdict audio:cmd → audio:status:N</span></div>
         </div>
-        <p class="note"><code>--record FILE</code>: <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> taps this edge and writes blocks to disk with pacing metadata for deterministic replay.</p>
+        <p class="note"><code>--record FILE</code>: <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> taps this edge and writes blocks to disk for deterministic replay.</p>
       </div>
     </div>
   </div>
 
   <div class="arrow-wrap">
     <div class="arrow-line"></div>
-    <div class="arrow-label"><strong>complex&lt;float&gt; ring</strong> · 16 slots × 16,384 samples · 4.375 MS/s · GPU memory</div>
+    <div class="arrow-label"><strong>complex&lt;float&gt; ring</strong> · 2,048 samples/block · 409.6 kHz · 11 HF bands packed · GPU memory</div>
+    <div class="arrow-line2"></div>
+  </div>
+
+  <!-- ══ STAGE 2b: SpectrumNorm ═════════════════════════════════════════ -->
+  <div class="stage norm">
+    <div class="stage-header">
+      <span class="badge badge-norm">IN HFCHANNELIZER · EVERY 64 FRAMES</span>
+      <span class="stage-title">SpectrumNorm — Noise Floor Equalization</span>
+      <span class="stage-subtitle">gm/cuda/SpectrumNorm.cu</span>
+    </div>
+    <div class="stage-body">
+      <div class="col">
+        <div class="col-label">Processing steps</div>
+        <ul class="steps">
+          <li>D2H snapshot of 2,110 complex bins from fftData_d</li>
+          <li>Asymmetric EMA: <code>α_down=0.10</code> (fast drop) · <code>α_up=0.005</code> (slow rise, ~30 min τ)</li>
+          <li>5-frame warm-up: <code>α_down=0.30, α_up=0.10</code> to seed the estimate</li>
+          <li>Legendre polynomial fit (degree 3) on log10(EMA) per band</li>
+          <li>Compute per-bin gains to flatten intra-band tilt and RFI bumps</li>
+          <li>Cross-band leveling: geometric mean of 11 band-center EMAs</li>
+          <li>H2D gain upload → CUDA kernel multiplies channelData_d in-place</li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="col-label">Parameters</div>
+        <div class="params">
+          <div class="param"><span class="param-name">EMA α_down (warm)</span><span class="param-val hl3">0.10 — quick signal fade</span></div>
+          <div class="param"><span class="param-name">EMA α_up (warm)</span><span class="param-val hl3">0.005 — ~30 min rise τ</span></div>
+          <div class="param"><span class="param-name">EMA α_down (warm-up)</span><span class="param-val">0.30 (5 frames)</span></div>
+          <div class="param"><span class="param-name">EMA α_up (warm-up)</span><span class="param-val">0.10 (5 frames)</span></div>
+          <div class="param"><span class="param-name">Poly fit degree</span><span class="param-val">3 (Legendre basis)</span></div>
+          <div class="param"><span class="param-name">Leveling</span><span class="param-val">geometric mean, 11 bands</span></div>
+          <div class="param"><span class="param-name">Runs every</span><span class="param-val">64 frames ≈ 10 s</span></div>
+        </div>
+        <p class="note">Result: all 11 bands appear at equal brightness in the waterfall regardless of natural propagation differences or band noise level.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-wrap">
+    <div class="arrow-line"></div>
+    <div class="arrow-label"><strong>complex&lt;float&gt; ring</strong> · 2,048 samples/block · 409.6 kHz · spectrally equalized</div>
     <div class="arrow-line2"></div>
   </div>
 
@@ -370,55 +427,85 @@
   <div class="stage cuda">
     <div class="stage-header">
       <span class="badge badge-cuda">CUDA THREAD</span>
-      <span class="stage-title">MagBlock — Oversampled FFT &amp; Magnitude Ring</span>
+      <span class="stage-title">MagBlock&lt;200&gt; — Oversampled FFT &amp; Magnitude Ring (Normal)</span>
       <span class="stage-subtitle">gm/cuda/MagBlock.cc</span>
     </div>
     <div class="stage-body">
       <div class="col">
         <div class="col-label">Processing steps</div>
         <ul class="steps">
-          <li>Accumulate complex&lt;float&gt; blocks until window ≥ 2 × 698,880 samples</li>
+          <li>Accumulate complex&lt;float&gt; blocks until window ≥ 2 × 65,536 samples (~320 ms)</li>
           <li><strong>16 C2C FFTs</strong>: 4 time offsets × 4 freq offsets<br>
             — time offset <em>t</em>: start at <em>t</em> × rfft_length/4<br>
-            — freq offset <em>f</em>: <code>freqShift</code> by <em>f</em> × 1.5625 Hz before FFT</li>
+            — freq offset <em>f</em>: <code>freqShift</code> by <em>f</em> × bin_width/4 before FFT</li>
           <li><strong>magKernel</strong>: complex → dB-scaled uint8_t</li>
-          <li>D2D async copy → <strong>DeviceRingBuffer</strong> slot (uint8_t, GPU)</li>
-          <li>Slide window back by rfft_length (≈ 160 ms, 1 FT8 symbol)</li>
-          <li>Wideband waterfall snapshot → ZMQ proxy (topic: <code>ft8/waterfall</code>)</li>
+          <li>D2D async copy → <strong>DeviceRingBuffer&lt;uint8_t, 200&gt;</strong> slot</li>
+          <li>Slide window by 65,536 samples → fire rate ≈ 6.25 Hz</li>
         </ul>
       </div>
       <div class="col">
         <div class="col-label">Parameters</div>
         <div class="params">
-          <div class="param"><span class="param-name">FFT size</span><span class="param-val hl">698,880 pts C2C</span></div>
-          <div class="param"><span class="param-name">Bin resolution</span><span class="param-val">≈ 6.25 Hz/bin (1 FT8 tone)</span></div>
-          <div class="param"><span class="param-name">Block duration</span><span class="param-val">≈ 159.7 ms (1 FT8 symbol)</span></div>
+          <div class="param"><span class="param-name">FFT size</span><span class="param-val hl">65,536 pts C2C</span></div>
+          <div class="param"><span class="param-name">Bin resolution</span><span class="param-val hl2">6.25 Hz/bin (1 FT8 tone)</span></div>
+          <div class="param"><span class="param-name">Block duration</span><span class="param-val">160 ms (1 FT8 symbol)</span></div>
           <div class="param"><span class="param-name">Time OSR</span><span class="param-val hl">4 (offsets 0–3)</span></div>
           <div class="param"><span class="param-name">Freq OSR</span><span class="param-val hl">4 (shifts 0–3)</span></div>
           <div class="param"><span class="param-name">FFTs per block</span><span class="param-val">4 × 4 = 16</span></div>
-          <div class="param"><span class="param-name">Ring slots</span><span class="param-val hl">200 blocks</span></div>
-          <div class="param"><span class="param-name">Ring memory</span><span class="param-val hl">2.24 GB GPU</span></div>
+          <div class="param"><span class="param-name">Ring slots</span><span class="param-val hl">200 blocks (~200 MB VRAM)</span></div>
+          <div class="param"><span class="param-name">Block size in ring</span><span class="param-val">16 × 65,536 = 1,048,576 bytes</span></div>
         </div>
-        <p class="note">Fires ~6.25× per second (one FT8 symbol period). Both FT8Cuda and JS8Cuda hold <code>const&amp;</code> to this ring — no second FFT needed.</p>
+        <p class="note">Fires at 6.25 Hz (one FT8 symbol period). FT8Cuda, JS8Cuda, and WaterfallCuda all hold <code>const&amp;</code> to this ring — no second FFT needed.</p>
       </div>
     </div>
   </div>
 
   <div class="arrow-wrap">
     <div class="arrow-line"></div>
-    <div class="arrow-label"><strong>DeviceRingBuffer&lt;uint8_t, 200&gt;</strong> · 2.24 GB GPU · shared by FT8Cuda + JS8Cuda</div>
+    <div class="arrow-label"><strong>DeviceRingBuffer&lt;uint8_t, 200&gt;</strong> · ~200 MB GPU · shared by WaterfallCuda, FT8Cuda, JS8Cuda</div>
     <div class="arrow-line2"></div>
   </div>
 
-  <!-- ══ STAGE 4: FT8Cuda / JS8Cuda (parallel) ══════════════════════════ -->
-  <div class="split-wrap">
+  <!-- ══ STAGE 4: WaterfallCuda / FT8Cuda / JS8Cuda (parallel) ══════════ -->
+  <div class="split-wrap-3">
+
+    <!-- WaterfallCuda -->
+    <div class="stage wf">
+      <div class="stage-header" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="badge" style="background:#09202b;color:#56cfe1;border:1px solid #56cfe1">CUDA THREAD</span>
+          <span class="stage-title" style="font-size:14px">WaterfallCuda</span>
+        </div>
+        <span class="stage-subtitle">gm/cuda/WaterfallCuda.cc</span>
+      </div>
+      <div class="stage-body wide">
+        <div class="col">
+          <div class="col-label">Processing steps</div>
+          <ul class="steps">
+            <li>Reads DeviceRingBuffer (same normal ring)</li>
+            <li><strong>waterfallKernel:</strong> uint8 power → RGBA colormap<br>
+              floor/ceil configurable: <code>--wf-floor 170 --wf-ceil 210</code></li>
+            <li>2048-col RGBA output per ring block</li>
+            <li>D2H → wsdict <code>granolasdr:waterfall:N</code></li>
+            <li>Browser receives via WebSocket, renders to canvas</li>
+          </ul>
+          <div class="params" style="margin-top:10px">
+            <div class="param"><span class="param-name">Output key</span><span class="param-val">granolasdr:waterfall:N</span></div>
+            <div class="param"><span class="param-name">Output cols</span><span class="param-val">2048 RGBA/row</span></div>
+            <div class="param"><span class="param-name">Transport</span><span class="param-val">wsdict :8765</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- FT8Cuda -->
     <div class="stage cuda">
-      <div class="stage-header">
-        <span class="badge badge-cuda">CUDA THREAD</span>
-        <span class="stage-title">FT8Cuda — Continuous Scan</span>
-        <span class="stage-subtitle">gm/cuda/FT8Cuda.cc</span>
+      <div class="stage-header" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="badge badge-cuda">CUDA THREAD</span>
+          <span class="stage-title" style="font-size:14px">FT8Cuda</span>
+        </div>
+        <span class="stage-subtitle">gm/cuda/FT8Cuda.cc · FT8ScanCuda.cu</span>
       </div>
       <div class="stage-body wide">
         <div class="col">
@@ -426,20 +513,20 @@
           <ul class="steps">
             <li>Wakes every <strong>6 ring blocks</strong> (~960 ms)</li>
             <li>Reads last <strong>106 blocks</strong> (16.93 s) from DeviceRingBuffer</li>
-            <li><strong>FT8ScanCuda kernel</strong>: GPU Costas sync scan
-              — Costas pattern <code>{3,1,4,0,6,5,2}</code> at 3 sync groups
-              — score ≥ threshold → candidate list (fo, to, ts, fs)</li>
-            <li><strong>FT8SoftCuda kernel</strong>: soft symbols
-              — 58 data symbols × 8 mag bins → 3 LLRs/sym (Gray-coded 8-FSK)
-              — output: log174 (174 floats/candidate)</li>
+            <li><strong>FT8ScanCuda:</strong> GPU Costas sync scan
+              <br>— max-log 8-FSK metric (or legacy freq+neighbor)
+              <br>— Costas <code>{4,2,5,6,1,3,0}</code> at 3 sync groups
+              <br>— score ≥ threshold → candidate list (fo, to, ts, fs)</li>
+            <li><strong>FT8SoftCuda:</strong> soft symbols
+              <br>— 58 data syms × 8 mag bins → 3 LLRs/sym (Gray-coded 8-FSK)
+              <br>— output: log174 (174 floats/candidate)</li>
             <li>D2H candidates + LLRs → decode callback</li>
-            <li>Callback: <code>FT8::decodeAndPublishContinuous()</code></li>
           </ul>
           <div class="params" style="margin-top:10px">
             <div class="param"><span class="param-name">Stride</span><span class="param-val hl">6 blocks between scans</span></div>
             <div class="param"><span class="param-name">Window</span><span class="param-val hl">106 blocks = 16.93 s</span></div>
+            <div class="param"><span class="param-name">Costas</span><span class="param-val">{4,2,5,6,1,3,0}</span></div>
             <div class="param"><span class="param-name">Typical candidates</span><span class="param-val">~22,000 / scan</span></div>
-            <div class="param"><span class="param-name">Costas pattern</span><span class="param-val">{3,1,4,0,6,5,2}</span></div>
           </div>
         </div>
       </div>
@@ -447,9 +534,11 @@
 
     <!-- JS8Cuda -->
     <div class="stage opt">
-      <div class="stage-header">
-        <span class="badge badge-opt">CUDA THREAD (--js8)</span>
-        <span class="stage-title">JS8Cuda — Continuous Scan</span>
+      <div class="stage-header" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="badge badge-opt">CUDA (--js8)</span>
+          <span class="stage-title" style="font-size:14px">JS8Cuda Normal</span>
+        </div>
         <span class="stage-subtitle">gm/cuda/JS8Cuda.cc</span>
       </div>
       <div class="stage-body wide">
@@ -457,27 +546,28 @@
           <div class="col-label">Processing steps</div>
           <ul class="steps">
             <li>Reads same <strong>DeviceRingBuffer</strong> (no second FFT)</li>
-            <li>Continuous scan with JS8-specific Costas pattern</li>
-            <li><strong>JS8 Costas scan kernel</strong>: Costas pattern <code>{4,2,5,6,1,3,0}</code></li>
-            <li><strong>Soft symbol kernel</strong>: log174 LLRs per candidate</li>
+            <li>Continuous scan with JS8 Costas pattern</li>
+            <li><strong>JS8 Costas scan:</strong> pattern <code>{4,2,5,6,1,3,0}</code></li>
+            <li><strong>Soft symbol kernel:</strong> LDPC (174,87) · CRC-12 · log174 per candidate</li>
             <li>D2H → decode callback</li>
-            <li>Callback: <code>JS8::decodeAndPublishContinuous()</code></li>
           </ul>
           <div class="params" style="margin-top:10px">
-            <div class="param"><span class="param-name">Costas pattern</span><span class="param-val">{4,2,5,6,1,3,0}</span></div>
-            <div class="param"><span class="param-name">Symbol period</span><span class="param-val">~160 ms (same ring)</span></div>
-            <div class="param"><span class="param-name">LDPC code</span><span class="param-val">(174,91), M=87</span></div>
-            <div class="param"><span class="param-name">JS8 epoch</span><span class="param-val">15 s</span></div>
+            <div class="param"><span class="param-name">Costas</span><span class="param-val">{4,2,5,6,1,3,0}</span></div>
+            <div class="param"><span class="param-name">Window</span><span class="param-val">106 blocks = 16.93 s</span></div>
+            <div class="param"><span class="param-name">LDPC code</span><span class="param-val">(174,87) M=87 · CRC-12</span></div>
+            <div class="param"><span class="param-name">Epoch</span><span class="param-val">15 s · 6.25 Hz/bin</span></div>
           </div>
+          <p class="note" style="margin-top:8px"><strong>--js8-fast:</strong> separate MagBlock&lt;100&gt;, 40960-pt FFT, 10 Hz/bin, 100 ms/block, 10s cycle.<br>
+          <strong>--js8-slow:</strong> separate MagBlock&lt;100&gt;, 131072-pt FFT, 3.125 Hz/bin, 320 ms/block, 30s cycle.</p>
         </div>
       </div>
     </div>
 
-  </div><!-- /split-wrap -->
+  </div><!-- /split-wrap-3 -->
 
   <div class="arrow-wrap" style="margin-top:0">
     <div class="arrow-line"></div>
-    <div class="arrow-label"><strong>decode callback</strong> · candidates + log174 (174 floats/cand) · host RAM · ~15 MB typical</div>
+    <div class="arrow-label"><strong>decode callback</strong> · candidates + log174 (174 floats/cand) · host RAM</div>
     <div class="arrow-line2"></div>
   </div>
 
@@ -497,19 +587,20 @@
           <ul class="steps">
             <li><code>decodeAndPublishContinuous()</code> called per scan batch</li>
             <li>LDPC BP decode (<code>ftx_decode_from_llr()</code>):
-              — normalize GPU LLRs, 25-iter belief propagation
-              — (174,91) code, 14-bit CRC check</li>
+              <br>— normalize GPU LLRs, 25-iter belief propagation
+              <br>— (174,91) code, 14-bit CRC check</li>
             <li>Message unpack: 77 bits → callsign1 + callsign2 + grid/report</li>
-            <li>Accumulate into <strong>window_buf_</strong>: best-SNR per callsign</li>
-            <li>Every <strong>15 s</strong>: flush window
-              — print <code>[FT8] 15s window: N unique callsigns</code>
-              — publish each to ZMQ proxy (topic: <code>ft8/decode</code>)
-              — age callsign hashtable (<code>hashtable_cleanup(10)</code>)</li>
+            <li>Accumulate into <strong>window_buf_</strong>: best-SNR per callsign over 15 s</li>
+            <li>Every <strong>15 s</strong>: flush window:
+              <br>— publish to ZMQ proxy topic <code>ft8/decode</code> (nlohmann JSON, valid UTF-8)
+              <br>— publish to wsdict <code>granolasdr:ft8:heard:CALL</code> (TTL 900 s)
+              <br>— age callsign hashtable (<code>hashtable_cleanup(10)</code>)</li>
           </ul>
           <div class="params" style="margin-top:10px">
             <div class="param"><span class="param-name">Flush period</span><span class="param-val hl">15 s</span></div>
-            <div class="param"><span class="param-name">ZMQ topic</span><span class="param-val">ft8/decode</span></div>
-            <div class="param"><span class="param-name">ZMQ endpoint</span><span class="param-val">tcp://localhost:5599 (XSUB)</span></div>
+            <div class="param"><span class="param-name">ZMQ topic</span><span class="param-val">ft8/decode → :5599 XSUB</span></div>
+            <div class="param"><span class="param-name">wsdict key</span><span class="param-val">granolasdr:ft8:heard:CALL</span></div>
+            <div class="param"><span class="param-name">wsdict TTL</span><span class="param-val">900,000 ms (15 min)</span></div>
           </div>
         </div>
       </div>
@@ -527,16 +618,19 @@
           <div class="col-label">Processing steps</div>
           <ul class="steps">
             <li><code>decodeAndPublishContinuous()</code> called per scan batch</li>
-            <li>LDPC BP decode: BP decoder + JSC decompressor</li>
-            <li>JS8 data frame decode: Normal/Compact/Ultra/Turbo frame types</li>
+            <li>LDPC BP decode: (174,87) code M=87 · CRC-12</li>
+            <li>JSC decompress + JS8 data frame decode</li>
+            <li>Frame types: Normal / Compact / Ultra / Turbo</li>
             <li>Extract from_call, message text, APRS fields</li>
-            <li>Per-epoch dedup: <code>seen_this_epoch_</code> cleared on 15s epoch rollover</li>
-            <li>Publish to ZMQ proxy (topic: <code>js8/decode</code>)</li>
+            <li>Per-epoch dedup: <code>seen_this_epoch_</code> cleared on epoch rollover</li>
+            <li>Publish to ZMQ proxy topic <code>js8/decode</code> (nlohmann JSON)</li>
+            <li>Publish to wsdict <code>granolasdr:js8:heard:CALL</code> (TTL 900 s)</li>
           </ul>
           <div class="params" style="margin-top:10px">
-            <div class="param"><span class="param-name">Epoch period</span><span class="param-val hl">15 s</span></div>
-            <div class="param"><span class="param-name">ZMQ topic</span><span class="param-val">js8/decode</span></div>
-            <div class="param"><span class="param-name">ZMQ endpoint</span><span class="param-val">tcp://localhost:5599 (XSUB)</span></div>
+            <div class="param"><span class="param-name">Normal epoch</span><span class="param-val hl">15 s</span></div>
+            <div class="param"><span class="param-name">Fast epoch</span><span class="param-val">10 s</span></div>
+            <div class="param"><span class="param-name">Slow epoch</span><span class="param-val">30 s</span></div>
+            <div class="param"><span class="param-name">ZMQ topic</span><span class="param-val">js8/decode → :5599 XSUB</span></div>
           </div>
         </div>
       </div>
@@ -546,7 +640,7 @@
 
   <div class="arrow-wrap" style="margin-top:0">
     <div class="arrow-line"></div>
-    <div class="arrow-label"><strong>ZMQ proxy bus</strong> · XSUB tcp://*:5599 ← producers · XPUB tcp://*:5600 → consumers</div>
+    <div class="arrow-label"><strong>ZMQ proxy bus</strong> · XSUB :5599 ← producers · XPUB :5600 → consumers &nbsp;|&nbsp; <strong>wsdict :8765</strong> → browser</div>
     <div class="arrow-line2"></div>
   </div>
 
@@ -586,60 +680,95 @@
 <!-- ══ DETAIL CARDS ══════════════════════════════════════════════════════ -->
 <div class="details">
 
-  <!-- HF Bands table -->
+  <!-- HF Bands table (from hf_bands.h) -->
   <div class="detail-card">
-    <div class="detail-header">HF Band Mapping (kHFBands)</div>
+    <div class="detail-header">HF Band Mapping — kHFBands (hf_bands.h)</div>
     <div class="detail-body">
       <table>
         <tr>
           <th>Band</th>
-          <th>FT8 Dial (MHz)</th>
+          <th>FT8 Dial</th>
+          <th>JS8 Dial</th>
           <th>WB bins</th>
-          <th>IFFT bins (bw)</th>
+          <th>Composite bins</th>
         </tr>
-        <tr><td class="band-name">160 m</td><td class="freq">1.840</td><td>13480 – 14980</td><td>1,500</td></tr>
-        <tr><td class="band-name"> 80 m</td><td class="freq">3.573</td><td>26212 – 29960</td><td>3,748</td></tr>
-        <tr><td class="band-name"> 60 m</td><td class="freq">5.357</td><td>39920 – 40712</td><td>792</td></tr>
-        <tr><td class="band-name"> 40 m</td><td class="freq">7.074</td><td>52424 – 54676</td><td>2,252</td></tr>
-        <tr><td class="band-name"> 30 m</td><td class="freq">10.136</td><td>75644 – 76024</td><td>380</td></tr>
-        <tr><td class="band-name"> 20 m</td><td class="freq">14.074</td><td>104856 – 107480</td><td>2,624</td></tr>
-        <tr><td class="band-name"> 17 m</td><td class="freq">18.100</td><td>135324 – 136076</td><td>752</td></tr>
-        <tr><td class="band-name"> 15 m</td><td class="freq">21.074</td><td>157284 – 160660</td><td>3,376</td></tr>
-        <tr><td class="band-name"> 12 m</td><td class="freq">24.915</td><td>186420 – 187172</td><td>752</td></tr>
-        <tr><td class="band-name"> 10 m</td><td class="freq">28.074</td><td>209712 – 222448</td><td>12,736</td></tr>
+        <tr><td class="band-name">160 m</td><td class="freq">1.840 MHz</td><td class="freq">1.842 MHz</td><td>18390 – 18460</td><td>70</td></tr>
+        <tr><td class="band-name"> 80 m</td><td class="freq">3.573 MHz</td><td class="freq">3.578 MHz</td><td>35720 – 35820</td><td>100</td></tr>
+        <tr><td class="band-name"> 60 m</td><td class="freq">5.357 MHz</td><td class="freq">5.357 MHz</td><td>53560 – 53740</td><td>180</td></tr>
+        <tr><td class="band-name"> 40 m</td><td class="freq">7.074 MHz</td><td class="freq">7.078 MHz</td><td>70680 – 70820</td><td>140</td></tr>
+        <tr><td class="band-name"> 30 m</td><td class="freq">10.136 MHz</td><td class="freq">10.130 MHz</td><td>101290 – 101420</td><td>130</td></tr>
+        <tr><td class="band-name"> 20 m</td><td class="freq">14.074 MHz</td><td class="freq">14.078 MHz</td><td>140700 – 141000</td><td>300</td></tr>
+        <tr><td class="band-name"> 17 m</td><td class="freq">18.100 MHz</td><td class="freq">18.104 MHz</td><td>180700 – 181130</td><td>430</td></tr>
+        <tr><td class="band-name"> 15 m</td><td class="freq">21.074 MHz</td><td class="freq">21.078 MHz</td><td>210720 – 210950</td><td>230</td></tr>
+        <tr><td class="band-name"> 12 m</td><td class="freq">24.915 MHz</td><td class="freq">24.922 MHz</td><td>249140 – 249310</td><td>170</td></tr>
+        <tr><td class="band-name"> 10 m</td><td class="freq">28.074 MHz</td><td class="freq">28.078 MHz</td><td>280730 – 281000</td><td>270</td></tr>
+        <tr><td class="band-name">  6 m</td><td class="freq">50.313 MHz</td><td class="freq">50.318 MHz</td><td>503110 – 503200</td><td>90</td></tr>
       </table>
       <p class="note" style="margin-top:10px">
-        Wideband bin = RF Hz × 1,048,576 / 140,000,000.<br>
-        All 10 bands are stacked sequentially in the 32,768-bin composite IFFT.<br>
-        Total composite bins used: 27,912 of 32,768.
+        Wideband bin = RF Hz / 100 (100 Hz/bin, 1,400,000-pt R2C FFT at 140 MS/s).<br>
+        All 11 bands stacked sequentially in the 4096-bin composite IFFT buffer.<br>
+        Total composite bins: <strong>2,110</strong> of 4,096. Output rate: <strong>409.6 kHz</strong>.
       </p>
     </div>
   </div>
 
-  <!-- ZMQ bus / timing summary -->
+  <!-- Ports / Timing table -->
   <div class="detail-card">
-    <div class="detail-header">ZMQ Proxy Bus &amp; Timing</div>
+    <div class="detail-header">Network Ports &amp; Timing</div>
     <div class="detail-body">
       <table style="margin-bottom:14px">
-        <tr><th>Port</th><th>Socket</th><th>Direction</th><th>Topics / Description</th></tr>
-        <tr><td>5599</td><td>XSUB</td><td>producers →</td><td>FT8, JS8, MagBlock waterfall connect here</td></tr>
-        <tr><td>5600</td><td>XPUB</td><td>→ consumers</td><td>Subscribe here; filter <code>ft8/</code> or <code>js8/</code></td></tr>
-        <tr><td>5581–5584</td><td>PUB</td><td>outbound</td><td>Audio sinks 0–3 (48 kHz PCM)</td></tr>
-        <tr><td>8080</td><td>HTTP</td><td>inbound</td><td>REST control API + web UI</td></tr>
+        <tr><th>Port</th><th>Socket</th><th>Direction</th><th>Description</th></tr>
+        <tr><td>5599</td><td>ZMQ XSUB</td><td>inbound</td><td>ZMQ proxy — FT8, JS8 connect here</td></tr>
+        <tr><td>5600</td><td>ZMQ XPUB</td><td>outbound</td><td>Subscribers: <code>ft8/decode</code>, <code>js8/decode</code></td></tr>
+        <tr><td>5581–5584</td><td>ZMQ PUB</td><td>outbound</td><td>Audio sinks 0–3 (48 kHz PCM)</td></tr>
+        <tr><td>8765</td><td>WebSocket</td><td>inbound</td><td>wsdict: waterfall, decodes, audio control</td></tr>
       </table>
       <table>
-        <tr><th>Stage</th><th>Rate / Period</th><th>Duration</th></tr>
-        <tr><td>HFChannelizer FFT block</td><td>every 3.75 ms</td><td>&lt;1 ms GPU</td></tr>
-        <tr><td>MagBlock 16×FFT + mag + ring</td><td>every ~160 ms</td><td>~30 ms GPU</td></tr>
-        <tr><td>FT8Cuda continuous scan</td><td>every 6 blocks (~960 ms)</td><td>~120–250 ms GPU</td></tr>
-        <tr><td>FT8 15s window flush</td><td>every 15 s</td><td>&lt;1 ms CPU</td></tr>
-        <tr><td>LDPC decode (ft8_lib)</td><td>per scan batch</td><td>~200 ms (22K cands)</td></tr>
-        <tr><td>PSKReporter upload</td><td>every 5 min</td><td>&lt;1 ms UDP</td></tr>
+        <tr><th>Stage</th><th>Rate / Period</th><th>Notes</th></tr>
+        <tr><td>HFChannelizer FFT block</td><td>every 5 ms (200 Hz)</td><td>1,400,000-pt R2C + 4096-pt IFFT</td></tr>
+        <tr><td>SpectrumNorm update</td><td>every 64 frames (~10 s)</td><td>D2H + CPU EMA/poly + H2D</td></tr>
+        <tr><td>MagBlock 16×FFT + mag + ring</td><td>every 160 ms (6.25 Hz)</td><td>65536-pt × 16 per block</td></tr>
+        <tr><td>WaterfallCuda colormap</td><td>every ring write</td><td>2048-col RGBA → wsdict</td></tr>
+        <tr><td>FT8Cuda Costas scan + LLRs</td><td>every 6 blocks (~960 ms)</td><td>~15 scans / 15s cycle</td></tr>
+        <tr><td>LDPC decode (ft8_lib)</td><td>per scan batch</td><td>~200 ms @ ~22K candidates</td></tr>
+        <tr><td>FT8 15s window flush</td><td>every 15 s</td><td>ZMQ + wsdict publish</td></tr>
+        <tr><td>PSKReporter upload</td><td>every 5 min</td><td>IPFIX UDP :4739</td></tr>
       </table>
     </div>
   </div>
 
 </div><!-- /details -->
+
+<!-- JS8 Mode Summary -->
+<div style="margin-top:20px; background:#161b22; border:1px solid #30363d; border-radius:10px; padding:18px 20px;">
+  <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#8b949e;margin-bottom:14px;">JS8 Mode Comparison</div>
+  <table>
+    <tr>
+      <th>Mode</th><th>Flag</th><th>FFT size</th><th>Hz/bin</th><th>ms/block</th><th>MagBlock N</th><th>Window</th><th>Cycle</th>
+    </tr>
+    <tr>
+      <td style="color:#79c0ff;font-weight:600">JS8 Normal</td>
+      <td><code>--js8</code></td>
+      <td>65,536</td><td>6.25</td><td>160</td><td>200 (~200 MB)</td><td>106 blks</td><td>15 s</td>
+    </tr>
+    <tr>
+      <td style="color:#79c0ff;font-weight:600">JS8 Fast</td>
+      <td><code>--js8-fast</code></td>
+      <td>40,960</td><td>10.0</td><td>100</td><td>100</td><td>100 blks</td><td>10 s</td>
+    </tr>
+    <tr>
+      <td style="color:#79c0ff;font-weight:600">JS8 Slow</td>
+      <td><code>--js8-slow</code></td>
+      <td>131,072</td><td>3.125</td><td>320</td><td>100</td><td>94 blks</td><td>30 s</td>
+    </tr>
+    <tr>
+      <td style="color:#3fb950;font-weight:600">FT8</td>
+      <td>(always)</td>
+      <td>65,536</td><td>6.25</td><td>160</td><td>200 (shared)</td><td>106 blks</td><td>15 s</td>
+    </tr>
+  </table>
+  <p class="note" style="margin-top:8px">Normal JS8 shares the FT8 MagBlock ring (N=200). Fast and Slow each get their own dedicated MagBlock ring (N=100). All use DeviceRingBuffer for multi-reader concurrent access.</p>
+</div>
 
 <!-- Memory / thread summary -->
 <div style="margin-top:20px; background:#161b22; border:1px solid #30363d; border-radius:10px; padding:18px 20px;">
@@ -649,10 +778,11 @@
     <div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Buffers</div>
       <div style="font-size:12px;line-height:2;">
-        <div><code>int16_t</code> ring: <span style="color:#e6edf3">~200 MB host</span></div>
-        <div><code>complex&lt;float&gt;</code> ring: <span style="color:#e6edf3">~100 MB GPU</span></div>
-        <div>DeviceRingBuffer (MagBlock): <span style="color:#ff7b72">2.24 GB GPU</span></div>
-        <div>log174 pinned (FT8Cuda): <span style="color:#79c0ff">~50 MB host</span></div>
+        <div><code>int16_t</code> ring: <span style="color:#e6edf3">host pinned</span></div>
+        <div><code>complex&lt;float&gt;</code> ring: <span style="color:#e6edf3">GPU</span></div>
+        <div>MagBlock normal (N=200): <span style="color:#ff7b72">~200 MB GPU</span></div>
+        <div>MagBlock fast/slow (N=100): <span style="color:#79c0ff">~50 MB each</span></div>
+        <div>log174 pinned host: <span style="color:#e6edf3">~50 MB</span></div>
         <div>GPU scan candidates: <span style="color:#e6edf3">&lt;10 MB GPU</span></div>
       </div>
     </div>
@@ -660,18 +790,21 @@
     <div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Threads</div>
       <div style="font-size:12px;line-height:2;">
-        <div><span style="color:#e3b341">●</span> rx888 capture (HW)</div>
+        <div><span style="color:#e3b341">●</span> rx888 capture (HW thread)</div>
         <div><span style="color:#3fb950">●</span> HFChannelizer — CUDA stream</div>
         <div><span style="color:#3fb950">●</span> MagBlock — CUDA stream</div>
-        <div><span style="color:#3fb950">●</span> FT8Cuda — continuous scan</div>
-        <div><span style="color:#79c0ff">●</span> JS8Cuda — continuous scan (opt)</div>
-        <div><span style="color:#58a6ff">●</span> FT8 decoder (CPU, 15s window)</div>
+        <div><span style="color:#56cfe1">●</span> WaterfallCuda — CUDA thread</div>
+        <div><span style="color:#3fb950">●</span> FT8Cuda — CUDA thread</div>
+        <div><span style="color:#79c0ff">●</span> JS8Cuda (opt, ×1–3 modes)</div>
+        <div><span style="color:#58a6ff">●</span> FT8 decoder (CPU, 15s)</div>
         <div><span style="color:#79c0ff">●</span> JS8 decoder (CPU, opt)</div>
+        <div><span style="color:#f0883e">●</span> cmdWorker (wsdict pub/sub)</div>
+        <div><span style="color:#d2a8ff">●</span> Rust wsdict server</div>
       </div>
     </div>
 
     <div>
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Continuous Scan Timing</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Continuous Scan Timing (FT8)</div>
       <div style="font-size:12px;line-height:2;">
         <div>FT8 cycle: <span style="color:#e6edf3">15 s</span></div>
         <div>Signal duration: <span style="color:#e6edf3">12.64 s (79 symbols)</span></div>
@@ -679,6 +812,7 @@
         <div>Scan stride: <span style="color:#79c0ff">6 blocks = ~960 ms</span></div>
         <div>Scans per cycle: <span style="color:#3fb950">~15×</span></div>
         <div>Window flush: <span style="color:#3fb950">every 15 s</span></div>
+        <div>SpectrumNorm: <span style="color:#f0883e">every ~10 s</span></div>
       </div>
     </div>
 
@@ -686,12 +820,14 @@
       <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">Key Files</div>
       <div style="font-size:12px;line-height:2;">
         <div><code>hf_bands.h</code> — band table</div>
-        <div><code>ft8_capture.h</code> — window config</div>
         <div><code>HFChannelizer.cc</code></div>
+        <div><code>SpectrumNorm.cu</code></div>
         <div><code>MagBlock.cc</code></div>
+        <div><code>WaterfallCuda.cc</code></div>
         <div><code>FT8Cuda.cc</code> · <code>JS8Cuda.cc</code></div>
         <div><code>FT8ScanCuda.cu</code> · <code>FT8SoftCuda.cu</code></div>
         <div><code>ft8.cc</code> · <code>js8.cc</code></div>
+        <div><code>wsdict.h</code> · <code>wsserver/</code></div>
         <div><code>buffer/BufferFile.cc</code></div>
       </div>
     </div>

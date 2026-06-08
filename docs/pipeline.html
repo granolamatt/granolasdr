@@ -20,7 +20,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   flex-direction: column;
   align-items: center;
   gap: 0;
-  max-width: 900px;
+  max-width: 960px;
   margin: 0 auto;
 }
 
@@ -63,14 +63,12 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   border: 1px solid #30363d;
   color: #8b949e;
 }
-
 .thread-badge {
   font-size: 10px;
   padding: 2px 7px;
   border-radius: 10px;
   font-weight: normal;
 }
-
 .arrow-row {
   display: flex;
   align-items: center;
@@ -109,12 +107,16 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   top: 50%;
   transform: translateY(-50%);
 }
-
-/* split columns for FT8/JS8 */
 .split-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+  width: 100%;
+}
+.split-row-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
   width: 100%;
 }
 
@@ -127,9 +129,17 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 .chan .stage-header   { background: #0f2317; color: #56d364; }
 .chan .stage-body     { background: #0b1d12; }
 
+.norm   { border-color: #f0883e44; }
+.norm .stage-header   { background: #2a1800; color: #f0883e; }
+.norm .stage-body     { background: #1c1009; }
+
 .mag    { border-color: #e3b34166; }
 .mag .stage-header    { background: #2d1f0a; color: #e3b341; }
 .mag .stage-body      { background: #1c1409; }
+
+.wf     { border-color: #56cfe144; }
+.wf .stage-header     { background: #091e24; color: #70d6e8; }
+.wf .stage-body       { background: #071518; }
 
 .ft8cu  { border-color: #ff7b7244; }
 .ft8cu .stage-header  { background: #2a0d0d; color: #ff9999; }
@@ -151,12 +161,17 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 .out .stage-header    { background: #0f2317; color: #7ee787; }
 .out .stage-body      { background: #0b1d12; }
 
+.wsdict { border-color: #d2a8ff44; }
+.wsdict .stage-header { background: #1a0e2e; color: #d2a8ff; }
+.wsdict .stage-body   { background: #120a1f; }
+
 .hl  { color: #e3b341; }
 .hl2 { color: #79c0ff; }
 .hl3 { color: #56d364; }
 .hl4 { color: #ff9999; }
 .hl5 { color: #d2a8ff; }
 .hl6 { color: #70d6e8; }
+.hlo { color: #f0883e; }
 .dim { color: #4a5060; }
 
 .note {
@@ -178,7 +193,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 </head>
 <body>
 <h1>granolasdr Signal Processing Pipeline</h1>
-<div class="subtitle">RX888 → HFChannelizer → MagBlock → FT8Cuda/JS8Cuda → ft8.cc/js8.cc → ZMQ proxy | block diagram with code locations</div>
+<div class="subtitle">RX888 → HFChannelizer + SpectrumNorm → MagBlock → FT8Cuda/JS8Cuda/WaterfallCuda → ft8.cc/js8.cc → ZMQ + wsdict</div>
 
 <div class="pipeline">
 
@@ -193,7 +208,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
     <div class="step"><span class="step-num">1</span><span class="step-text">16-bit real ADC samples, <span class="hl2">140 MS/s</span></span></div>
     <div class="step"><span class="step-num">2</span><span class="step-text">DMA into host ring buffer, block = <span class="hl2">700,000 samples</span> = 5 ms</span></div>
     <div class="step"><span class="step-num">3</span><span class="step-text">Signals <code>BufferPosition&lt;int16_t&gt;</code> — HFChannelizer thread wakes</span></div>
-    <div class="note" style="margin-top:4px"><b>Playback mode</b> (<code>--playback FILE</code>): <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> reads a .dat file and feeds <code>BufferPosition&lt;complex&lt;float&gt;&gt;</code> directly into runPipeline — bypasses RX888 and HFChannelizer.</div>
+    <div class="note"><b>Playback mode</b> (<code>--playback FILE</code>): <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> reads a .dat file and feeds <code>BufferPosition&lt;complex&lt;float&gt;&gt;</code> directly — bypasses RX888 and HFChannelizer.</div>
   </div>
 </div>
 
@@ -205,70 +220,118 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 <!-- ===== HFChannelizer ===== -->
 <div class="stage chan">
   <div class="stage-header">
-    HFChannelizer — Wideband FFT &amp; Band Select
+    HFChannelizer — Wideband FFT, Band Select &amp; Audio
     <span class="thread-badge" style="background:#0f2317;border:1px solid #3fb95044;color:#56d364">CUDA thread</span>
     <span class="file-tag">gm/cuda/HFChannelizer.cc</span>
   </div>
   <div class="stage-body">
     <div>
-      <div class="step"><span class="step-num">1</span><span class="step-text hl3">H2D copy:</span><span class="step-text"> int16 → GPU</span></div>
-      <div class="step"><span class="step-num">2</span><span class="step-text hl3">Cast kernel:</span><span class="step-text"> int16 → float32, scale</span></div>
-      <div class="step"><span class="step-num">3</span><span class="step-text hl3">Overlap-save wrap:</span><span class="step-text"> copy tail of previous block to start of fftInData_d</span></div>
+      <div class="step"><span class="step-num">1</span><span class="step-text hl3">H2D copy + cast:</span><span class="step-text"> int16 → float32</span></div>
+      <div class="step"><span class="step-num">2</span><span class="step-text hl3">Overlap-save wrap:</span><span class="step-text"> copy tail to head of fftInData_d</span></div>
+      <div class="step"><span class="step-num">3</span>
+        <span class="step-text"><span class="hl3">R2C FFT: <span class="hl">1,400,000-pt</span></span><br>
+        <span class="step-detail">bin width = 140 MHz / 1,400,000 = <span class="hl2">100 Hz/bin</span><br>
+        output: 700,001 bins spanning 0–70 MHz</span>
+        </span>
+      </div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl3">R2C FFT: <span class="hl">1,400,000-pt</span></span> real → complex<br>
-        <span class="step-detail">bin width = 140,000,000 / 1,400,000 = <span class="hl2">100 Hz/bin</span><br>
-        output: 700,001 complex bins spanning 0–70 MHz</span>
+        <span class="step-text"><span class="hl3">Audio extraction:</span> 4 sinks<br>
+        <span class="step-detail">480-bin gather per sink → batched C2C IFFT → 48 kHz ZMQ PUB :5581–5584<br>
+        sink_bins[] tunable at runtime via wsdict <code>granolasdr:audio:cmd</code></span>
         </span>
       </div>
     </div>
     <div>
       <div class="step"><span class="step-num">5</span>
-        <span class="step-text"><span class="hl3">Band bin select:</span> zero-fill channelData_d[65536], then copy 10 HF bands:
+        <span class="step-text"><span class="hl3">11-band composite:</span> zero channelData_d[4096], copy 11 bands:
         <div class="band-grid">
-          <span class="band">160m 18000–20000</span>
-          <span class="band">80m 35000–40000</span>
-          <span class="band">60m 53300–54100</span>
-          <span class="band">40m 70000–73000</span>
-          <span class="band">30m 101000–101500</span>
-          <span class="band">20m 140000–143500</span>
-          <span class="band">17m 180680–181680</span>
-          <span class="band">15m 210000–214500</span>
-          <span class="band">12m 248900–249900</span>
-          <span class="band">10m 280000–297000</span>
+          <span class="band">160m 70 bins</span>
+          <span class="band">80m 100 bins</span>
+          <span class="band">60m 180 bins</span>
+          <span class="band">40m 140 bins</span>
+          <span class="band">30m 130 bins</span>
+          <span class="band">20m 300 bins</span>
+          <span class="band">17m 430 bins</span>
+          <span class="band">15m 230 bins</span>
+          <span class="band">12m 170 bins</span>
+          <span class="band">10m 270 bins</span>
+          <span class="band">6m 90 bins</span>
         </div>
+        <span class="step-detail">total composite: <span class="hl">2110 bins</span> of 4096</span>
         </span>
       </div>
       <div class="step"><span class="step-num">6</span>
-        <span class="step-text"><span class="hl3">C2C IFFT: <span class="hl">65,536-pt</span></span> composite → decimated time domain<br>
-        <span class="step-detail">output rate = <span class="hl2">6,553,600 S/s</span></span>
+        <span class="step-text"><span class="hl3">C2C IFFT: <span class="hl">4096-pt</span></span> → decimated time domain<br>
+        <span class="step-detail">extract center half: <span class="hl2">2048 valid samples</span> → ring<br>
+        output rate = <span class="hl2">409.6 kHz</span>, block period = 5 ms</span>
         </span>
       </div>
-      <div class="step"><span class="step-num">7</span>
-        <span class="step-text"><span class="hl3">Overlap-save extract:</span> samples [16384..49152] = <span class="hl2">32,768 complex</span> → ring<br>
+      <div class="note"><b>Record mode</b> (<code>--record FILE</code>): <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> taps this ring for deterministic replay.</div>
+    </div>
+  </div>
+</div>
+
+<div class="arrow-row" style="height:36px">
+  <div class="arrow-line" style="height:20px"></div><div class="arrow-head"></div>
+  <div class="arrow-label">complex&lt;float&gt; ring · 409.6 kHz · 2048 samples/block · 11 HF bands packed</div>
+</div>
+
+<!-- ===== SpectrumNorm ===== -->
+<div class="stage norm">
+  <div class="stage-header">
+    SpectrumNorm — Noise Floor Equalization
+    <span class="thread-badge" style="background:#2a1800;border:1px solid #f0883e44;color:#f0883e">in HFChannelizer (every 64 frames)</span>
+    <span class="file-tag">gm/cuda/SpectrumNorm.cu</span>
+  </div>
+  <div class="stage-body">
+    <div>
+      <div class="step"><span class="step-num">1</span>
+        <span class="step-text"><span class="hlo">D2H snapshot:</span> copy 2110 complex bins from fftData_d<br>
+        <span class="step-detail">one snapshot per band window every ~10 s at 6.25 Hz frame rate</span>
         </span>
       </div>
-      <div class="note"><b>Record mode</b> (<code>--record FILE</code>): <code>BufferFile&lt;complex&lt;float&gt;&gt;</code> taps this ring and writes to disk with block timing metadata for deterministic replay.</div>
+      <div class="step"><span class="step-num">2</span>
+        <span class="step-text"><span class="hlo">Asymmetric EMA</span> of |mag| per bin:<br>
+        <span class="step-detail">α_down = 0.10 (warm) — tracks fast signal drops<br>
+        α_up = 0.005 (warm) — drifts up slowly (~30 min time constant)<br>
+        warm-up: α_down=0.30, α_up=0.10 for first 5 updates</span>
+        </span>
+      </div>
+    </div>
+    <div>
+      <div class="step"><span class="step-num">3</span>
+        <span class="step-text"><span class="hlo">Legendre poly fit</span> (degree 3) on log10(EMA) per band<br>
+        <span class="step-detail">gains[i] = 10^(poly_center − poly(xi)) → flattens noise floor to band center</span>
+        </span>
+      </div>
+      <div class="step"><span class="step-num">4</span>
+        <span class="step-text"><span class="hlo">Cross-band leveling:</span> geometric mean of 11 band-center EMAs<br>
+        <span class="step-detail">per-band scalar brings all bands to the same brightness</span>
+        </span>
+      </div>
+      <div class="step"><span class="step-num">5</span>
+        <span class="step-text"><span class="hlo">H2D gain upload</span> → GPU kernel multiplies channelData_d in-place (before IFFT)</span>
+      </div>
     </div>
   </div>
 </div>
 
 <div class="arrow-row">
   <div class="arrow-line"></div><div class="arrow-head"></div>
-  <div class="arrow-label">complex&lt;float&gt; ring · 6.5536 MS/s · 32,768 samples/block · all HF bands packed</div>
+  <div class="arrow-label">complex&lt;float&gt; ring · 409.6 kHz · 11 bands spectrally equalized</div>
 </div>
 
 <!-- ===== MagBlock ===== -->
 <div class="stage mag">
   <div class="stage-header">
-    MagBlock — Oversampled FFT &amp; Magnitude Ring
+    MagBlock&lt;200&gt; — Oversampled FFT &amp; Magnitude Ring (Normal)
     <span class="thread-badge" style="background:#2d1f0a;border:1px solid #e3b34144;color:#e3b341">CUDA thread</span>
     <span class="file-tag">gm/cuda/MagBlock.cc</span>
   </div>
   <div class="stage-body">
     <div>
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text"><span class="hl">Accumulate:</span> D2D copy blocks → window until <span class="hl">buff_pos &gt; 2 × 1,048,576 = 2,097,152 samples</span><br>
-        <span class="step-detail">≈ 64 HFChannelizer blocks = 320 ms of data</span>
+        <span class="step-text"><span class="hl">Accumulate:</span> blocks until window ≥ 2 × 65,536 samples (~320 ms)<br>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
@@ -277,131 +340,142 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <div class="step"><span class="step-num"></span>
         <span class="step-text">
           <table style="font-size:11px;border-collapse:collapse;margin-left:20px">
-            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">time offset t=0..3</td><td>start sample = t × 174,720</td></tr>
-            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">freq offset f=0..3</td><td>freqShift by f × 1.5625 Hz</td></tr>
-            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">each FFT</td><td style="color:#e3b341">C2C 1,048,576-pt → 1,048,576 bins</td></tr>
-            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">bin width</td><td>6,553,600 / 1,048,576 = <span style="color:#79c0ff">6.25 Hz</span> (1 FT8 tone)</td></tr>
+            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">each FFT</td><td style="color:#e3b341">C2C 65,536-pt</td></tr>
+            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">bin width</td><td>409,600 / 65,536 = <span style="color:#79c0ff">6.25 Hz</span> (1 FT8 tone)</td></tr>
+            <tr><td style="color:#6e7681;padding:1px 8px 1px 0">block duration</td><td style="color:#79c0ff">160 ms = 1 FT8 symbol</td></tr>
           </table>
-        </span>
-      </div>
-      <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl">Advance:</span> buff_pos -= 1,048,576 samples<br>
-        <span class="step-detail">= 160 ms = one FT8 symbol period → fires ~6.25×/sec</span>
         </span>
       </div>
     </div>
     <div>
+      <div class="step"><span class="step-num">3</span>
+        <span class="step-text"><span class="hl">magKernel:</span> complex → uint8 (dB-compressed power)<br>
+        </span>
+      </div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl">magKernel:</span> complex → uint8 magnitude<br>
-        <span class="step-detail">each byte ≈ 20·log₁₀(|z|) + offset (dB-compressed power)</span>
+        <span class="step-text"><span class="hl">D2D ring write:</span> DeviceRingBuffer&lt;uint8_t, 200&gt;<br>
+        <span class="step-detail">block = 4×4×65,536 = 1,048,576 bytes · ring ≈ 200 MB VRAM</span>
         </span>
       </div>
       <div class="step"><span class="step-num">5</span>
-        <span class="step-text"><span class="hl">D2D ring write:</span> 1 block = 4×4×1,048,576 = <span class="hl">16,777,216 bytes</span> → DeviceRingBuffer<br>
-        <span class="step-detail">ring wraps at N=200 slots = 3.36 GB on GPU</span>
+        <span class="step-text"><span class="hl">Slide:</span> advance by 65,536 samples → fires at <span class="hl2">6.25 Hz</span><br>
+        <span class="step-detail">FT8Cuda, JS8Cuda, WaterfallCuda all hold <code>const&amp;</code> to this ring</span>
         </span>
       </div>
-      <div class="note" style="margin-top:8px">
-        <b>Ring memory layout:</b><br>
-        <code style="color:#e3b341">mag[block × block_stride + (ts×4 + fs) × 1048576 + fo]</code><br>
-        block_stride = 4×4×1,048,576 = 16,777,216 bytes<br>
-        <span style="color:#6e7681">ts = time sub-sample [0..3]  |  fs = freq sub-sample [0..3]  |  fo = freq bin [0..1048575]</span>
-      </div>
-      <div class="step" style="margin-top:8px"><span class="step-num">6</span>
-        <span class="step-text"><span class="hl">Wideband waterfall:</span> → ZMQ proxy topic <code>ft8/waterfall</code></span>
-      </div>
-      <div class="note" style="margin-top:4px">FT8Cuda and JS8Cuda both hold <code>const&amp; DeviceRingBuffer</code> — no second FFT needed. MagBlock owns the ring memory; scanners hold references.</div>
     </div>
   </div>
 </div>
 
-<!-- SPLIT ARROW to FT8Cuda / JS8Cuda -->
+<!-- SPLIT ARROW to WaterfallCuda / FT8Cuda / JS8Cuda -->
 <div style="width:100%;height:28px;position:relative;display:flex;align-items:flex-end;justify-content:center">
   <div style="position:absolute;left:50%;top:0;width:2px;height:28px;background:#30363d"></div>
-  <div style="position:absolute;left:25%;top:14px;width:calc(25%);height:2px;background:#30363d"></div>
-  <div style="position:absolute;left:50%;top:14px;width:calc(25%);height:2px;background:#30363d"></div>
-  <div style="position:absolute;left:calc(25% - 7px);top:14px;width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-left:10px solid #30363d"></div>
-  <div style="position:absolute;left:calc(75% - 3px);top:14px;width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-left:10px solid #30363d"></div>
+  <div style="position:absolute;left:16.5%;top:14px;width:calc(33.5%);height:2px;background:#30363d"></div>
+  <div style="position:absolute;left:50%;top:14px;width:calc(33.5%);height:2px;background:#30363d"></div>
+  <div style="position:absolute;left:calc(16.5% - 7px);top:8px;width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-left:10px solid #30363d"></div>
+  <div style="position:absolute;left:calc(83.5% - 3px);top:8px;width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-left:10px solid #30363d"></div>
 </div>
 
-<!-- SPLIT: FT8Cuda + JS8Cuda -->
-<div class="split-row">
+<!-- SPLIT: WaterfallCuda + FT8Cuda + JS8Cuda -->
+<div class="split-row-3">
+
+  <div class="stage wf">
+    <div class="stage-header" style="flex-direction:column;align-items:flex-start;gap:4px">
+      WaterfallCuda
+      <span class="file-tag">gm/cuda/WaterfallCuda.cc</span>
+    </div>
+    <div class="stage-body wide">
+      <div class="step"><span class="step-num">1</span>
+        <span class="step-text">Reads DeviceRingBuffer (same normal ring)<br>
+        <span class="step-detail">wf_bin_start/end configurable via --waterfall-* flags</span>
+        </span>
+      </div>
+      <div class="step"><span class="step-num">2</span>
+        <span class="step-text"><span class="hl6">waterfallKernel:</span> uint8 power → RGBA colormap<br>
+        <span class="step-detail">wf_floor=170, wf_ceil=210 (configurable)<br>
+        2048-col output per row</span>
+        </span>
+      </div>
+      <div class="step"><span class="step-num">3</span>
+        <span class="step-text">D2H RGBA batch → wsdict<br>
+        <span class="step-detail">key: <code>granolasdr:waterfall:N</code><br>
+        browser renders to canvas via WebSocket</span>
+        </span>
+      </div>
+    </div>
+  </div>
 
   <div class="stage ft8cu">
-    <div class="stage-header">
+    <div class="stage-header" style="flex-direction:column;align-items:flex-start;gap:4px">
       FT8Cuda — Continuous Scan
-      <span class="thread-badge" style="background:#2a0d0d;border:1px solid #ff6b6b44;color:#ff9999">CUDA thread</span>
       <span class="file-tag">FT8Cuda.cc · FT8ScanCuda.cu</span>
     </div>
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
         <span class="step-text">Wakes every <span class="hl4">6 blocks</span> (~960 ms)<br>
-        <span class="step-detail">stride = 6; reads last 106 blocks (16.93 s) from DeviceRingBuffer</span>
+        <span class="step-detail">reads last 106 blocks (16.9 s) from DeviceRingBuffer</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl4">ft8SyncScanKernel</span> (FT8ScanCuda.cu):<br>
-        <span class="step-detail">Costas pattern {3,1,4,0,6,5,2} at 3 sync groups<br>
-        score ≥ min_score → candidate list (fo, to, ts, fs)</span>
+        <span class="step-text"><span class="hl4">Costas scan kernel:</span><br>
+        <span class="step-detail">max-log 8-FSK metric (or legacy freq+neighbor)<br>
+        Costas {4,2,5,6,1,3,0} · score ≥ min_score<br>
+        → candidate list (fo, to, ts, fs)</span>
         </span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl4">ft8_soft_symbols_kernel</span> (FT8SoftCuda.cu):<br>
-        <span class="step-detail">58 data syms × 8 mag bins → 3 LLRs/sym (Gray-coded 8-FSK)<br>
-        output: log174_d (n × 174 floats)</span>
+        <span class="step-text"><span class="hl4">Soft symbol kernel:</span><br>
+        <span class="step-detail">58 data syms × 8 bins → 3 LLRs/sym (Gray-coded)<br>
+        output: log174 (174 floats/cand)</span>
         </span>
       </div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text">D2H candidates + log174 → <span class="hl4">decode callback</span><br>
-        <span class="step-detail">callback = FT8::decodeAndPublishContinuous() (wired in FT8 constructor)</span>
-        </span>
+        <span class="step-text">D2H → <span class="hl4">FT8::decodeAndPublishContinuous()</span></span>
       </div>
     </div>
   </div>
 
   <div class="stage js8cu">
-    <div class="stage-header">
+    <div class="stage-header" style="flex-direction:column;align-items:flex-start;gap:4px">
       JS8Cuda — Continuous Scan
-      <span class="thread-badge" style="background:#0a1f2e;border:1px solid #79c0ff44;color:#79c0ff">CUDA thread (--js8)</span>
-      <span class="file-tag">JS8Cuda.cc</span>
+      <span class="file-tag">JS8Cuda.cc (--js8)</span>
     </div>
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text">Reads same <span class="hl2">DeviceRingBuffer</span> (no second FFT)<br>
-        <span class="step-detail">JS8 epoch = 15 s; continuous scan shares MagBlock ring</span>
+        <span class="step-text">Same <span class="hl2">DeviceRingBuffer</span> as FT8Cuda (no extra FFT)<br>
+        <span class="step-detail">Normal: 106-blk window · Fast: 100-blk · Slow: 94-blk</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
         <span class="step-text"><span class="hl2">JS8 Costas scan kernel:</span><br>
-        <span class="step-detail">Costas pattern {4,2,5,6,1,3,0}<br>
+        <span class="step-detail">Costas {4,2,5,6,1,3,0} (Normal/Slow)<br>
         score ≥ min_score → candidate list</span>
         </span>
       </div>
       <div class="step"><span class="step-num">3</span>
         <span class="step-text"><span class="hl2">Soft symbol kernel:</span><br>
-        <span class="step-detail">LDPC code (174,91), M=87<br>
-        output: log174_d per candidate</span>
+        <span class="step-detail">LDPC (174,87) · CRC-12<br>
+        output: log174 per candidate</span>
         </span>
       </div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text">D2H → <span class="hl2">decode callback</span><br>
-        <span class="step-detail">callback = JS8::decodeAndPublishContinuous() (wired in JS8 constructor)</span>
-        </span>
+        <span class="step-text">D2H → <span class="hl2">JS8::decodeAndPublishContinuous()</span></span>
       </div>
     </div>
   </div>
 
-</div><!-- /split-row -->
+</div><!-- /split-row-3 -->
 
-<!-- rejoin arrow -->
+<!-- rejoin arrows -->
 <div style="width:100%;height:28px;position:relative">
-  <div style="position:absolute;left:25%;top:14px;width:calc(25%);height:2px;background:#30363d"></div>
-  <div style="position:absolute;left:50%;top:14px;width:calc(25%);height:2px;background:#30363d"></div>
+  <div style="position:absolute;left:16.5%;top:0;width:2px;height:14px;background:#30363d"></div>
+  <div style="position:absolute;left:16.5%;top:14px;width:calc(33.5%);height:2px;background:#30363d"></div>
+  <div style="position:absolute;left:50%;top:14px;width:calc(33.5%);height:2px;background:#30363d"></div>
+  <div style="position:absolute;left:83.5%;top:0;width:2px;height:14px;background:#30363d"></div>
   <div style="position:absolute;left:50%;top:0;width:2px;height:28px;background:#30363d"></div>
 </div>
 <div class="arrow-row" style="height:28px">
   <div class="arrow-line" style="height:20px"></div><div class="arrow-head"></div>
-  <div class="arrow-label">decode callback · candidates + log174 (174 floats/cand · ~15 MB typical)</div>
+  <div class="arrow-label">decode callbacks · candidates + log174 (174 floats/cand)</div>
 </div>
 
 <!-- SPLIT: ft8.cc + js8.cc -->
@@ -417,26 +491,20 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
         <span class="step-text"><span class="hl5">LDPC decode:</span> ftx_decode_from_llr()<br>
-        <span class="step-detail">normalize GPU LLRs · 25-iter BP · (174,91) code · 14-bit CRC</span>
+        <span class="step-detail">normalize GPU LLRs · 25-iter BP · (174,91) code · CRC-14</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl5">Message unpack:</span> 77 bits → callsign1 + callsign2 + grid/report</span>
+        <span class="step-text"><span class="hl5">Message unpack:</span> 77 bits → callsign1, callsign2, grid/report</span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl5">window_buf_ accumulate:</span> best-SNR per callsign<br>
-        <span class="step-detail">hash_if: callsign hash → window_buf_ key; keep highest score entry</span>
-        </span>
+        <span class="step-text"><span class="hl5">window_buf_ accumulate:</span> best-SNR per callsign over 15 s</span>
       </div>
       <div class="step"><span class="step-num">4</span>
         <span class="step-text"><span class="hl5">flushWindow()</span> every <span class="hl5">15 s</span>:<br>
-        <span class="step-detail">print "[FT8] 15s window: N unique callsigns"<br>
-        publishDecoded() → ZMQ PUSH to proxy (topic: ft8/decode)<br>
-        hashtable_cleanup(10): age callsign hash entries</span>
+        <span class="step-detail">ZMQ: topic <code>ft8/decode</code> (JSON, nlohmann-serialized, valid UTF-8)<br>
+        wsdict: <code>granolasdr:ft8:heard:CALL</code> (TTL 900 s)</span>
         </span>
-      </div>
-      <div class="step"><span class="step-num">5</span>
-        <span class="step-text">RF freq: composite_bin_to_rf_hz() → kBandMap (from kHFBands)</span>
       </div>
     </div>
   </div>
@@ -445,32 +513,26 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <div class="stage js8cpu">
     <div class="stage-header">
       js8.cc — Epoch Decoder
-      <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">CPU thread (--js8)</span>
+      <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">CPU thread (--js8/--js8-fast/--js8-slow)</span>
       <span class="file-tag">gm/hf/js8.cc · ft8_lib/</span>
     </div>
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
         <span class="step-text"><span class="hl6">LDPC decode:</span> BP decoder<br>
-        <span class="step-detail">(174,91) code M=87 · CRC-12 check</span>
+        <span class="step-detail">(174,87) code M=87 · CRC-12 check</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl6">JSC decompress:</span> Huffman decode<br>
-        <span class="step-detail">JS8Call JSC bitstream → UTF-8 text</span>
+        <span class="step-text"><span class="hl6">JSC decompress + frame decode:</span><br>
+        <span class="step-detail">Normal/Compact/Ultra/Turbo · extracts from_call, message text, APRS</span>
         </span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl6">Frame decode:</span> Normal/Compact/Ultra/Turbo<br>
-        <span class="step-detail">extracts from_call, to_call, message text, APRS fields</span>
-        </span>
+        <span class="step-text"><span class="hl6">Per-epoch dedup:</span> seen_this_epoch_ cleared on 15s/10s/30s rollover</span>
       </div>
       <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl6">Per-epoch dedup:</span> seen_this_epoch_ set<br>
-        <span class="step-detail">cleared when floor(unix/15) rolls over</span>
-        </span>
-      </div>
-      <div class="step"><span class="step-num">5</span>
-        <span class="step-text">publishDecoded() → ZMQ proxy (topic: <span class="hl6">js8/decode</span>)</span>
+        <span class="step-text">ZMQ: topic <code>js8/decode</code> (JSON)<br>
+        wsdict: <code>granolasdr:js8:heard:CALL</code> (TTL 900 s)</span>
       </div>
     </div>
   </div>
@@ -479,39 +541,44 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
 
 <div class="arrow-row">
   <div class="arrow-line"></div><div class="arrow-head"></div>
-  <div class="arrow-label">ZMQ proxy XSUB:5599 ← producers | XPUB:5600 → consumers · topics: ft8/decode  js8/decode</div>
+  <div class="arrow-label">ZMQ proxy XSUB:5599 ← producers | XPUB:5600 → consumers · wsdict:8765 → browser</div>
 </div>
 
-<!-- ===== ZMQ OUTPUT ===== -->
+<!-- ===== OUTPUTS ===== -->
 <div class="stage out">
   <div class="stage-header">
-    ZMQ Proxy Bus + PSKReporter
-    <span class="thread-badge" style="background:#0f2317;border:1px solid #56d36444;color:#7ee787">proxy thread + Python</span>
-    <span class="file-tag">HFRx.cc runProxy() · psk_uploader.py</span>
+    ZMQ Proxy Bus + wsdict + PSKReporter
+    <span class="thread-badge" style="background:#0f2317;border:1px solid #56d36444;color:#7ee787">proxy thread + Rust wsserver + Python</span>
+    <span class="file-tag">HFRx.cc · wsserver/ · psk_uploader.py</span>
   </div>
   <div class="stage-body">
     <div>
       <div class="step"><span class="step-num">1</span>
-        <span class="step-text"><span class="hl3">XSUB :5599</span> ← FT8, JS8, MagBlock waterfall connect here</span>
+        <span class="step-text"><span class="hl3">ZMQ XSUB :5599</span> ← FT8, JS8 connect here</span>
       </div>
       <div class="step"><span class="step-num">2</span>
-        <span class="step-text"><span class="hl3">XPUB :5600</span> → subscribers connect here and filter by topic</span>
+        <span class="step-text"><span class="hl3">ZMQ XPUB :5600</span> → psk_uploader.py and any other subscriber</span>
       </div>
       <div class="step"><span class="step-num">3</span>
-        <span class="step-text"><span class="hl3">ft8/decode</span> JSON example:<br>
-        <span class="step-detail">{"call":"WA9TT","freq":7076397,"snr":-7.0,"unix":…,"offset":3.0}</span>
+        <span class="step-text"><span class="hl3">wsdict :8765</span> — browser WebSocket:<br>
+        <span class="step-detail">waterfall RGBA, ft8:heard:*, js8:heard:*, audio:status:*, audio:cmd</span>
         </span>
+      </div>
+      <div class="step"><span class="step-num">4</span>
+        <span class="step-text"><span class="hl3">Audio ZMQ PUB :5581–5584</span> → audio_router.py (48 kHz PCM)</span>
       </div>
     </div>
     <div>
-      <div class="step"><span class="step-num">4</span>
-        <span class="step-text"><span class="hl3">psk_uploader.py</span>: subscribes to :5600<br>
-        <span class="step-detail">filters ft8/ and js8/ topics<br>
+      <div class="step"><span class="step-num">5</span>
+        <span class="step-text"><span class="hl3">psk_uploader.py</span>: subscribes :5600<br>
+        <span class="step-detail">ft8/decode + js8/decode topics<br>
         per-band best-SNR dedup · IPFIX UDP → pskreporter.info:4739 every 5 min</span>
         </span>
       </div>
-      <div class="step"><span class="step-num">5</span>
-        <span class="step-text">stdout: <code>-07.0 +178e9 +3.00 7076397 ~  WA9TT AB5CC 73</code></span>
+      <div class="step"><span class="step-num">6</span>
+        <span class="step-text"><code>ft8/decode</code> JSON example:<br>
+        <span class="step-detail">{"call":"WA9TT","freq":7076397,"snr":-7.0,"unix":…,"offset":3.0}</span>
+        </span>
       </div>
     </div>
   </div>
@@ -525,50 +592,55 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
       <th style="text-align:left;padding:3px 8px">Stage</th>
       <th style="text-align:left;padding:3px 8px">Thread</th>
       <th style="text-align:left;padding:3px 8px">Runs</th>
-      <th style="text-align:left;padding:3px 8px">Duration</th>
       <th style="text-align:left;padding:3px 8px">Notes</th>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:4px 8px;color:#56d364">HFChannelizer FFT block</td>
       <td style="padding:4px 8px;color:#6e7681">CUDA stream</td>
-      <td style="padding:4px 8px">every 3.75 ms</td>
-      <td style="padding:4px 8px;color:#e3b341">&lt;1 ms GPU</td>
-      <td style="padding:4px 8px;color:#3fb950">not a bottleneck</td>
+      <td style="padding:4px 8px">every 5 ms (200 Hz)</td>
+      <td style="padding:4px 8px;color:#3fb950">1,400,000-pt R2C + 4096-pt IFFT</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 8px;color:#f0883e">SpectrumNorm update</td>
+      <td style="padding:4px 8px;color:#6e7681">HFChannelizer thread</td>
+      <td style="padding:4px 8px">every 64 frames (~10 s)</td>
+      <td style="padding:4px 8px;color:#3fb950">D2H snapshot + CPU EMA + poly fit + H2D</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:4px 8px;color:#e3b341">MagBlock 16×FFT + mag + ring</td>
       <td style="padding:4px 8px;color:#6e7681">CUDA stream</td>
-      <td style="padding:4px 8px">every ~160 ms</td>
-      <td style="padding:4px 8px;color:#e3b341">~30 ms GPU</td>
-      <td style="padding:4px 8px;color:#3fb950">non-blocking</td>
+      <td style="padding:4px 8px">every 160 ms (6.25 Hz)</td>
+      <td style="padding:4px 8px;color:#3fb950">65536-pt × 16 = 1M pts per block</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:4px 8px;color:#ff9999">FT8Cuda Costas scan + soft syms</td>
+      <td style="padding:4px 8px;color:#70d6e8">WaterfallCuda colormap</td>
+      <td style="padding:4px 8px;color:#6e7681">CUDA thread</td>
+      <td style="padding:4px 8px">every ring write</td>
+      <td style="padding:4px 8px;color:#3fb950">2048-col RGBA → wsdict → browser canvas</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 8px;color:#ff9999">FT8Cuda Costas scan + LLRs</td>
       <td style="padding:4px 8px;color:#6e7681">CUDA thread</td>
       <td style="padding:4px 8px">every 6 blocks (~960 ms)</td>
-      <td style="padding:4px 8px;color:#ff9999">~120–250 ms GPU</td>
-      <td style="padding:4px 8px;color:#3fb950">~15 scans/15 s cycle</td>
+      <td style="padding:4px 8px;color:#3fb950">~15 scans per 15 s cycle</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:4px 8px;color:#d2a8ff">LDPC decode (ft8_lib)</td>
       <td style="padding:4px 8px;color:#6e7681">CPU (ft8.cc)</td>
       <td style="padding:4px 8px">per scan batch</td>
-      <td style="padding:4px 8px;color:#d2a8ff">~200 ms (22K cands)</td>
-      <td style="padding:4px 8px;color:#3fb950">GPU LLRs, no wf read</td>
+      <td style="padding:4px 8px;color:#3fb950">~200 ms @ ~22K candidates</td>
     </tr>
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:4px 8px;color:#d2a8ff">FT8 15s window flush</td>
       <td style="padding:4px 8px;color:#6e7681">CPU (ft8.cc)</td>
       <td style="padding:4px 8px">every 15 s</td>
-      <td style="padding:4px 8px;color:#56d364">&lt;1 ms</td>
-      <td style="padding:4px 8px;color:#3fb950">best-SNR per callsign</td>
+      <td style="padding:4px 8px;color:#3fb950">best-SNR per callsign → ZMQ + wsdict</td>
     </tr>
     <tr>
       <td style="padding:4px 8px;color:#7ee787">PSKReporter upload</td>
       <td style="padding:4px 8px;color:#6e7681">Python</td>
       <td style="padding:4px 8px">every 5 min</td>
-      <td style="padding:4px 8px;color:#56d364">&lt;1 ms UDP</td>
-      <td style="padding:4px 8px;color:#3fb950">IPFIX · pskreporter.info:4739</td>
+      <td style="padding:4px 8px;color:#3fb950">IPFIX UDP · pskreporter.info:4739</td>
     </tr>
   </table>
 </div>
