@@ -60,7 +60,7 @@ pub fn start(port: u16, static_dir: &str, _state_file: Option<&str>) -> Result<(
                 .route("/ws", get(ws_handler))
                 .nest_service("/", ServeDir::new(&static_dir))
                 .with_state(state);
-            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let addr = SocketAddr::from(([0, 0, 0, 0], port));
             let listener = match tokio::net::TcpListener::bind(addr).await {
                 Ok(l) => {
                     ready_tx.send(Ok(())).ok();
