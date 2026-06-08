@@ -44,7 +44,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89;90;120)
 endif()
 
-set(LIBUSB usb pthread rt)
+set(LIBUSB usb-1.0 pthread rt)
 set(LIBLOG)
 set(LIBLOC "-L/opt/cuda/lib64")
 
