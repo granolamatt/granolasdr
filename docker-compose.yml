@@ -1,0 +1,21 @@
+services:
+  granolasdr:
+    build: .
+    image: ghcr.io/granolamatt/granolasdr:latest
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "8765:8765"   # wsdict WebSocket server (browser dashboard)
+      - "5599:5599"   # ZMQ XSUB proxy (producers)
+      - "5600:5600"   # ZMQ XPUB proxy (subscribers: psk_uploader, audio_router)
+      - "5581:5581"   # Audio sink 0 (48 kHz PCM)
+      - "5582:5582"   # Audio sink 1
+      - "5583:5583"   # Audio sink 2
+      - "5584:5584"   # Audio sink 3

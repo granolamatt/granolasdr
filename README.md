@@ -167,6 +167,58 @@ cd ft8_lib
 make
 ```
 
+## Docker (recommended for other hardware)
+
+Pre-built images are published to GHCR on every tagged release. No build required.
+
+### Prerequisites
+
+- Docker with Compose v2 (`docker compose version`)
+- [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed and configured on the host
+- NVIDIA GPU driver installed on the host
+- RX888 plugged in before starting the container
+
+### Run with pre-built image
+
+```bash
+docker compose pull
+docker compose up
+```
+
+Open `http://localhost:8765/` for the live dashboard. Decodes print to `docker logs -f <container>`.
+
+To pass flags (e.g. enable JS8):
+
+```yaml
+# in docker-compose.yml, under the service:
+command: ["./build/hf_rx", "--js8", "--js8-fast"]
+```
+
+### Build from source
+
+```bash
+docker compose up --build
+```
+
+First build takes ~30 minutes (compiles CUDA for sm70–sm120). Subsequent builds are cached.
+
+### Audio routing
+
+`audio_router.py` runs on the **host**, not inside the container. The ZMQ audio ports (5581–5584) are exposed — point `audio_router.py` at `localhost` as usual:
+
+```bash
+python3 audio_router.py           # local hf_rx (native build)
+python3 audio_router.py           # also works when container is running
+```
+
+### PSKReporter upload
+
+`psk_uploader.py` also runs on the host, subscribing to the container's ZMQ XPUB:
+
+```bash
+python3 psk_uploader.py --call W1AW --grid DM78
+```
+
 ## Build
 
 ```bash

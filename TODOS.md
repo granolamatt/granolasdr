@@ -19,6 +19,17 @@ complete. The following items remain from the original Phase 12 list:
 - **Corpus re-enable**: MagBlock exposes `demodFT8_d` callback so a
   `--record`-based corpus capture path can be used for JTDX/WSJT-X comparison.
 
+## Docker deployment
+
+- **Docker smoke test** (P2, S effort): Add a compose `healthcheck` or standalone script that
+  verifies `hf_rx` started cleanly — e.g. `curl http://localhost:8765/` returns 200 within 30s.
+  Context: Docker image has no automated test; currently users must manually check `docker logs`.
+  Start in `docker-compose.yml` healthcheck block using curl.
+
+- **Docker layer caching** (P3, S effort): Split cmake configure from make into separate `RUN`
+  layers so source code changes don't invalidate the dependency install layers and trigger a
+  full 30-min CUDA rebuild. Currently cmake configure + nvcc compile are in one `RUN` layer.
+
 ## QP-ADMM vs BP convergence baseline
 
 Measure decode counts per epoch on corpus recordings with both decoders

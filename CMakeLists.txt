@@ -41,7 +41,7 @@ add_custom_command(
 add_custom_target(wsserver_lib DEPENDS ${WSSERVER_LIB})
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 120)
+  set(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89;90;120)
 endif()
 
 set(LIBUSB usb pthread rt)
