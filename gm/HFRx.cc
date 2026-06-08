@@ -147,8 +147,6 @@ int main(int argc, char* argv[]) {
     bool        legacy_costas   = false;
     uint8_t     wf_floor        = 170;   // tune: raise to darken noise floor
     uint8_t     wf_ceil         = 210;   // tune: lower to saturate signals sooner
-    std::string ctrl_host       = "127.0.0.1";
-    int         ctrl_port       = 8080;
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
     // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–211 kHz;
     // bins above that are zero-filled.  Show only the live content region.
@@ -161,11 +159,7 @@ int main(int argc, char* argv[]) {
     int         zoom_band_end   = -1;
 
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--control-host") == 0 && i + 1 < argc) {
-            ctrl_host = argv[++i];
-        } else if (strcmp(argv[i], "--control-port") == 0 && i + 1 < argc) {
-            ctrl_port = std::stoi(argv[++i]);
-        } else if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
             min_score = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--waterfall-center-hz") == 0 && i + 1 < argc) {
             wf_center_hz = std::stof(argv[++i]);
@@ -250,7 +244,7 @@ int main(int argc, char* argv[]) {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
 
-        gm::cuda::HFChannelizer channelizer(mydsp.getRxBufferPosition(), ctrl_host, ctrl_port);
+        gm::cuda::HFChannelizer channelizer(mydsp.getRxBufferPosition(), kWsDictPort);
         channelizer.start();
 
         std::unique_ptr<gm::buffer::BufferFile<std::complex<float>>> recorder;

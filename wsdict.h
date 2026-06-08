@@ -99,6 +99,9 @@ public:
     // Block until next server→client message. Returns parsed JSON.
     inline nlohmann::json recv_message();
 
+    // Send {"type":"delete","key":key}. Fire-and-forget.
+    inline void del(const std::string& key);
+
 private:
     int sock_{-1};
     int req_id_{0};
@@ -286,6 +289,12 @@ inline void WsDictClient::set_with_ttl(const std::string& key,
     nlohmann::json msg = {
         {"type", "set"}, {"key", key}, {"value", value}, {"ttl_ms", ttl_ms}
     };
+    send_frame(msg.dump());
+}
+
+inline void WsDictClient::del(const std::string& key)
+{
+    nlohmann::json msg = {{"type", "delete"}, {"key", key}};
     send_frame(msg.dump());
 }
 

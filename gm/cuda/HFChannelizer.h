@@ -20,8 +20,7 @@ namespace cuda {
 class HFChannelizer : public Thread {
 public:
     HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP,
-                  const std::string& ctrl_host = "127.0.0.1",
-                  int ctrl_port = 8080);
+                  int wsdict_port = 8765);
     ~HFChannelizer();
     void run();
     void stop() {
@@ -83,11 +82,11 @@ private:
     std::thread audio_thread;
     void audioWorker();
 
-    // REST control server + SSE event broadcast (cpp-httplib, runs in its own thread)
-    std::string ctrl_host_;
-    int         ctrl_port_;
-    std::thread ctrl_thread;
-    void controlWorker();
+    // wsdict audio command worker: publishes granolasdr:audio:status:N keys and
+    // subscribes to granolasdr:audio:cmd for tune requests from the browser.
+    int         wsdict_port_;
+    std::thread cmd_thread_;
+    void cmdWorker();
 
 
     zmq::context_t audio_zmq_ctx;

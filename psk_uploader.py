@@ -215,7 +215,7 @@ def main():
                     msg["call"] = call
                 if call:
                     pending.append(msg)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 pass
 
         if time.time() - last_upload >= args.interval and pending:

@@ -165,55 +165,50 @@ function escHtml(s) {
 }
 
 // ── Audio sink control ────────────────────────────────────────────────────────
-const CTRL_BASE = `http://${location.hostname}:8080`;
-let audioPresets = [];
-
-async function audioFetch(path, opts) {
-  try {
-    const r = await fetch(CTRL_BASE + path, opts);
-    return await r.json();
-  } catch(e) {
-    console.warn('[Audio]', path, e.message);
-    return null;
-  }
-}
-
-async function refreshAudioStatus() {
-  const data = await audioFetch('/api/status');
-  if (!data) return;
-  for (const s of data.sinks) {
-    const lbl = document.getElementById(`audio-lbl-${s.id}`);
-    const inp = document.getElementById(`audio-freq-${s.id}`);
-    if (lbl) lbl.textContent = `${s.label} · ${(s.freq_hz/1e6).toFixed(4)} MHz`;
-    if (inp && document.activeElement !== inp)
-      inp.value = (s.freq_hz / 1e6).toFixed(4);
-  }
-}
+const AUDIO_PRESETS = [
+  {name:'160m', freq_hz:1840000},
+  {name:'80m',  freq_hz:3573000},
+  {name:'60m',  freq_hz:5357000},
+  {name:'40m',  freq_hz:7074000},
+  {name:'30m',  freq_hz:10136000},
+  {name:'20m',  freq_hz:14074000},
+  {name:'17m',  freq_hz:18100000},
+  {name:'15m',  freq_hz:21074000},
+  {name:'12m',  freq_hz:24915000},
+  {name:'10m',  freq_hz:28074000},
+  {name:'6m',   freq_hz:50313000},
+];
+let wsConn = null;  // set in connectBus(); used by tuneAudioSink
 
 function onAudioPresetChange(sink) {
   const sel = document.getElementById(`audio-preset-${sink}`);
   const inp = document.getElementById(`audio-freq-${sink}`);
-  const preset = audioPresets.find(p => p.name === sel.value);
+  const preset = AUDIO_PRESETS.find(p => p.name === sel.value);
   if (preset) inp.value = (preset.freq_hz / 1e6).toFixed(4);
 }
 
-async function tuneAudioSink(sink) {
+function tuneAudioSink(sink) {
+  if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
   const inp = document.getElementById(`audio-freq-${sink}`);
   const sel = document.getElementById(`audio-preset-${sink}`);
   const freq_hz = Math.round(parseFloat(inp.value) * 1e6);
   if (!freq_hz || freq_hz < 500000 || freq_hz > 70000000) return;
-  const label = sel.value ? `${sel.value} · ${inp.value} MHz` : `${inp.value} MHz`;
-  const data = await audioFetch('/api/tune', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sink, freq_hz, label}),
-  });
-  if (data && data.ok) { sel.value = ''; refreshAudioStatus(); }
+  const label = sel.value ? `${sel.value} FT8` : `${inp.value} MHz`;
+  wsConn.send(JSON.stringify({type:'set', key:'granolasdr:audio:cmd', value:{sink, freq_hz, label}}));
+  sel.value = '';
+}
+
+function updateAudioSinkDisplay(s) {
+  const lbl = document.getElementById(`audio-lbl-${s.id}`);
+  const inp = document.getElementById(`audio-freq-${s.id}`);
+  if (lbl) lbl.textContent = `${s.label} · ${(s.freq_hz/1e6).toFixed(4)} MHz`;
+  if (inp && document.activeElement !== inp)
+    inp.value = (s.freq_hz / 1e6).toFixed(4);
 }
 
 function buildAudioTable() {
   const presetOpts = ['<option value="">— preset —</option>',
-    ...audioPresets.map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)}</option>`)
+    ...AUDIO_PRESETS.map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)}</option>`)
   ].join('');
   document.getElementById('audio-tbody').innerHTML = [0,1,2,3].map(i =>
     `<tr>
@@ -225,13 +220,6 @@ function buildAudioTable() {
       <td class="audio-zmq">${5581 + i}</td>
     </tr>`
   ).join('');
-  refreshAudioStatus();
-}
-
-async function initAudio() {
-  const data = await audioFetch('/api/presets');
-  audioPresets = data ? data.presets : [];
-  buildAudioTable();
 }
 
 // wsdict WebSocket connection (wsdict server built into hf_rx, port 8765)
@@ -252,6 +240,7 @@ function connectBus() {
   const status = document.getElementById('sse-status');
   const host = location.hostname || 'localhost';
   const ws = new WebSocket(`ws://${host}:8765/ws`);
+  wsConn = ws;
   ws.onopen = () => {
     dot.className = 'on'; status.textContent = 'connected';
     heardMap.clear();
@@ -264,6 +253,7 @@ function connectBus() {
   };
   ws.onerror = () => { dot.className = ''; status.textContent = 'error'; };
   ws.onclose = () => {
+    wsConn = null;
     dot.className = ''; status.textContent = 'reconnecting…';
     setTimeout(connectBus, 3000);
   };
@@ -281,6 +271,12 @@ function connectBus() {
     }
 
     if (type !== 'update') return;
+
+    if (key.startsWith('granolasdr:audio:status:')) {
+      if (val && typeof val === 'object' && typeof val.id === 'number')
+        updateAudioSinkDisplay(val);
+      return;
+    }
 
     if (key.startsWith('granolasdr:waterfall:')) {
       const rgba = b64ToBytes(val);
@@ -374,7 +370,7 @@ function appendWaterfallBatch(rgba) {
 
 function init() {
   initWaterfall();
-  initAudio();
+  buildAudioTable();
   connectBus();
 }
 init();

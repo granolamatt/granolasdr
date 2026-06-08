@@ -13,8 +13,8 @@
 #include "gm/rx888/rx888.h"
 
 #include "gm/hf/hf_bands.h"
-#include "third_party/httplib.h"
 #include "third_party/nlohmann_json.hpp"
+#include "wsdict.h"
 
 namespace gm {
 namespace cuda {
@@ -35,8 +35,7 @@ static const struct { const char* name; uint32_t freq_hz; } kFT8Presets[] = {
 static const int kNumFT8Presets = (int)(sizeof(kFT8Presets) / sizeof(kFT8Presets[0]));
 
 HFChannelizer::HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP,
-                              const std::string& ctrl_host,
-                              int ctrl_port) :
+                              int wsdict_port) :
 inPos(inP),
 inData_d(NULL),
 fftInData_d(NULL),
@@ -48,8 +47,7 @@ num_blocks(0),
 buffer_number(0),
 audio_pinned(NULL),
 audio_zmq_ctx(1),
-ctrl_host_(ctrl_host),
-ctrl_port_(ctrl_port) {
+wsdict_port_(wsdict_port) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
 
@@ -144,8 +142,8 @@ ctrl_port_(ctrl_port) {
             printf("Audio ZMQ: sink %d (%s) → port %d\n", i, sink_labels[i].c_str(), 5581 + i);
         }
 
-        ctrl_thread  = std::thread(&HFChannelizer::controlWorker, this);
-        ctrl_thread.detach();
+        cmd_thread_ = std::thread(&HFChannelizer::cmdWorker, this);
+        cmd_thread_.detach();
 
     } catch (thrust::system_error &e) {
         std::cerr << "CUDA error in HFChannelizer constructor: " << e.what() << std::endl;
@@ -384,123 +382,51 @@ void HFChannelizer::audioWorker() {
     }
 }
 
-void HFChannelizer::controlWorker() {
+void HFChannelizer::cmdWorker() {
     using json = nlohmann::json;
-    httplib::Server svr;
 
-    svr.Get("/api/status", [&](const httplib::Request&, httplib::Response& res) {
-        json sinks = json::array();
-        for (int i = 0; i < NUM_SINKS; i++) {
-            uint32_t bin = sink_bins[i].load(std::memory_order_acquire);
-            sinks.push_back({
-                {"id", i},
-                {"freq_hz", (uint64_t)bin * 100},
-                {"label", sink_labels[i]}
-            });
-        }
-        res.set_content(json{{"sinks", sinks}}.dump(), "application/json");
-    });
+    // Publisher connection: writes granolasdr:audio:status:N keys so the browser
+    // can see current sink tuning state immediately on connect.
+    WsDictClient pub_ws("127.0.0.1", wsdict_port_);
+    auto publishSink = [&](int i) {
+        uint32_t bin = sink_bins[i].load(std::memory_order_acquire);
+        pub_ws.set("granolasdr:audio:status:" + std::to_string(i),
+                   json{{"id", i}, {"freq_hz", (uint64_t)bin * 100}, {"label", sink_labels[i]}});
+    };
+    for (int i = 0; i < NUM_SINKS; i++) publishSink(i);
 
-    svr.Post("/api/tune", [&](const httplib::Request& req, httplib::Response& res) {
-        json body;
-        try { body = json::parse(req.body); }
-        catch (...) {
-            res.status = 400;
-            res.set_content("{\"error\":\"invalid JSON\"}", "application/json");
-            return;
-        }
-        if (!body.contains("sink") || !body.contains("freq_hz")) {
-            res.status = 422;
-            res.set_content("{\"error\":\"sink and freq_hz required\"}", "application/json");
-            return;
-        }
-        int sink = body["sink"].get<int>();
-        uint64_t freq_hz = body["freq_hz"].get<uint64_t>();
-        if (sink < 0 || sink >= NUM_SINKS) {
-            res.status = 422;
-            res.set_content("{\"error\":\"sink out of range\"}", "application/json");
-            return;
-        }
-        // Max freq: (700000 - AUDIO_BINS) bins × 100 Hz = 69,952,000 Hz
-        if (freq_hz > 69952000ULL) {
-            res.status = 422;
-            res.set_content("{\"error\":\"freq_hz out of range (max 69952000)\"}", "application/json");
-            return;
-        }
-        uint32_t new_bin = (uint32_t)(freq_hz / 100);
-        std::string label = body.value("label", std::to_string(freq_hz / 1000) + " kHz");
-        sink_bins[sink].store(new_bin, std::memory_order_release);
-        sink_labels[sink] = label;
-        printf("Tune: sink %d → %s (bin %u, %.3f MHz)\n",
-               sink, label.c_str(), new_bin, (double)freq_hz / 1e6);
-        res.set_content(json{{"ok",true},{"sink",sink},{"freq_hz",freq_hz}}.dump(),
-                        "application/json");
-    });
+    // Subscriber connection: receives tune commands sent by the browser as
+    // {"type":"set","key":"granolasdr:audio:cmd","value":{sink, freq_hz, label}}.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    WsDictClient sub_ws("127.0.0.1", wsdict_port_);
+    sub_ws.subscribe({"granolasdr:audio:cmd"});
 
-    svr.Post("/api/preset", [&](const httplib::Request& req, httplib::Response& res) {
-        json body;
-        try { body = json::parse(req.body); }
-        catch (...) {
-            res.status = 400;
-            res.set_content("{\"error\":\"invalid JSON\"}", "application/json");
-            return;
-        }
-        if (!body.contains("sink") || !body.contains("preset")) {
-            res.status = 422;
-            res.set_content("{\"error\":\"sink and preset required\"}", "application/json");
-            return;
-        }
-        int sink = body["sink"].get<int>();
-        std::string preset = body["preset"].get<std::string>();
-        if (sink < 0 || sink >= NUM_SINKS) {
-            res.status = 422;
-            res.set_content("{\"error\":\"sink out of range\"}", "application/json");
-            return;
-        }
-        uint32_t freq_hz = 0;
-        bool found = false;
-        for (int i = 0; i < kNumFT8Presets; i++) {
-            if (preset == kFT8Presets[i].name) {
-                freq_hz = kFT8Presets[i].freq_hz;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            res.status = 422;
-            res.set_content("{\"error\":\"unknown preset\"}", "application/json");
-            return;
-        }
-        uint32_t new_bin = freq_hz / 100;
-        std::string label = preset + " FT8";
-        sink_bins[sink].store(new_bin, std::memory_order_release);
-        sink_labels[sink] = label;
-        printf("Preset: sink %d → %s (%.3f MHz)\n", sink, label.c_str(), (double)freq_hz / 1e6);
-        res.set_content(json{{"ok",true},{"sink",sink},{"freq_hz",(uint64_t)freq_hz},{"label",label}}.dump(),
-                        "application/json");
-    });
+    while (isRunning()) {
+        try {
+            json msg = sub_ws.recv_message();
+            if (msg.value("type", "") != "update") continue;
 
-    svr.Get("/api/presets", [](const httplib::Request&, httplib::Response& res) {
-        using json = nlohmann::json;
-        json presets = json::array();
-        for (int i = 0; i < kNumFT8Presets; i++)
-            presets.push_back({{"name", kFT8Presets[i].name}, {"freq_hz", kFT8Presets[i].freq_hz}});
-        res.set_content(json{{"presets", presets}}.dump(), "application/json");
-    });
+            json val = msg["value"];
+            if (!val.contains("sink") || !val.contains("freq_hz")) continue;
 
-    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        std::ifstream f("control/index.html");
-        if (!f.is_open()) {
-            res.set_content("<h1>granolasdr control</h1><p>control/index.html not found</p>", "text/html");
-            return;
+            int sink = val["sink"].get<int>();
+            uint64_t freq_hz = val["freq_hz"].get<uint64_t>();
+            if (sink < 0 || sink >= NUM_SINKS) continue;
+            if (freq_hz > 69952000ULL) continue;
+
+            uint32_t new_bin = (uint32_t)(freq_hz / 100);
+            std::string label = val.value("label", std::to_string(freq_hz / 1000) + " kHz");
+            sink_bins[sink].store(new_bin, std::memory_order_release);
+            sink_labels[sink] = label;
+            printf("Tune: sink %d → %s (bin %u, %.3f MHz)\n",
+                   sink, label.c_str(), new_bin, (double)freq_hz / 1e6);
+
+            pub_ws.set("granolasdr:audio:status:" + std::to_string(sink),
+                       json{{"id", sink}, {"freq_hz", freq_hz}, {"label", label}});
+        } catch (...) {
+            break;
         }
-        std::string html((std::istreambuf_iterator<char>(f)),
-                          std::istreambuf_iterator<char>());
-        res.set_content(html, "text/html");
-    });
-
-    printf("Control server: http://%s:%d/\n", ctrl_host_.c_str(), ctrl_port_);
-    svr.listen(ctrl_host_.c_str(), ctrl_port_);
+    }
 }
 
 gm::buffer::BufferFileParams HFChannelizer::getBufferFileParams() const {

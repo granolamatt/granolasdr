@@ -10,6 +10,7 @@
 #include "gm/hf/band_map.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "wsdict.h"
+#include "third_party/nlohmann_json.hpp"
 
 #include "ft8_lib/ft8/decode.h"
 #include "ft8_lib/ft8/constants.h"
@@ -157,15 +158,21 @@ namespace hf {
         printf("DECODED: %s time_offset=%.3fs freq=%.0fHz snr=%.1f unix=%.0f\n",
                callsign, (double)time_offset, (double)freq_hz, (double)snr, unix_time);
 
-        char buf[256];
-        int len = snprintf(buf, sizeof(buf),
-            "{\"call\":\"%s\",\"freq\":%.0f,\"snr\":%.1f,\"unix\":%.0f,\"offset\":%.3f}",
-            callsign, (double)freq_hz, (double)snr, unix_time, (double)time_offset);
+        nlohmann::json v;
+        v["call"]   = callsign;
+        v["freq"]   = (double)freq_hz;
+        v["snr"]    = (double)snr;
+        v["unix"]   = unix_time;
+        v["offset"] = (double)time_offset;
+        // dump() with error_handler_t::replace ensures valid UTF-8 even if the
+        // decoder emits a false-positive with non-ASCII bytes in the callsign.
+        std::string json_str = v.dump(-1, ' ', false,
+                                      nlohmann::json::error_handler_t::replace);
         {
             std::lock_guard<std::mutex> lk(zmq_mutex_);
             if (zmq_port_ > 0) {
                 zmq::message_t topic("ft8/decode", 10);
-                zmq::message_t payload(buf, len);
+                zmq::message_t payload(json_str.data(), json_str.size());
                 zmq_pub_.send(topic, zmq::send_flags::sndmore);
                 auto result = zmq_pub_.send(payload, zmq::send_flags::dontwait);
                 if (!result)
@@ -173,7 +180,6 @@ namespace hf {
             }
             if (ws_client_) {
                 try {
-                    nlohmann::json v = nlohmann::json::parse(buf, buf + len);
                     v["mode"] = "FT8";
                     // One key per callsign; '/' → '-' so key doesn't contain glob separator.
                     // 900s (15 min) TTL matches the display window and survives page refresh.

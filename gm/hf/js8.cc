@@ -444,26 +444,23 @@ void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
     printf("[%s] DECODED: %-24s  freq=%7.0f Hz  snr=%+5.1f  offset=%+.3fs\n",
            mode_name_, text, (double)freq_hz, (double)snr, (double)time_offset);
 
-    char buf[320];
-    int len;
-    if (from_call && from_call[0]) {
-        len = snprintf(buf, sizeof(buf),
-            "{\"call\":\"%s\",\"text\":\"%s\",\"freq\":%.0f,\"snr\":%.1f"
-            ",\"unix\":%.0f,\"offset\":%.3f,\"mode\":\"%s\"}",
-            from_call, text, (double)freq_hz, (double)snr,
-            unix_time, (double)time_offset, mode_name_);
-    } else {
-        len = snprintf(buf, sizeof(buf),
-            "{\"text\":\"%s\",\"freq\":%.0f,\"snr\":%.1f"
-            ",\"unix\":%.0f,\"offset\":%.3f,\"mode\":\"%s\"}",
-            text, (double)freq_hz, (double)snr,
-            unix_time, (double)time_offset, mode_name_);
-    }
+    nlohmann::json v;
+    v["text"]   = text;
+    v["freq"]   = (double)freq_hz;
+    v["snr"]    = (double)snr;
+    v["unix"]   = unix_time;
+    v["offset"] = (double)time_offset;
+    v["mode"]   = mode_name_;
+    if (from_call && from_call[0]) v["call"] = from_call;
+    // dump() with error_handler_t::replace ensures valid UTF-8 even if the
+    // decoder emits a false-positive with non-ASCII bytes in the message text.
+    std::string json_str = v.dump(-1, ' ', false,
+                                  nlohmann::json::error_handler_t::replace);
     {
         std::lock_guard<std::mutex> lk(zmq_mutex_);
         if (zmq_port_ > 0) {
             zmq::message_t topic("js8/decode", 10);
-            zmq::message_t payload(buf, len);
+            zmq::message_t payload(json_str.data(), json_str.size());
             zmq_pub_.send(topic, zmq::send_flags::sndmore);
             auto result = zmq_pub_.send(payload, zmq::send_flags::dontwait);
             if (!result)
@@ -473,12 +470,12 @@ void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
     if (ws_client_ && from_call && from_call[0]) {
         std::lock_guard<std::mutex> lk(ws_mutex_);
         try {
-            nlohmann::json v = nlohmann::json::parse(buf, buf + len);
+            nlohmann::json v_ws = v;
             // One key per callsign; '/' → '-' so key doesn't contain glob separator.
             // 900s (15 min) TTL matches the display window and survives page refresh.
             std::string call_key(from_call);
             std::replace(call_key.begin(), call_key.end(), '/', '-');
-            ws_client_->set_with_ttl(wsdict_key_ + call_key, v, 900000);
+            ws_client_->set_with_ttl(wsdict_key_ + call_key, v_ws, 900000);
         } catch (const std::exception& e) {
             fprintf(stderr, "[%s] wsdict publish: %s\n", mode_name_, e.what());
             ws_client_.reset();
