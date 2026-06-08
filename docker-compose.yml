@@ -2,6 +2,7 @@ services:
   granolasdr:
     build: .
     image: ghcr.io/granolamatt/granolasdr:latest
+    command: ["./build/hf_rx", "--js8", "--js8-fast", "--js8-slow"]
     devices:
       - /dev/bus/usb:/dev/bus/usb
     deploy:
