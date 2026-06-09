@@ -239,7 +239,7 @@ void JS8Cuda<N>::workerLoop()
 }
 
 template class JS8Cuda<200>;
-template class JS8Cuda<100>;
+template class JS8Cuda<128>;
 
 } // namespace cuda
 } // namespace gm

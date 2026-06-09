@@ -6,5 +6,5 @@ s.setsockopt(zmq.SUBSCRIBE, b'js8/decode')
 while True:
     topic, payload = s.recv_multipart()
     d = json.loads(payload)
-    if d.get('mode') == 'JS8 Fast':
+    if d.get('mode') == 'JS8 Ultra':
         print(d)

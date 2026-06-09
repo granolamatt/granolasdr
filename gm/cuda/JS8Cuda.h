@@ -100,7 +100,7 @@ private:
 };
 
 extern template class JS8Cuda<200>;
-extern template class JS8Cuda<100>;
+extern template class JS8Cuda<128>;
 
 } // namespace cuda
 } // namespace gm

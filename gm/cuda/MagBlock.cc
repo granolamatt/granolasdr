@@ -155,7 +155,7 @@ void MagBlock<N>::run()
 }
 
 template class MagBlock<200>;
-template class MagBlock<100>;
+template class MagBlock<128>;
 
 } // namespace cuda
 } // namespace gm
