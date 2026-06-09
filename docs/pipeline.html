@@ -442,7 +442,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
     <div class="stage-body wide">
       <div class="step"><span class="step-num">1</span>
         <span class="step-text">Same <span class="hl2">DeviceRingBuffer</span> as FT8Cuda (no extra FFT)<br>
-        <span class="step-detail">Normal: 106-blk window · Fast: 100-blk · Slow: 94-blk</span>
+        <span class="step-detail">All modes: 108-blk window (cap_blocks = max_block_abs+1 = 108)</span>
         </span>
       </div>
       <div class="step"><span class="step-num">2</span>
@@ -513,7 +513,7 @@ h1 { color: #58a6ff; font-size: 16px; margin-bottom: 6px; }
   <div class="stage js8cpu">
     <div class="stage-header">
       js8.cc — Epoch Decoder
-      <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">CPU thread (--js8/--js8-fast/--js8-slow)</span>
+      <span class="thread-badge" style="background:#091e24;border:1px solid #56cfe144;color:#70d6e8">CPU thread (--js8/--js8-fast/--js8-slow/--js8-turbo/--js8-ultra)</span>
       <span class="file-tag">gm/hf/js8.cc · ft8_lib/</span>
     </div>
     <div class="stage-body wide">

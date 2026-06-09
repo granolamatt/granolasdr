@@ -85,12 +85,20 @@ rx888 (USB, 140 MS/s int16_t)
                                 wsdict granolasdr:js8:heard:CALL
 
 Optional fast ring (--js8-fast):
-  MagBlock<100>  40960-pt FFT, 2×2 OSR, 10 Hz/bin, 100 ms/block
-    └─ JS8Cuda<100> Fast → gm::hf::JS8 (10s cycle)
+  MagBlock<128>  40960-pt FFT, 2×2 OSR, 10 Hz/bin, 100 ms/block
+    └─ JS8Cuda<128> Fast → gm::hf::JS8 (10s cycle)
 
 Optional slow ring (--js8-slow):
-  MagBlock<100>  131072-pt FFT, 2×2 OSR, 3.125 Hz/bin, 320 ms/block
-    └─ JS8Cuda<100> Slow → gm::hf::JS8 (30s cycle)
+  MagBlock<128>  131072-pt FFT, 2×2 OSR, 3.125 Hz/bin, 320 ms/block
+    └─ JS8Cuda<128> Slow → gm::hf::JS8 (30s cycle)
+
+Optional turbo ring (--js8-turbo):
+  MagBlock<128>  20480-pt FFT, 2×2 OSR, 20 Hz/bin, 50 ms/block
+    └─ JS8Cuda<128> Turbo → gm::hf::JS8 (6s cycle)
+
+Optional ultra ring (--js8-ultra):
+  MagBlock<128>  13107-pt FFT (Bluestein), 2×2 OSR, ~31 Hz/bin, ~32 ms/block
+    └─ JS8Cuda<128> Ultra → gm::hf::JS8 (4s cycle)
 
 Playback path:
   BufferFile<complex<float>>(path) → BufferPosition<complex<float>> → MagBlock → …
@@ -131,9 +139,19 @@ JS8Cuda<200> js8channel(magblock.getRing(), min_score, kProxyXSubPort,
 JS8 js8(&js8channel, kProxyXSubPort, kNormalSymPer, kNormalCycleSec, …);
 
 // JS8 Fast (--js8-fast): dedicated fast ring
-MagBlock<100> magblock_fast(&buf, kFastRfftLen, kFastTimeOsr, kFastFreqOsr, 0);
-JS8Cuda<100>  js8fast_channel(magblock_fast.getRing(), …);
+MagBlock<128> magblock_fast(&buf, kFastRfftLen, kFastTimeOsr, kFastFreqOsr, 0);
+JS8Cuda<128>  js8fast_channel(magblock_fast.getRing(), …);
 JS8           js8fast(&js8fast_channel, …);
+
+// JS8 Turbo (--js8-turbo): dedicated turbo ring
+MagBlock<128> magblock_turbo(&buf, kTurboRfftLen, kTurboTimeOsr, kTurboFreqOsr, 0);
+JS8Cuda<128>  js8turbo_channel(magblock_turbo.getRing(), …);
+JS8           js8turbo(&js8turbo_channel, …);
+
+// JS8 Ultra (--js8-ultra): dedicated ultra ring
+MagBlock<128> magblock_ultra(&buf, kUltraRfftLen, kUltraTimeOsr, kUltraFreqOsr, 0);
+JS8Cuda<128>  js8ultra_channel(magblock_ultra.getRing(), …);
+JS8           js8ultra(&js8ultra_channel, …);
 ```
 
 ## Spectral noise-floor normalization (SpectrumNorm)
@@ -162,11 +180,13 @@ transmission is decoded regardless of epoch phase alignment.
 
 JS8 modes use independent MagBlock rings with different FFT sizes:
 
-| Mode | FFT size | Hz/bin | ms/block | Window | Cycle |
-|------|----------|--------|----------|--------|-------|
-| FT8 / JS8 Normal | 65536 | 6.25 | 160 | 106 blks | 15 s |
-| JS8 Fast | 40960 | 10.0 | 100 | 100 blks | 10 s |
-| JS8 Slow | 131072 | 3.125 | 320 | 94 blks | 30 s |
+| Mode | FFT size | Hz/bin | ms/block | cap_blocks | Cycle |
+|------|----------|--------|----------|------------|-------|
+| FT8 / JS8 Normal | 65536 | 6.25 | 160 | 108 blks | 15 s |
+| JS8 Fast | 40960 | 10.0 | 100 | 108 blks | 10 s |
+| JS8 Slow | 131072 | 3.125 | 320 | 108 blks | 30 s |
+| JS8 Turbo | 20480 | 20.0 | 50 | 108 blks | 6 s |
+| JS8 Ultra | 13107 | ~31.3 | ~32 | 108 blks | 4 s |
 
 ## ZMQ bus
 

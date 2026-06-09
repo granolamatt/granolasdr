@@ -16,8 +16,8 @@ namespace cuda {
 // MagBlock: RFFT + |·|² + uint8 decimation → DeviceRingBuffer.
 // Owns the mag ring that FT8Cuda, JS8Cuda, and WaterfallCuda read from.
 //
-// N        : ring depth (slots). Normal=200, Fast=100.
-// rfft_len : FFT length. Normal=32768 (6.25 Hz/bin), Fast=20480 (10 Hz/bin).
+// N        : ring depth (slots). Normal=200, Fast/Slow/Turbo/Ultra=128.
+// rfft_len : FFT length. Normal=65536 (6.25 Hz/bin), Fast=40960 (10 Hz/bin).
 // time_osr : time over-sampling ratio. Normal=4, Fast=2.
 // freq_osr : frequency over-sampling ratio. Normal=4, Fast=2.
 template<int N>
@@ -66,7 +66,7 @@ private:
 };
 
 extern template class MagBlock<200>;
-extern template class MagBlock<100>;
+extern template class MagBlock<128>;
 
 } // namespace cuda
 } // namespace gm

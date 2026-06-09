@@ -207,7 +207,6 @@ void JS8Cuda<N>::workerLoop()
 
             uint32_t n = std::min(*slot.count, CAND_MAX);
             if (n > 0) {
-                fprintf(stderr, "[%s] scan: %u candidates  %.1f ms\n", label_, n, (double)scan_ms);
                 if (decode_callback_) {
                     *slot.count = n;
                     try {
@@ -239,7 +238,7 @@ void JS8Cuda<N>::workerLoop()
 }
 
 template class JS8Cuda<200>;
-template class JS8Cuda<100>;
+template class JS8Cuda<128>;
 
 } // namespace cuda
 } // namespace gm
