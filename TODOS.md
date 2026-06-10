@@ -2,6 +2,44 @@
 
 Updated 2026-06-09.
 
+## TCI Server (WSJT-X audio interface)
+
+CEO review complete (2026-06-09). Eng review required before implement.
+
+**P1 — core:**
+- **TC1** `wsserver/src/tci.rs` (new): TCI server module — init sequence with RX_ENABLE (×4), AUDIO_START/STOP subscription, audio accumulator (480 samples/10ms per sink), INT16 conversion (u32::to_le_bytes serialization), auto-start 1s after READY, VFO command queue draining-to-empty per tick, RX_CHANNEL_SENSORS at 1 Hz (dBFS from norm_ema_h_ via tci_push_smeter). Runs in existing tokio runtime via OnceLock<Handle>. **VERIFY Stream struct binary format against ExpertSDR3/TCI repo spec before implementing serialization.**
+- **TC-UNIT** `wsserver/src/tci.rs` (`#[cfg(test)]` block): Unit tests — accumulator flush at 480 samples, INT16 saturation (gain=10), VFO parser happy+malformed+OOB, AUDIO_START idempotency, dBFS calculation. Run with `cargo test`.
+- **TC2** `wsserver/src/lib.rs`: OnceLock<tokio::runtime::Handle> set via `rt.handle().clone()` BEFORE `rt.block_on()`. C FFI exports: `tci_server_start`, `tci_server_stop`, `tci_push_audio(trx, pcm, count)`, `tci_push_smeter(trx, dbfs)`, `tci_poll_vfo(trx*, freq*)`.
+- **TC3** `tci_server.h` (new): C header for all 5 FFI declarations.
+- **TC4** `gm/cuda/HFChannelizer.cc/.h`: audioWorker calls `tci_push_audio(sink, pcm, AUDIO_VALID)` after ZMQ send, and `tci_push_smeter(sink, dbfs)` every 100 frames using `norm_ema_h_[sink_bins[sink]]`. Add `tciVfoWorker()` as joinable thread (stored as `tci_vfo_thread_` in header, joined in `~HFChannelizer()`). Checks `isRunning()`. Drains `tci_poll_vfo()` to empty per tick. Does NOT update `sink_labels[]`.
+- **TC5** `gm/HFRx.cc`: Add `--tci-port=40001` (0=disabled) and `--tci-gain=1.0` CLI args; call `tci_server_start(tci_port)` at startup. **Shutdown order: `channelizer.stop()` → `channelizer.join()` → `tci_server_stop()`** (prevents tciVfoWorker from polling destroyed Rust global).
+- **TC6** `gm/HFRx.cc` (cleanup): Add `channelizer.join()` call to ensure tci_vfo_thread_ exits before tci_server_stop.
+- **TC7** `docker-compose.yml`: Add `- "40001:40001"` to ports.
+
+**Error handling (required, P1):**
+- `tci_push_audio()`: bounds-check `trx < NUM_SINKS`; drop + log warn if out of range.
+- VFO handler: clamp incoming freq to `[1_000_000, 69_952_000]` Hz before `sink_bins` write.
+- Duplicate `AUDIO_START`: idempotent subscribe (no double-push).
+
+**Key invariants:**
+- TCI uses existing tokio runtime via OnceLock<Handle> cloned BEFORE block_on.
+- Audio accumulator is per-sink (global), not per-client. All clients get same 10ms frames.
+- `tci_push_audio()` never blocks audioWorker (try_send drop on full).
+- S-meter uses `norm_ema_h_[sink_bins[sink]]` → dBFS (RF signal level, not audio RMS).
+- S-meter rate: 1 Hz (every 100 audio frames).
+- `--tci-gain` tunes INT16 scale; calibrate at first WSJT-X connection.
+- tciVfoWorker does NOT update sink_labels[] (avoids data race on non-atomic std::string).
+- Shutdown order: channelizer.stop() → join() → tci_server_stop().
+
+**P2 — polish:**
+- **TC8** `test/test_tci_client.py` (new): Python WebSocket client — connect, send VFO:0,0,14074000; + AUDIO_START:0;, verify binary Stream frame headers (receiver=0, type=1, sample_rate=48000, channels=1). Follows debug_js8_fast.py pattern.
+- **TC9** `ARCHITECTURE.md`: Add TCI server block to pipeline diagram.
+
+**P3 — deferred:**
+- **TC-IQ** IQ stream (IQ_START/IQ_STOP): streams channelizer composite at 409.6 kHz as TCI IQ frames. Enables RBN Skimmer, SDR Console, broad-band WSJT-X scan. Implement after audio path is validated on-air.
+  Context: TCI IQ frame uses StreamType::IQ_STREAM=0, same Stream struct. Would need `tci_push_iq(const complex<float>* buf, count)` FFI and a subscriber path from HFChannelizer output.
+  Effort: M (human ~1 day / CC ~30 min). No deps on audio path.
+
 ## Phase 15: Turbo + Ultra JS8 modes
 
 CEO review complete (2026-06-09). Eng review complete (2026-06-09). Ready to implement.

@@ -2,7 +2,7 @@ services:
   granolasdr:
     build: .
     image: ghcr.io/granolamatt/granolasdr:latest
-    command: ["./build/hf_rx", "--js8", "--js8-fast", "--js8-slow", "--js8-turbo", "--js8-ultra"]
+    command: ["./build/hf_rx", "--js8", "--js8-fast", "--js8-slow", "--js8-turbo", "--js8-ultra", "--tci-port=40001"]
     devices:
       - /dev/bus/usb:/dev/bus/usb
     deploy:
@@ -20,3 +20,4 @@ services:
       - "5582:5582"   # Audio sink 1
       - "5583:5583"   # Audio sink 2
       - "5584:5584"   # Audio sink 3
+      - "40001:40001" # TCI WebSocket server (WSJT-X, JTDX, N1MM)

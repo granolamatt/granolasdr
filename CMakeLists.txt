@@ -32,13 +32,14 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/thir
 # wsserver — Rust WebSocket dict server, built as a static library
 set(WSSERVER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/wsserver)
 set(WSSERVER_LIB ${WSSERVER_DIR}/target/release/libwsserver.a)
-add_custom_command(
-    OUTPUT ${WSSERVER_LIB}
+# Use ALL so CMake always delegates to cargo; cargo's own fingerprinting
+# handles incremental rebuilds, so this is a no-op when nothing has changed.
+add_custom_target(wsserver_lib ALL
     COMMAND cargo build --release --lib
     WORKING_DIRECTORY ${WSSERVER_DIR}
+    BYPRODUCTS ${WSSERVER_LIB}
     COMMENT "Building wsserver Rust static library"
 )
-add_custom_target(wsserver_lib DEPENDS ${WSSERVER_LIB})
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89;90;120)
