@@ -7,7 +7,6 @@
 #include <vector>
 #include <cuda.h>
 #include <cufft.h>
-#include <zmq.hpp>
 #include "gm/cuda/HostCuda.h"
 #include "gm/Thread.h"
 #include "gm/buffer/BufferPosition.h"
@@ -97,9 +96,6 @@ private:
     std::thread tci_vfo_thread_;
     void tciVfoWorker();
 
-
-    zmq::context_t audio_zmq_ctx;
-    zmq::socket_t* audio_sockets[NUM_SINKS];
 
     // Spectral noise-floor normalization: every NORM_INTERVAL frames, snapshot
     // per-band magnitudes from fftData_d, fit a degree-NORM_POLY_DEG Legendre

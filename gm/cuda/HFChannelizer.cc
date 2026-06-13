@@ -48,7 +48,6 @@ audioBins_d(NULL),
 num_blocks(0),
 buffer_number(0),
 audio_pinned(NULL),
-audio_zmq_ctx(1),
 wsdict_port_(wsdict_port) {
     inShape = inPos->getShape();
     inData = (int16_t*)inPos->getBuffer();
@@ -62,9 +61,6 @@ wsdict_port_(wsdict_port) {
     sink_labels[1] = "40m FT8";
     sink_labels[2] = "80m FT8";
     sink_labels[3] = "10m FT8";
-
-    for (int i = 0; i < NUM_SINKS; i++)
-        audio_sockets[i] = nullptr;
 
     try {
         cuda_check_error(cudaMalloc((void**)&inData_d, inPos->getByteSize()));
@@ -136,14 +132,6 @@ wsdict_port_(wsdict_port) {
         printf("Audio ring: %.1f MB pinned (%d slots × %d sinks × %d bins)\n",
                (double)audio_ring_bytes / 1e6, AUDIO_RING, NUM_SINKS, AUDIO_BINS);
 
-        for (int i = 0; i < NUM_SINKS; i++) {
-            audio_sockets[i] = new zmq::socket_t(audio_zmq_ctx, ZMQ_PUB);
-            char ep[64];
-            snprintf(ep, sizeof(ep), "tcp://*:%d", 5581 + i);
-            audio_sockets[i]->bind(ep);
-            printf("Audio ZMQ: sink %d (%s) → port %d\n", i, sink_labels[i].c_str(), 5581 + i);
-        }
-
         cmd_thread_ = std::thread(&HFChannelizer::cmdWorker, this);
         cmd_thread_.detach();
 
@@ -155,10 +143,6 @@ wsdict_port_(wsdict_port) {
 HFChannelizer::~HFChannelizer() {
     if (tci_vfo_thread_.joinable()) tci_vfo_thread_.join();
     if (audio_thread.joinable()) audio_thread.join();
-    for (int i = 0; i < NUM_SINKS; i++) {
-        delete audio_sockets[i];
-        audio_sockets[i] = nullptr;
-    }
     if (audio_pinned) cudaFreeHost(audio_pinned);
     if (audioBins_d) cudaFree(audioBins_d);
     if (norm_gains_d_) cudaFree(norm_gains_d_);
@@ -345,12 +329,8 @@ int HFChannelizer::doCopy(uint64_t now) {
 }
 
 void HFChannelizer::audioWorker() {
-    // Frame: [sink_id: u32][seq: u32][AUDIO_VALID × f32] = 968 bytes
-    const size_t frame_bytes = 2 * sizeof(uint32_t) + AUDIO_VALID * sizeof(float);
-    std::vector<uint8_t> frame(frame_bytes);
-    float* pcm = reinterpret_cast<float*>(frame.data() + 2 * sizeof(uint32_t));
-
-    uint64_t seq = 0;
+    float pcm[AUDIO_VALID];
+    uint64_t frame_count = 0;
 
     while (isRunning()) {
         uint64_t produce = audio_produce_idx.load(std::memory_order_acquire);
@@ -370,25 +350,16 @@ void HFChannelizer::audioWorker() {
             for (int k = 0; k < AUDIO_VALID; k++)
                 pcm[k] = ifft_out[AUDIO_BINS - AUDIO_VALID + k].real() * norm;
 
-            uint32_t sink32 = (uint32_t)sink;
-            memcpy(frame.data(), &sink32, sizeof(uint32_t));
-            uint32_t seq32 = (uint32_t)seq;
-            memcpy(frame.data() + sizeof(uint32_t), &seq32, sizeof(uint32_t));
-
-            zmq::message_t msg(frame_bytes);
-            memcpy(msg.data(), frame.data(), frame_bytes);
-            audio_sockets[sink]->send(msg, zmq::send_flags::dontwait);
-
             tci_push_audio((uint32_t)sink, pcm, AUDIO_VALID);
         }
 
-        seq++;
+        frame_count++;
 
         // S-meter: every 100 frames (~1 Hz at 10 ms/frame).
         // Source: norm_ema_h_[composite_bin] — wideband RF noise floor EMA,
         // independent of modulation depth (D11). Read without lock; benign
         // data race on float (x86 aligned reads are atomic, value changes slowly).
-        if (seq % 100 == 0) {
+        if (frame_count % 100 == 0) {
             for (int s = 0; s < NUM_SINKS; s++) {
                 uint32_t wb = sink_bins[s].load(std::memory_order_relaxed);
                 float ema_val = 0.0f;

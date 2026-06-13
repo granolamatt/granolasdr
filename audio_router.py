@@ -1,44 +1,41 @@
 #!/usr/bin/env python3
 """
-audio_router.py — subscribe to granolasdr 48 kHz audio ZMQ streams and route
-each sink to a PulseAudio null sink (virtual soundcard).
+audio_router.py — connect to granolasdr TCI WebSocket and route each sink
+to a PulseAudio null sink (virtual soundcard).
 
 Usage:
-    python3 audio_router.py [--host HOST] [--sinks N] [--create-sinks] [--control URL]
+    python3 audio_router.py [--host HOST] [--port PORT] [--sinks N]
+                            [--create-sinks] [--delete-sinks]
 
---host HOST         ZMQ publisher host (default: localhost)
---sinks N           Number of sinks to route (default: 4, max 4)
---create-sinks      Run pactl to create null sinks before starting
---control URL       Control server base URL (default: http://localhost:8080)
+TCI binary frames: 64-byte header (16 × uint32 LE) followed by float32
+stereo-interleaved PCM (L=R mono). We extract the left channel and pipe
+float32le mono to a per-sink pacat process.
 
-Frame format (per sink, 200 Hz):
-    4 bytes  sink_id   uint32
-    4 bytes  seq       uint32  (monotonically increasing, wraps at 2^32)
-    960 bytes          240 × float32 PCM at 48 kHz
-
-Sinks and ports:
-    sink 0 → 5581    sink 1 → 5582    sink 2 → 5583    sink 3 → 5584
-
-REST control (requires requests library):
-    tune(sink, freq_hz)       — retune a sink
-    status()                  — show current sink frequencies
+Header layout (WSJT-X Data_Stream):
+    [0]  receiver    trx index (0–3)
+    [1]  sampleRate  48000
+    [2]  format      3 = float32
+    [5]  length      stereo float count (= sample_count × 2)
+    [6]  type        1 = RX_AUDIO_STREAM
 """
 
 import argparse
+import array
 import struct
 import subprocess
 import sys
-import threading
 import time
-import zmq
+import websocket  # pip install websocket-client
 
-NUM_SINKS = 4
-BASE_PORT = 5581
+NUM_SINKS   = 4
+TCI_PORT    = 40001
 SAMPLE_RATE = 48000
-SAMPLES_PER_FRAME = 240
-FRAME_HEADER = struct.Struct("<II")    # sink_id, seq
-FRAME_SAMPLES = struct.Struct(f"<{SAMPLES_PER_FRAME}f")
-FRAME_BYTES = FRAME_HEADER.size + FRAME_SAMPLES.size  # 968
+
+TCI_HEADER      = struct.Struct("<16I")   # 16 × uint32 LE = 64 bytes
+HDR_RECEIVER    = 0    # trx index
+HDR_LENGTH      = 5    # stereo float count
+HDR_TYPE        = 6    # 1 = RX_AUDIO_STREAM
+RX_AUDIO_STREAM = 1
 
 
 def delete_null_sinks():
@@ -60,7 +57,10 @@ def delete_null_sinks():
         if 'sink_name=granola-sink' not in args:
             continue
         module_id = parts[0].strip()
-        sink_name = next((a.split('=',1)[1] for a in args.split() if a.startswith('sink_name=')), module_id)
+        sink_name = next(
+            (a.split('=', 1)[1] for a in args.split() if a.startswith('sink_name=')),
+            module_id,
+        )
         try:
             subprocess.check_call(["pactl", "unload-module", module_id],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -134,73 +134,97 @@ def status(control_url="http://localhost:8080"):
     return data
 
 
-def sink_router(host, sink_idx, stats_lock, stats):
-    port = BASE_PORT + sink_idx
-    ctx = zmq.Context()
-    sock = ctx.socket(zmq.SUB)
-    sock.connect(f"tcp://{host}:{port}")
-    sock.setsockopt(zmq.SUBSCRIBE, b"")
-    sock.setsockopt(zmq.RCVHWM, 400)  # ~2 sec buffer at 200 Hz
+def run_router(host, port, num_sinks):
+    """Connect to TCI WebSocket and route audio frames to pacat processes."""
+    url = f"ws://{host}:{port}"
 
-    try:
-        sink_proc = open_sink(sink_idx)
-    except Exception as e:
-        print(f"[sink{sink_idx}] failed to open sink: {e}", file=sys.stderr)
-        return
+    procs = [None] * num_sinks
+    frame_counts = [0] * num_sinks
 
-    prev_seq = None
-    frame_count = 0
-    drop_count = 0
-
-    print(f"[sink{sink_idx}] routing port {port} → granola-sink{sink_idx}")
-
-    try:
-        while True:
+    def reopen_sink(i):
+        if procs[i] is not None:
             try:
-                raw = sock.recv(flags=zmq.NOBLOCK)
-            except zmq.Again:
-                time.sleep(0.001)
-                continue
+                procs[i].stdin.close()
+                procs[i].wait()
+            except Exception:
+                pass
+        try:
+            procs[i] = open_sink(i)
+            print(f"[sink{i}] opened granola-sink{i}")
+        except Exception as e:
+            print(f"[sink{i}] failed to open sink: {e}", file=sys.stderr)
+            procs[i] = None
 
-            if len(raw) != FRAME_BYTES:
-                continue
+    for i in range(num_sinks):
+        reopen_sink(i)
 
-            _sink_id, seq = FRAME_HEADER.unpack_from(raw, 0)
-            samples = FRAME_SAMPLES.unpack_from(raw, FRAME_HEADER.size)
+    while True:
+        try:
+            ws = websocket.create_connection(url, timeout=10)
+            print(f"[TCI] connected to {url}")
 
-            if prev_seq is not None:
-                gap = (seq - prev_seq - 1) & 0xFFFFFFFF
-                if gap:
-                    drop_count += gap
-            prev_seq = seq
-            frame_count += 1
+            # Subscribe all requested sinks in one command string.
+            ws.send("".join(f"audio_start:{i};" for i in range(num_sinks)))
 
-            pcm_bytes = struct.pack(f"<{SAMPLES_PER_FRAME}f", *samples)
+            while True:
+                opcode, data = ws.recv_data()
+                if opcode != websocket.ABNF.OPCODE_BINARY:
+                    continue  # skip text echoes / smeter
+
+                if len(data) < 64:
+                    continue
+                hdr = TCI_HEADER.unpack_from(data, 0)
+                if hdr[HDR_TYPE] != RX_AUDIO_STREAM:
+                    continue
+                trx = hdr[HDR_RECEIVER]
+                if trx >= num_sinks:
+                    continue
+                float_count = hdr[HDR_LENGTH]
+                expected = 64 + float_count * 4
+                if len(data) < expected:
+                    continue
+
+                # Stereo-interleaved L,R,L,R… — take left channel every other float.
+                stereo = array.array('f', data[64:expected])
+                mono = stereo[0::2]
+
+                if procs[trx] is None:
+                    continue
+                try:
+                    procs[trx].stdin.write(mono.tobytes())
+                    procs[trx].stdin.flush()
+                except BrokenPipeError:
+                    print(f"[sink{trx}] pipe closed, restarting", file=sys.stderr)
+                    reopen_sink(trx)
+
+                frame_counts[trx] += 1
+                if frame_counts[trx] % 2000 == 0:
+                    print(f"[sink{trx}] {frame_counts[trx]} frames routed")
+
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"[TCI] error: {e} — reconnecting in 2s", file=sys.stderr)
             try:
-                sink_proc.stdin.write(pcm_bytes)
-                sink_proc.stdin.flush()
-            except BrokenPipeError:
-                print(f"[sink{sink_idx}] sink pipe closed, restarting", file=sys.stderr)
-                sink_proc = open_sink(sink_idx)
+                ws.close()
+            except Exception:
+                pass
+            time.sleep(2)
 
-            if frame_count % 2000 == 0:
-                with stats_lock:
-                    stats[sink_idx] = {"frames": frame_count, "drops": drop_count}
-                print(f"[sink{sink_idx}] {frame_count} frames, {drop_count} dropped "
-                      f"({100*drop_count/max(frame_count+drop_count,1):.1f}% loss)")
-
-    except KeyboardInterrupt:
-        pass
-    finally:
-        sink_proc.stdin.close()
-        sink_proc.wait()
-        sock.close()
-        ctx.term()
+    for i in range(num_sinks):
+        if procs[i] is not None:
+            try:
+                procs[i].stdin.close()
+                procs[i].wait()
+            except Exception:
+                pass
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Route granolasdr ZMQ audio to PulseAudio")
-    ap.add_argument("--host", default="localhost", help="ZMQ publisher host")
+    ap = argparse.ArgumentParser(description="Route granolasdr TCI audio to PulseAudio")
+    ap.add_argument("--host", default="localhost", help="TCI WebSocket host")
+    ap.add_argument("--port", type=int, default=TCI_PORT,
+                    help=f"TCI WebSocket port (default: {TCI_PORT})")
     ap.add_argument("--sinks", type=int, default=NUM_SINKS,
                     help=f"Number of sinks to route (default: {NUM_SINKS})")
     ap.add_argument("--create-sinks", action="store_true",
@@ -208,7 +232,7 @@ def main():
     ap.add_argument("--delete-sinks", action="store_true",
                     help="Remove all granola-sink PulseAudio modules and exit")
     ap.add_argument("--control", default="http://localhost:8080",
-                    help="Control server base URL")
+                    help="Control server base URL (for tune/status helpers)")
     args = ap.parse_args()
 
     if args.delete_sinks:
@@ -221,21 +245,7 @@ def main():
         create_null_sinks(num)
         time.sleep(0.5)
 
-    stats_lock = threading.Lock()
-    stats = {}
-
-    threads = []
-    for i in range(num):
-        t = threading.Thread(target=sink_router, args=(args.host, i, stats_lock, stats),
-                             daemon=True, name=f"router-sink{i}")
-        t.start()
-        threads.append(t)
-
-    try:
-        while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        print("\nShutting down.")
+    run_router(args.host, args.port, num)
 
 
 if __name__ == "__main__":
