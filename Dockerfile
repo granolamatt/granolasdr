@@ -48,6 +48,6 @@ RUN mkdir -p build && cd build && \
           .. && \
     make -j$(nproc) hf_rx
 
-EXPOSE 8765 5599 5600 5581 5582 5583 5584
+EXPOSE 8765 5599 5600 40001
 
 CMD ["./build/hf_rx"]

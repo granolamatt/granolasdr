@@ -14,7 +14,7 @@ RX888 SDR (140 MS/s real, int16_t)
        SpectrumNorm: asymmetric EMA noise floor + Legendre polynomial equalization
          + cross-band leveling (geometric mean of 11 band centers)
        4096-pt C2C IFFT → 2048 valid complex samples/block @ 409.6 kHz
-       Audio: 4 tunable sinks → 480-bin IFFT → 48 kHz ZMQ streams (5581–5584)
+       Audio: 4 tunable sinks → 480-bin IFFT → 48 kHz PCM → TCI WebSocket (port 40001)
          Audio control via wsdict (granolasdr:audio:cmd / granolasdr:audio:status:N)
   └─ MagBlock (CUDA) — normal ring: N=200
        65536-pt FFT (6.25 Hz/bin), 4 time × 4 freq OSR, 160 ms/block
@@ -39,6 +39,11 @@ wsdict WebSocket server (port 8765):
   Browser dashboard — waterfall, decode stream, band table, audio channels panel
   HFChannelizer     — publishes audio:status:N, subscribes audio:cmd for retune
 
+TCI WebSocket server (port 40001):
+  4 virtual transceivers (trx 0–3); WSJT-X / JTDX / N1MM / audio_router.py connect here
+  Binary audio frames: 64-byte header + float32 stereo-interleaved 48 kHz PCM
+  VFO retune via vfo:trx,0,freq_hz; (applied immediately to the matching audio sink)
+
 psk_uploader.py (Python):
   Subscribes to :5600, batches ft8/decode + js8/decode, uploads to PSKReporter every 5 min
 ```
@@ -58,16 +63,16 @@ Tune a sink: pick a preset or type a frequency in MHz and press **tune**. The co
 
 ## Audio — 4 tunable virtual radios
 
-While `hf_rx` is running it publishes 48 kHz mono audio from 4 independent virtual radios on ZMQ PUB sockets (ports 5581–5584). Each sink is independently tunable to any HF frequency at runtime via the web UI or wsdict.
+While `hf_rx` is running it serves 48 kHz mono audio from 4 independent virtual radios over the TCI WebSocket server on port 40001. Each sink is independently tunable to any HF frequency at runtime via the web UI, wsdict, or TCI VFO commands from WSJT-X/JTDX.
 
 **Default sink frequencies at startup:**
 
-| Sink | Port | Default | Label |
-|------|------|---------|-------|
-| 0 | 5581 | 14.074 MHz | 20m FT8 |
-| 1 | 5582 | 7.074 MHz | 40m FT8 |
-| 2 | 5583 | 3.573 MHz | 80m FT8 |
-| 3 | 5584 | 28.074 MHz | 10m FT8 |
+| Sink | TCI trx | Default | Label |
+|------|---------|---------|-------|
+| 0 | 0 | 14.074 MHz | 20m FT8 |
+| 1 | 1 | 7.074 MHz | 40m FT8 |
+| 2 | 2 | 3.573 MHz | 80m FT8 |
+| 3 | 3 | 28.074 MHz | 10m FT8 |
 
 ### Route audio to PulseAudio
 
@@ -89,6 +94,7 @@ Connect to a remote `hf_rx` host:
 
 ```bash
 python3 audio_router.py --host 192.168.1.x
+python3 audio_router.py --host 192.168.1.x --port 40001
 ```
 
 **Listen:**
@@ -100,17 +106,16 @@ parec --device=granola-sink0.monitor --rate=48000 --format=float32le --channels=
   | aplay -r 48000 -f FLOAT_LE -c 1
 ```
 
-### Audio frame format
+### TCI audio frame format
 
-Published by `hf_rx` on each ZMQ socket, consumed by `audio_router.py`:
+Binary WebSocket messages sent by `hf_rx`, consumed by `audio_router.py` and WSJT-X:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `sink_id` | uint32 | Sink index 0–3 |
-| `seq` | uint32 | Monotonically increasing, wraps at 2³² |
-| samples | 240 × float32 | PCM at 48 kHz |
+| Bytes | Field | Description |
+|-------|-------|-------------|
+| 0–63 | Header | 16 × uint32 LE — receiver (trx), sampleRate=48000, format=3 (float32), length (stereo float count), type=1 |
+| 64+ | Payload | float32 LE stereo-interleaved (L=R mono); `length/2` samples per frame |
 
-Frame size: 968 bytes. Frame rate: 200 Hz (240 × 200 = 48,000 samples/sec).
+Frame size: 3904 bytes (64-byte header + 480 samples × 2 channels × 4 bytes). Frame rate: 100 Hz (480 × 100 = 48,000 samples/sec).
 
 ## Prerequisites
 
@@ -127,7 +132,7 @@ sudo apt install build-essential cmake libusb-1.0-0-dev libzmq3-dev \
                  python3 python3-pip pulseaudio-utils
 
 # Python packages
-pip3 install pyzmq
+pip3 install pyzmq websocket-client
 ```
 
 `pulseaudio-utils` provides `pactl` and `pacat`, needed for `audio_router.py`.
@@ -204,7 +209,7 @@ First build takes ~30 minutes (compiles CUDA for sm70–sm120). Subsequent build
 
 ### Audio routing
 
-`audio_router.py` runs on the **host**, not inside the container. The ZMQ audio ports (5581–5584) are exposed — point `audio_router.py` at `localhost` as usual:
+`audio_router.py` runs on the **host**, not inside the container. The TCI port (40001) is exposed — point `audio_router.py` at `localhost` as usual:
 
 ```bash
 python3 audio_router.py           # local hf_rx (native build)
@@ -267,6 +272,10 @@ A ZMQ proxy opens on port 5599 (producers) and 5600 (consumers). Subscribe to po
 | `--js8` | off | Enable JS8 Normal mode decoder (15s, 6.25 Hz/bin) |
 | `--js8-fast` | off | Enable JS8 Fast mode decoder (10s, 10 Hz/bin) |
 | `--js8-slow` | off | Enable JS8 Slow mode decoder (30s, 3.125 Hz/bin) |
+| `--js8-turbo` | off | Enable JS8 Turbo mode decoder (6s, 12.5 Hz/bin) |
+| `--js8-ultra` | off | Enable JS8 Ultra mode decoder (4s, 25 Hz/bin) |
+| `--tci-port PORT` | `40001` | TCI WebSocket port (`0` to disable) |
+| `--tci-gain FLOAT` | `1.0` | Audio gain applied to TCI float32 payload |
 | `--max-log-costas` | off | Use max-log 8-FSK Costas metric instead of the default legacy frequency+neighbor |
 | `--min-score FLOAT` | `5.0` | Minimum Costas sync scan score threshold (`3.0` with `--max-log-costas`) |
 | `--wf-floor UINT8` | `170` | Waterfall lower clamp (raise to darken noise floor) |
@@ -301,16 +310,32 @@ Verify your reports appeared: https://pskreporter.info/pskmap.html
 Install dependencies:
 
 ```bash
-pip3 install -r requirements.txt
+pip3 install -r requirements.txt   # pyzmq websocket-client
 ```
 
 ### `audio_router.py`
 
-Routes the 4 tunable 48 kHz ZMQ audio streams into PulseAudio null sinks. See [Audio — 4 tunable virtual radios](#audio--4-tunable-virtual-radios) above.
+Connects to the TCI WebSocket server and routes all 4 audio sinks to PulseAudio null sinks. See [Audio — 4 tunable virtual radios](#audio--4-tunable-virtual-radios) above.
 
 ### `psk_uploader.py`
 
 Subscribes to the ZMQ XPUB socket and batches decoded messages into PSKReporter IPFIX UDP packets.
+
+### `js8_logger.py`
+
+Subscribes to `js8/decode` on the ZMQ XPUB proxy and appends every decoded message to a rotating daily JSON-lines file, with 60 s deduplication.
+
+```bash
+python3 js8_logger.py --dir /var/log/granolasdr/js8
+```
+
+### `js8_report.py`
+
+Reads a daily JSONL log and generates a dark-themed HTML report: per-callsign decode counts, SNR bars, mode abbreviations, band badges, grid squares, hourly timeline, and a "heard by others but not us" table.
+
+```bash
+python3 js8_report.py js8_20260613.jsonl --open
+```
 
 ### `check_uploads.py`
 
@@ -351,18 +376,15 @@ python3 compare_corpus.py granola_log.jsonl ALL.TXT --date 20240518
 |------|----------|-----------|-------------|
 | 5599 | ZMQ XSUB | inbound | ZMQ proxy — producers (FT8, JS8) connect here |
 | 5600 | ZMQ XPUB | outbound | ZMQ proxy — subscribers connect here; topics: `ft8/decode`, `js8/decode` |
-| 5581 | ZMQ PUB | outbound | Audio sink 0 (48 kHz PCM) |
-| 5582 | ZMQ PUB | outbound | Audio sink 1 (48 kHz PCM) |
-| 5583 | ZMQ PUB | outbound | Audio sink 2 (48 kHz PCM) |
-| 5584 | ZMQ PUB | outbound | Audio sink 3 (48 kHz PCM) |
-| 8765 | WebSocket | inbound | wsdict server — browser dashboard + audio control |
+| 8765 | WebSocket | inbound | wsdict server — browser dashboard + audio tune control |
+| 40001 | WebSocket | inbound | TCI server — 4-trx audio + VFO; WSJT-X, JTDX, N1MM, `audio_router.py` |
 
 ## Project structure
 
 ```
 gm/
   cuda/
-    HFChannelizer.cc      — CUDA channelizer: R2C FFT → 11-band composite → SpectrumNorm → IFFT + 4 audio sinks
+    HFChannelizer.cc      — CUDA channelizer: R2C FFT → 11-band composite → SpectrumNorm → IFFT + 4 TCI audio sinks
     SpectrumNorm.cu/.h    — Per-band Legendre polynomial noise-floor equalization (asymmetric EMA + cross-band leveling)
     MagBlock.cc           — Oversampled C2C FFT → uint8 magnitude → DeviceRingBuffer; feeds FT8/JS8/Waterfall
     WaterfallCuda.cc      — Reads MagBlock ring; publishes RGBA rows to wsdict (granolasdr:waterfall:N)
@@ -380,13 +402,17 @@ gm/
   rx888/                  — RX888 USB driver interface
   zmqcode/                — ZMQ pub/server utilities
 ft8_lib/                  — FT8/JS8 codec (prebuilt libft8.a)
-wsserver/                 — Rust WebSocket dict server (wsdict); vendored as static library
+wsserver/                 — Rust WebSocket dict server (wsdict) + TCI WebSocket server
+  src/tci.rs              — TCI protocol: 4-trx audio accumulator, VFO parse, frame builder
 wsdict.h                  — C++ header-only WsDictClient: set/get/subscribe/del
 wsdict_server.h           — C shim: wsdict_server_start() to launch the Rust wsserver
+tci_server.h              — C shim: tci_server_start/stop, tci_push_audio/smeter, tci_poll_vfo
 control/index.html        — Browser dashboard: decode stream, bands, audio channels, waterfall
 third_party/              — Vendored single-header libs: nlohmann/json
-audio_router.py           — Route 4-sink 48 kHz ZMQ audio streams to PulseAudio null sinks
+audio_router.py           — Route 4-sink TCI audio to PulseAudio null sinks (ws://host:40001)
 psk_uploader.py           — PSKReporter IPFIX uploader (subscribes to ZMQ XPUB :5600)
+js8_logger.py             — Persist JS8 decodes to rotating daily JSONL files
+js8_report.py             — Generate HTML heard/not-heard report from a JSONL decode log
 compare_psk.py            — Decoder vs PSKReporter comparison tool
 compare_corpus.py         — granolasdr vs JTDX/WSJT-X decode comparison
 check_uploads.py          — Verify PSKReporter accepted your uploads

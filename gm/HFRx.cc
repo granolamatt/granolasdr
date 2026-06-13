@@ -18,6 +18,7 @@
 #include "gm/buffer/BufferFile.h"
 #include "gm/hf/hf_bands.h"
 #include "wsdict_server.h"
+#include "tci_server.h"
 
 static constexpr int kProxyXSubPort = 5599;  // producers connect here
 static constexpr int kProxyXPubPort = 5600;  // consumers subscribe here
@@ -200,6 +201,8 @@ int main(int argc, char* argv[]) {
     bool        enable_js8_turbo = false;
     bool        enable_js8_ultra = false;
     bool        legacy_costas   = true;
+    int         tci_port        = 40001;  // 0 = disabled
+    float       tci_gain        = 1.0f;
     uint8_t     wf_floor        = 170;   // tune: raise to darken noise floor
     uint8_t     wf_ceil         = 210;   // tune: lower to saturate signals sooner
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
@@ -243,6 +246,10 @@ int main(int argc, char* argv[]) {
             wf_floor = (uint8_t)std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--wf-ceil") == 0 && i + 1 < argc) {
             wf_ceil  = (uint8_t)std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--tci-port") == 0 && i + 1 < argc) {
+            tci_port = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--tci-gain") == 0 && i + 1 < argc) {
+            tci_gain = std::stof(argv[++i]);
         }
     }
 
@@ -294,6 +301,15 @@ int main(int argc, char* argv[]) {
     }
     printf("wsdict server: http://localhost:%d  (WebSocket at /ws)\n", kWsDictPort);
 
+    if (tci_port > 0) {
+        if (tci_server_start((uint16_t)tci_port, tci_gain) != 0) {
+            fprintf(stderr, "Failed to start TCI server on port %d\n", tci_port);
+            return 1;
+        }
+        printf("TCI server: ws://localhost:%d  (WSJT-X, JTDX, N1MM)  gain=%.2f\n",
+               tci_port, (double)tci_gain);
+    }
+
     if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
@@ -317,6 +333,12 @@ int main(int argc, char* argv[]) {
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
                     wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil);
+
+        // TC5/TC6 shutdown order: stop channelizer workers before TCI server
+        // so tciVfoWorker never polls a destroyed Rust global.
+        channelizer.stop();
+        channelizer.join();
+        if (tci_port > 0) tci_server_stop();
     }
 
     return 0;
