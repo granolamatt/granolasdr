@@ -59,6 +59,27 @@ _SEND_TMPL = bytes.fromhex(
 TEMPLATES = _RECV_TMPL + _SEND_TMPL
 
 
+# Granolasdr hf_bands.h windows in Hz — only upload spots within these ranges.
+# Frequencies outside any window are false-positive LDPC decodes.
+_BAND_WINDOWS = (
+    ( 1_839_000,  1_846_000),   # 160m
+    ( 3_572_000,  3_582_000),   #  80m
+    ( 5_356_000,  5_374_000),   #  60m
+    ( 7_068_000,  7_082_000),   #  40m
+    (10_129_000, 10_142_000),   #  30m
+    (14_070_000, 14_100_000),   #  20m
+    (18_070_000, 18_113_000),   #  17m
+    (21_072_000, 21_095_000),   #  15m
+    (24_914_000, 24_931_000),   #  12m
+    (28_073_000, 28_100_000),   #  10m
+    (50_311_000, 50_320_000),   #   6m
+)
+
+def _in_band(freq_hz: float) -> bool:
+    f = int(freq_hz)
+    return any(lo <= f <= hi for lo, hi in _BAND_WINDOWS)
+
+
 _FT8_SKIP = frozenset({"CQ", "DX", "DE", "QRZ", "TU;"})
 
 def _extract_ft8_sender(text: str) -> str:
@@ -94,11 +115,12 @@ def _receiver_block(rx_call: str, rx_grid: str, rig: str) -> bytes:
 
 
 def _dedup_reports(reports: list[dict]) -> list[dict]:
-    """One report per (callsign, band): keep the entry with the best SNR.
-    Band bucket is freq // 1_000_000 so 20m and 10m are always distinct."""
+    """One report per (callsign, mode, band): keep the entry with the best SNR.
+    Band bucket is freq // 1_000_000 so 20m and 10m are always distinct.
+    Mode is included so FT8 and JS8 spots for the same callsign are both reported."""
     best: dict[tuple, dict] = {}
     for r in reports:
-        key = (r["call"], int(r["freq"]) // 1_000_000)
+        key = (r["call"], r.get("mode", ""), int(r["freq"]) // 1_000_000)
         if key not in best or r["snr"] > best[key]["snr"]:
             best[key] = r
     return list(best.values())
@@ -213,7 +235,7 @@ def main():
                     msg["mode"] = "FT8"
                     call = _extract_ft8_sender(msg.get("call", ""))
                     msg["call"] = call
-                if call:
+                if call and _in_band(msg.get("freq", 0)):
                     pending.append(msg)
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 pass

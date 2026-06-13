@@ -63,6 +63,8 @@ pub struct TciState {
     pub vfo_freqs: [AtomicU64; NUM_SINKS],
     /// Audio gain applied before float32 payload (from --tci-gain CLI flag).
     pub gain: f32,
+    /// Total push_audio calls across all sinks (monotonic; for rate measurement).
+    pub audio_push_count: AtomicU64,
 }
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +81,7 @@ impl TciState {
             vfo_queue: Mutex::new(VecDeque::new()),
             vfo_freqs: std::array::from_fn(|i| AtomicU64::new(DEFAULT_VFO_HZ[i])),
             gain,
+            audio_push_count: AtomicU64::new(0),
         })
     }
 }
@@ -96,7 +99,7 @@ pub async fn run(
 
     let app = Router::new()
         .fallback(axum::routing::get(ws_handler))
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -105,12 +108,42 @@ pub async fn run(
             l
         }
         Err(e) => {
-            let _ = ready_tx.send(Err(format!("[TCI] bind :{port} failed: {e}")));
+            let _ = ready_tx.send(Err(format!("bind :{port} failed: {e}")));
             return;
         }
     };
 
-    eprintln!("[TCI] listening on :{port}");
+    let state_tick = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.tick().await; // consume initial immediate tick
+        let mut last_pushes = 0u64;
+        let mut last_tick = tokio::time::Instant::now();
+        loop {
+            interval.tick().await;
+            let s = &*state_tick;
+            let now = tokio::time::Instant::now();
+            let elapsed = now.duration_since(last_tick).as_secs_f64();
+            let pushes = s.audio_push_count.load(Ordering::Relaxed);
+            let delta = pushes.saturating_sub(last_pushes);
+            // Each push delivers AUDIO_VALID samples to one sink; divide by NUM_SINKS
+            // to get per-sink block rate, then multiply by samples/block.
+            let sps = if elapsed > 0.0 {
+                (delta as f64 * AUDIO_VALID as f64) / (NUM_SINKS as f64 * elapsed)
+            } else {
+                0.0
+            };
+            last_pushes = pushes;
+            last_tick = now;
+
+            let conns = s.all_subs.lock().unwrap().len();
+            let freqs: Vec<String> = (0..NUM_SINKS)
+                .map(|trx| format!("trx{}={}", trx, s.vfo_freqs[trx].load(Ordering::Acquire)))
+                .collect();
+            println!("[TCI] clients={conns} rate={sps:.0}sps {}", freqs.join(" "));
+        }
+    });
+
     axum::serve(listener, app).await.ok();
 }
 
@@ -129,10 +162,8 @@ async fn handle_connection(socket: WebSocket, state: Arc<TciState>) {
     let (tx, mut rx) = mpsc::channel::<WsMsg>(CHAN_DEPTH);
 
     state.all_subs.lock().unwrap().push((conn_id, tx.clone()));
-    eprintln!("[TCI] conn={conn_id} connected");
 
     let init = build_init_sequence(&state);
-    eprintln!("[TCI] conn={conn_id} tx init ({} bytes)", init.len());
     if ws_sink.send(Message::Text(init)).await.is_err() {
         cleanup_conn(&state, conn_id);
         return;
@@ -175,7 +206,6 @@ async fn handle_connection(socket: WebSocket, state: Arc<TciState>) {
         }
     }
 
-    eprintln!("[TCI] conn={conn_id} disconnected");
     cleanup_conn(&state, conn_id);
     write_task.abort();
 }
@@ -189,7 +219,6 @@ fn dispatch_cmd(
     // TCI commands are case-insensitive; WSJT-X sends lowercase.
     let cmd_lower = cmd.to_lowercase();
     let cl = cmd_lower.as_str();
-    eprintln!("[TCI] conn={conn_id} rx: {cl}");
 
     if let Some(rest) = cl.strip_prefix("audio_start:") {
         if let Ok(trx) = rest.trim().parse::<u32>() {
@@ -220,7 +249,6 @@ fn dispatch_cmd(
 /// Send a control message reliably: spawns an async task that waits for channel
 /// space rather than dropping.  Only used for small control echoes (not audio).
 fn reliable_send(tx: &mpsc::Sender<WsMsg>, msg: String) {
-    eprintln!("[TCI] tx: {}", msg.trim_end_matches(';'));
     let tx = tx.clone();
     tokio::spawn(async move {
         let _ = tx.send(WsMsg::Text(msg)).await;
@@ -281,6 +309,7 @@ fn parse_vfo_cmd(state: &TciState, rest: &str) {
     }
     state.vfo_freqs[trx as usize].store(freq_hz, Ordering::Release);
     state.vfo_queue.lock().unwrap().push_back((trx, freq_hz));
+    println!("[TCI] VFO trx={trx} rx_freq={freq_hz} Hz");
 }
 
 // ── Init sequence ──────────────────────────────────────────────────────────
@@ -386,6 +415,7 @@ fn push_audio_impl(state: &TciState, trx: u32, pcm: &[f32]) {
         tracing::warn!("[TCI] push_audio: trx={trx} out of range");
         return;
     }
+    state.audio_push_count.fetch_add(1, Ordering::Relaxed);
     let flushed = {
         let mut accum = state.audio_accum[trx_idx].lock().unwrap();
         accum.extend_from_slice(pcm);

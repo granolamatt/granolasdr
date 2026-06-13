@@ -167,7 +167,7 @@ pub extern "C" fn tci_server_start(port: u16, gain: f32) -> std::os::raw::c_int 
     let handle = match RUNTIME_HANDLE.get() {
         Some(h) => h,
         None => {
-            eprintln!("[TCI] wsdict_server_start must be called before tci_server_start");
+            eprintln!("tci_server_start: wsdict_server_start must be called first");
             return -1;
         }
     };
@@ -181,11 +181,11 @@ pub extern "C" fn tci_server_start(port: u16, gain: f32) -> std::os::raw::c_int 
     match ready_rx.recv() {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
-            eprintln!("[TCI] {e}");
+            eprintln!("TCI error: {e}");
             -1
         }
         Err(_) => {
-            eprintln!("[TCI] server task exited before bind");
+            eprintln!("TCI error: server task exited before bind");
             -1
         }
     }
