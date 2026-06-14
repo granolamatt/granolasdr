@@ -24,7 +24,7 @@ MagBlock<N>::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP,
     rfft_length_ = (size_t)rfft_len;
     time_osr_    = time_osr;
     freq_osr_    = freq_osr;
-    bin_hz_      = 204800.0f / (float)rfft_length_;
+    bin_hz_      = 409600.0f / (float)rfft_length_;
 
     cuda_check_error(cudaSetDevice(0));
     cuda_check_error(cudaStreamCreate(&stream_));
@@ -99,7 +99,7 @@ int MagBlock<N>::doCopy(uint64_t now)
                 if (f > 0) {
                     cuda_h_.freqShift(input, demodShift_d_, (int)rfft_length_,
                                       f * bin_hz_ / freq_osr_,
-                                      204800.0f);
+                                      409600.0f);
                     input = demodShift_d_;
                 }
                 cufftResult rv = cufftExecC2C(rplan_,

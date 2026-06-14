@@ -2,14 +2,14 @@
 #include "gm/hf/hf_bands.h"
 #include <cmath>
 
-// The HFChannelizer packs FT8/JS8 sub-band windows into a 2048-bin composite IFFT,
-// outputs 1024 complex samples at 204.8 kHz.  The FT8/JS8 FFT (32768 points)
-// has bin_hz = 204,800 / 32,768 = 6.25 Hz.  Convert freq_offset (an FFT bin)
+// The HFChannelizer packs FT8/JS8 sub-band windows into a 4096-bin composite IFFT,
+// outputs 2048 complex samples at 409.6 kHz.  The FT8/JS8 FFT (65536 points)
+// has bin_hz = 409,600 / 65,536 = 6.25 Hz.  Convert freq_offset (an FFT bin)
 // back to RF using the HFChannelizer band table.
 
 static const int   kBandMapSize     = kNumHFBands;
-static const int   kIfftSize        = 2048;
-static const int   kFt8FftSize      = 32768;
+static const int   kIfftSize        = 4096;
+static const int   kFt8FftSize      = 65536;
 static const int   kWidebandFftSize = 1400000; // 2 * NLARGE
 static const float kWbSampleRate    = 140000000.0f;
 

@@ -432,6 +432,19 @@ JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
         }
     }
 
+    if (getenv("JS8_CAPTURE_LLR")) {
+        time_t now_t = time(nullptr);
+        struct tm* tm_p = gmtime(&now_t);
+        char fname[64];
+        snprintf(fname, sizeof(fname), "js8_llr_%04d%02d%02d_%s.jsonl",
+                 tm_p->tm_year + 1900, tm_p->tm_mon + 1, tm_p->tm_mday,
+                 mode_name_);
+        for (char* p = fname; *p; ++p) if (*p == ' ') *p = '_';
+        llr_capture_ = fopen(fname, "a");
+        if (llr_capture_)
+            printf("[%s] LLR capture → %s\n", mode_name_, fname);
+    }
+
     js8cuda->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
         decodeAndPublishContinuous(r);
     });
@@ -520,6 +533,24 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         float freq_hz  = composite_bin_to_rf_hz(r.fo[i], rfft_size_);
         float time_sec = (r.to[i] + (float)r.ts[i] / (float)time_osr_) * symbol_period_;
         float snr      = (float)r.score[i] - 26.0f;
+
+        if (llr_capture_) {
+            nlohmann::json cap;
+            cap["text"] = text;
+            cap["freq"] = (double)freq_hz;
+            cap["snr"]  = (double)snr;
+            cap["unix"] = unix_now;
+            cap["fo"]   = r.fo[i];
+            cap["to"]   = (int)r.to[i];
+            cap["mode"] = mode_name_;
+            auto& la = cap["llr"] = nlohmann::json::array();
+            for (int j = 0; j < 174; ++j)
+                la.push_back((double)llr[j]);
+            std::string line = cap.dump() + "\n";
+            std::lock_guard<std::mutex> lk(llr_cap_mutex_);
+            fputs(line.c_str(), llr_capture_);
+            fflush(llr_capture_);
+        }
 
         publishDecoded(text.c_str(), from_call.c_str(), freq_hz, snr, unix_now, time_sec);
     }

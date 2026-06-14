@@ -1,8 +1,6 @@
-// JS8 soft-symbol LLR kernel — identical to FT8SoftCuda.cu but without the
-// Gray-code permutation.  JS8 encodes 3 bits per FSK tone using natural binary
-// (tone j carries bit pattern j directly), so s2[j] = mag at fo+j with no
-// permutation.  Using the FT8 Gray map gives wrong bit-group assignments for
-// bits 1 and 0, breaking LDPC convergence.
+// JS8 soft-symbol LLR kernel.  JS8 uses natural binary encoding (tone j
+// carries bit pattern j directly) — unlike FT8 which uses Gray coding.
+// See JS8Call JS8.cpp encode(): outputWord written directly as tone index.
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -59,7 +57,6 @@ __global__ void js8_soft_symbols_kernel(
     int block_stride = time_osr * freq_osr * num_bins;
     int ring_slot    = (snap_start + block_abs) % ring_size;
 
-    // Natural binary: s2[j] = magnitude at tone j (no Gray permutation).
     float s2[8];
     for (int j = 0; j < 8; ++j) {
         int bin = fo + j;
@@ -68,10 +65,7 @@ __global__ void js8_soft_symbols_kernel(
                 : 0.0f;
     }
 
-    // Max-log MAP LLR for natural-binary 8-FSK.
-    // Bit 2 (MSB): 1 for tones 4-7, 0 for tones 0-3.
-    // Bit 1:       1 for tones 2,3,6,7; 0 for 0,1,4,5.
-    // Bit 0 (LSB): 1 for odd tones; 0 for even tones.
+    // Max-log MAP LLR for natural-binary 8-FSK (positive = bit is 1):
     out[0] = fmax4d(s2[4], s2[5], s2[6], s2[7]) - fmax4d(s2[0], s2[1], s2[2], s2[3]);
     out[1] = fmax4d(s2[2], s2[3], s2[6], s2[7]) - fmax4d(s2[0], s2[1], s2[4], s2[5]);
     out[2] = fmax4d(s2[1], s2[3], s2[5], s2[7]) - fmax4d(s2[0], s2[2], s2[4], s2[6]);

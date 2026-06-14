@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -50,6 +51,9 @@ private:
 
     std::unordered_set<std::string> seen_this_epoch_;
     uint64_t last_epoch_ = 0;
+
+    FILE*      llr_capture_   = nullptr;
+    std::mutex llr_cap_mutex_;
 };
 
 } // namespace hf
