@@ -10,8 +10,9 @@ static __constant__ uint8_t kFT8_Gray_map_d[8] = {0, 1, 3, 2, 5, 6, 4, 7};
 #define FT8_ND_SOFT    58   // data symbols per FT8 message (FT8_ND)
 #define FTX_LDPC_N_D  174   // LLR bits per candidate
 
-static __device__ inline float fmax4d(float a, float b, float c, float d) {
-    return fmaxf(fmaxf(a, b), fmaxf(c, d));
+static __device__ inline float lse4d(float a, float b, float c, float d) {
+    float m = fmaxf(fmaxf(a, b), fmaxf(c, d));
+    return m + logf(expf(a-m) + expf(b-m) + expf(c-m) + expf(d-m));
 }
 
 // One thread per (candidate, data-symbol).
@@ -70,9 +71,9 @@ __global__ void ft8_soft_symbols_kernel(
                 : 0.0f;
     }
 
-    out[0] = fmax4d(s2[4], s2[5], s2[6], s2[7]) - fmax4d(s2[0], s2[1], s2[2], s2[3]);
-    out[1] = fmax4d(s2[2], s2[3], s2[6], s2[7]) - fmax4d(s2[0], s2[1], s2[4], s2[5]);
-    out[2] = fmax4d(s2[1], s2[3], s2[5], s2[7]) - fmax4d(s2[0], s2[2], s2[4], s2[6]);
+    out[0] = lse4d(s2[4], s2[5], s2[6], s2[7]) - lse4d(s2[0], s2[1], s2[2], s2[3]);
+    out[1] = lse4d(s2[2], s2[3], s2[6], s2[7]) - lse4d(s2[0], s2[1], s2[4], s2[5]);
+    out[2] = lse4d(s2[1], s2[3], s2[5], s2[7]) - lse4d(s2[0], s2[2], s2[4], s2[6]);
 }
 
 void ft8_soft_symbols(
