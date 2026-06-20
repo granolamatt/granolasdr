@@ -31,6 +31,8 @@ struct ContScanResult {
     uint8_t*  fs_d{nullptr};
     int16_t*  score_d{nullptr};
     float*    log174_d{nullptr};
+    uint8_t*  x_hat_d{nullptr};
+    bool*     parity_d{nullptr};
 
     uint32_t* count{nullptr};
     int32_t*  fo{nullptr};
@@ -39,6 +41,8 @@ struct ContScanResult {
     uint8_t*  fs{nullptr};
     int16_t*  score{nullptr};
     float*    log174{nullptr};
+    uint8_t*  x_hat{nullptr};
+    bool*     parity{nullptr};
 
     double      timestamp{0.0};
     uint64_t    snap_start{0};  // ring block index at window start (set by launchContScan)

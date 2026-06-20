@@ -14,17 +14,21 @@ constexpr int M     = 87;
 constexpr int D_MAX = 7;
 constexpr int BP_BLOCK    = 192;
 constexpr int BP_MAX_ITER = 25;
+constexpr int SP_MAX_ITER = 50;
 
 // Shared memory: s_scale(4) + sx[N](696) + stotal[N](696)
 //   + stoc[M*D_MAX](2436) + stov[M*D_MAX](2436) + sc_ok(4) = 6272 bytes
 constexpr int BP_SMEM_BYTES = 4 + N*4 + N*4 + M*D_MAX*4 + M*D_MAX*4 + 4;
 static_assert(BP_SMEM_BYTES <= 49152, "BP shared memory exceeds 48 KB");
+
+// SP flooded: s_scale(4) + shm_L[N](696) + shm_c2v[M*D_MAX](2436) + shm_ok(4) = 3140 bytes
+constexpr int SP_SMEM_BYTES = 4 + N*4 + M*D_MAX*4 + 4;
+static_assert(SP_SMEM_BYTES <= 49152, "SP flooded shared memory exceeds 48 KB");
 } // namespace
 
 __constant__ int g_js8_check_var_j[M][D_MAX];
 __constant__ int g_js8_check_deg[M];
 __constant__ int g_js8_var_adj[N][3][2];
-__constant__ int g_js8_deg_v[N];
 
 // H-matrix for JS8 Normal (174,87) — from JS8Call JS8.cpp Nm[87]/Mn[174][3].
 static const int k_check_var_j[87][7] = {
@@ -303,21 +307,31 @@ static const int k_var_adj[174][3][2] = {
     {{53,5}, {60,6}, {70,5}},  // var 172
     {{45,6}, {57,5}, {68,5}},  // var 173
 };
-static const int k_deg_v[174] = {
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3
-};
+void js8_ldpc_init_constants()
+{
+    cudaMemcpyToSymbol(g_js8_check_var_j, k_check_var_j, sizeof(k_check_var_j));
+    cudaMemcpyToSymbol(g_js8_check_deg,   k_check_deg,   sizeof(k_check_deg));
+    cudaMemcpyToSymbol(g_js8_var_adj,     k_var_adj,     sizeof(k_var_adj));
+}
+
+// ---------------------------------------------------------------------------
+// SP flooded kernel — Gallager phi / star-sum, flooding schedule.
+//
+// Exact sum-product, ~3.1 KB shared memory per block.
+// LLR convention: positive = bit 1 likely (granolasdr standard).
+// Normalizes to variance=24; guards against the all-zeros trivial solution.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ float js8_sp_phi(float a)
+{
+    return -logf(tanhf(a * 0.5f));
+}
 
 __launch_bounds__(BP_BLOCK)
-__global__ void bp_js8_kernel(
-    int          B,
+__global__ void sp_flooded_js8_kernel(
+    const uint32_t* cand_count_d,
+    int          max_cands,
+    int          max_iter,
     const float* llr,
     uint8_t*     x_hat,
     bool*        parity
@@ -325,18 +339,17 @@ __global__ void bp_js8_kernel(
 {
     const int b   = blockIdx.x;
     const int tid = threadIdx.x;
-    if (b >= B) return;
+    int n = (int)min(*cand_count_d, (uint32_t)max_cands);
+    if (b >= n) return;
 
     __shared__ float s_scale;
-    __shared__ float sx[N];
-    __shared__ float stotal[N];
-    __shared__ float stoc[M * D_MAX];
-    __shared__ float stov[M * D_MAX];
-    __shared__ bool  sc_ok;
+    __shared__ float shm_L  [N];
+    __shared__ float shm_c2v[M * D_MAX];
+    __shared__ bool  shm_ok;
 
     const float* llr_b = llr + (ptrdiff_t)b * N;
-    const float  eps   = 1e-7f;
 
+    // Normalize to variance=24
     if (tid == 0) {
         float sum = 0.0f, sum2 = 0.0f;
         for (int j = 0; j < N; ++j) {
@@ -351,99 +364,101 @@ __global__ void bp_js8_kernel(
     __syncthreads();
 
     if (tid < N)
-        sx[tid] = llr_b[tid] * s_scale;
+        shm_L[tid] = llr_b[tid] * s_scale;
 
     for (int idx = tid; idx < M * D_MAX; idx += BP_BLOCK)
-        stov[idx] = 0.0f;
-    if (tid == 0) sc_ok = false;
+        shm_c2v[idx] = 0.0f;
+
+    if (tid == 0) shm_ok = false;
     __syncthreads();
 
-    for (int it = 0; it < BP_MAX_ITER; ++it) {
+    for (int it = 0; it < max_iter; ++it) {
 
-        if (tid < N) {
-            float tot = sx[tid];
-            for (int e = 0; e < 3; ++e)
-                tot += stov[g_js8_var_adj[tid][e][0] * D_MAX + g_js8_var_adj[tid][e][1]];
-            stotal[tid] = tot;
+        // Phase 1 — Check-node update (threads 0..86)
+        if (tid < M) {
+            const int d = g_js8_check_deg[tid];
+
+            float phi_vals[D_MAX];
+            int   neg_vals[D_MAX];
+            float phi_total = 0.0f;
+            int   neg_total = 0;
+
+            for (int k = 0; k < d; ++k) {
+                const int   j   = g_js8_check_var_j[tid][k];
+                const float v2c = shm_L[j] - shm_c2v[tid * D_MAX + k];
+                const float a   = fmaxf(fabsf(v2c), 1e-9f);
+                phi_vals[k]  = js8_sp_phi(a);
+                neg_vals[k]  = (v2c < 0.0f) ? 1 : 0;
+                phi_total   += phi_vals[k];
+                neg_total   += neg_vals[k];
+            }
+
+            for (int k = 0; k < d; ++k) {
+                const float phi_excl = fmaxf(phi_total - phi_vals[k], 1e-9f);
+                const int   neg_excl = neg_total - neg_vals[k];
+                const float sign     = ((neg_excl & 1) == 0) ? 1.0f : -1.0f;
+                shm_c2v[tid * D_MAX + k] = fmaxf(-20.0f, fminf(20.0f,
+                    sign * js8_sp_phi(phi_excl)));
+            }
         }
         __syncthreads();
 
+        // Phase 2 — Variable-node update (threads 0..173), degree-3 unrolled
+        if (tid < N) {
+            float L_j = llr_b[tid] * s_scale;
+            L_j += shm_c2v[g_js8_var_adj[tid][0][0] * D_MAX + g_js8_var_adj[tid][0][1]];
+            L_j += shm_c2v[g_js8_var_adj[tid][1][0] * D_MAX + g_js8_var_adj[tid][1][1]];
+            L_j += shm_c2v[g_js8_var_adj[tid][2][0] * D_MAX + g_js8_var_adj[tid][2][1]];
+            shm_L[tid] = L_j;
+        }
+        __syncthreads();
+
+        // Phase 3 — Parity check + all-zeros guard (thread 0, serial)
         if (tid == 0) {
             int plain_sum = 0;
-            for (int n = 0; n < N; ++n)
-                plain_sum += (stotal[n] > 0.0f) ? 1 : 0;
+            for (int j = 0; j < N; ++j)
+                plain_sum += (shm_L[j] > 0.0f) ? 1 : 0;
+
             bool ok = (plain_sum > 0);
             if (ok) {
                 for (int i = 0; i < M; ++i) {
-                    int row_parity = 0;
-                    for (int k = 0; k < g_js8_check_deg[i]; ++k)
-                        row_parity ^= (stotal[g_js8_check_var_j[i][k]] > 0.0f) ? 1 : 0;
-                    if (row_parity) { ok = false; break; }
+                    const int d = g_js8_check_deg[i];
+                    int s = 0;
+                    for (int k = 0; k < d; ++k)
+                        s += (shm_L[g_js8_check_var_j[i][k]] > 0.0f) ? 1 : 0;
+                    if (s & 1) { ok = false; break; }
                 }
             }
-            sc_ok = ok;
-        }
-        __syncthreads();
-        if (sc_ok) break;
-
-        if (tid < N) {
-            for (int e = 0; e < 3; ++e) {
-                const int ci  = g_js8_var_adj[tid][e][0];
-                const int sk  = g_js8_var_adj[tid][e][1];
-                const float extrinsic = stotal[tid] - stov[ci * D_MAX + sk];
-                stoc[ci * D_MAX + sk] = tanhf(-extrinsic * 0.5f);
-            }
+            shm_ok = ok;
         }
         __syncthreads();
 
-        if (tid < M) {
-            const int d = g_js8_check_deg[tid];
-            float pref[D_MAX + 1], suf[D_MAX + 1];
-            pref[0] = 1.0f;
-            for (int k = 0; k < d; ++k)
-                pref[k + 1] = pref[k] * stoc[tid * D_MAX + k];
-            suf[d] = 1.0f;
-            for (int k = d - 1; k >= 0; --k)
-                suf[k] = suf[k + 1] * stoc[tid * D_MAX + k];
-            for (int k = 0; k < d; ++k) {
-                float excl = pref[k] * suf[k + 1];
-                excl = fmaxf(-1.0f + eps, fminf(1.0f - eps, excl));
-                stov[tid * D_MAX + k] = -2.0f * atanhf(excl);
-            }
-        }
-        __syncthreads();
+        if (shm_ok) break;
     }
 
     if (tid < N)
-        x_hat[(ptrdiff_t)b * N + tid] = (stotal[tid] > 0.0f) ? 1u : 0u;
+        x_hat[(ptrdiff_t)b * N + tid] = (shm_L[tid] > 0.0f) ? 1u : 0u;
     if (tid == 0)
-        parity[b] = sc_ok;
+        parity[b] = shm_ok;
 }
 
-void js8_ldpc_init_constants()
-{
-    cudaMemcpyToSymbol(g_js8_check_var_j, k_check_var_j, sizeof(k_check_var_j));
-    cudaMemcpyToSymbol(g_js8_check_deg,   k_check_deg,   sizeof(k_check_deg));
-    cudaMemcpyToSymbol(g_js8_var_adj,     k_var_adj,     sizeof(k_var_adj));
-    cudaMemcpyToSymbol(g_js8_deg_v,       k_deg_v,       sizeof(k_deg_v));
-}
-
-void js8_bp_decode_batch(
-    uint32_t     n_candidates,
+void js8_sp_flooded_decode_batch(
+    const uint32_t* cand_count_d,
+    uint32_t     max_cands,
     const float* log174_d,
     uint8_t*     x_hat_d,
     bool*        parity_d,
     cudaStream_t ldpc_stream)
 {
-    if (n_candidates == 0) return;
-    bp_js8_kernel<<<(int)n_candidates, BP_BLOCK, 0, ldpc_stream>>>(
-        (int)n_candidates, log174_d, x_hat_d, parity_d);
+    if (max_cands == 0) return;
+    int grid = (int)max_cands;
+    sp_flooded_js8_kernel<<<grid, BP_BLOCK, 0, ldpc_stream>>>(
+        cand_count_d, (int)max_cands, SP_MAX_ITER, log174_d, x_hat_d, parity_d);
     cudaGetLastError();
 }
 
 // ---------------------------------------------------------------------------
-// CPU single-candidate BP decoder — mirrors bp_js8_kernel logic exactly.
-// Uses the same k_* static tables defined above.
+// CPU single-candidate BP decoder — used by offline tests only.
 // ---------------------------------------------------------------------------
 
 bool js8_ldpc_decode_cpu(const float* llr, uint8_t* xhat)

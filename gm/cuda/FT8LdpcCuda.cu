@@ -1,15 +1,5 @@
-// QP-ADMM LDPC batch decoder for FT8 (174,91) — stream-aware GPU launcher.
-//
-// Adapted from /home/matt/workarea/qp-admm/src/ldpc/qp_admm_cuda.cu.
-// Sign fix (critical): FT8SoftCuda produces positive LLR = bit 1 likely,
-// but QP-ADMM expects positive LLR = bit 0 likely.  Both sites that compute
-// qj = llr_b[tid] * 0.5f are negated → qj = -llr_b[tid] * 0.5f.
-//
-// Architecture: one block per candidate, 192 threads per block.
-//   x-update  : threads 0–173
-//   z-update  : threads 0–82  (parity polytope projection via bisection)
-//   u-update  : threads 0–82
-//   parity    : thread 0 (serial ~290 ops)
+// Star-sum SP flooded LDPC decoder for FT8 (174,91) — stream-aware GPU launcher.
+// LLR convention: positive = bit 1 likely (granolasdr standard).
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -19,23 +9,14 @@ namespace {
 constexpr int N     = 174;
 constexpr int M     = 83;
 constexpr int D_MAX = 7;
-constexpr int BLOCK = 192;
-constexpr int MAX_ITER = 100;
-constexpr float RHO    = 1.0f;
-
-// Shared memory per block: s_scale[1] + sx[174] + sz[83*7] + su[83*7] + sc_ok
-//   = 4 + 696 + 2324 + 2324 + 4 = 5352 bytes
-constexpr int SMEM_BYTES = 4 + N * 4 + M * D_MAX * 4 + M * D_MAX * 4 + 4;
-static_assert(SMEM_BYTES <= 49152, "shared memory exceeds 48 KB limit");
 } // namespace
 
 // H-matrix constant memory (~7.4 KB, cached per SM).
 __constant__ int g_check_var_j[M][D_MAX];
 __constant__ int g_check_deg[M];
 __constant__ int g_var_adj[N][3][2];
-__constant__ int g_deg_v[N];
 
-// H-matrix data for FT8 (174,91) — from qp_admm.hpp HMatrixData<174,83,7,3>.
+// H-matrix data for FT8 (174,83) — check_var_j, check_deg, var_adj.
 static const int k_check_var_j[83][7] = {
     {  3,  30,  58,  90,  91,  95, 152},
     {  4,  31,  59,  92, 114, 145,  -1},
@@ -217,211 +198,39 @@ static const int k_var_adj[174][3][2] = {
     {{40,5}, {41,4}, {62,5}},   {{48,4}, {74,5}, {82,5}},
     {{19,6}, {43,5}, {47,5}},   {{41,5}, {48,5}, {56,5}}
 };
-static const int k_deg_v[174] = {
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3
-};
-
-__launch_bounds__(192)
-__global__ void qp_admm_ft8_kernel(
-    int          B,
-    const float* llr,
-    uint8_t*     x_hat,
-    bool*        parity
-)
-{
-    const int b   = blockIdx.x;
-    const int tid = threadIdx.x;
-    if (b >= B) return;
-
-    __shared__ float s_scale;
-    __shared__ float s_mean;
-    __shared__ float sx[N];
-    __shared__ float sz[M * D_MAX];
-    __shared__ float su[M * D_MAX];
-    __shared__ bool  sc_ok;
-
-    const float* llr_b = llr + (ptrdiff_t)b * N;
-    const float  eps   = 1e-6f;
-
-    // Normalize LLRs to variance 24.  Also subtract the per-vector mean so the
-    // ADMM objective is centered: FT8 codewords average ~22% ones / 78% zeros,
-    // giving a raw LLR mean of roughly -2.5 (positive = bit 1).  After negation
-    // for ADMM (positive = bit 0), all q_j are biased toward +1.4, pushing every
-    // x toward 0.  The trivial all-zeros codeword satisfies all parity checks and
-    // becomes the LP attractor, causing ~13% decode rate instead of ~90%.
-    // Centering before negation removes this bias and lets ADMM find the true word.
-    if (tid == 0) {
-        float sum = 0.0f, sum2 = 0.0f;
-        for (int j = 0; j < N; ++j) {
-            float v = llr_b[j];
-            sum  += v;
-            sum2 += v * v;
-        }
-        float inv_n = 1.0f / N;
-        s_mean = sum * inv_n;
-        float var = (sum2 - sum * sum * inv_n) * inv_n;
-        s_scale = (var > 1e-6f) ? sqrtf(24.0f / var) : 1.0f;
-    }
-    __syncthreads();
-
-    // Initialize x from centered LLRs.
-    // Sign fix: negate (LLR - mean) because FT8SoftCuda produces positive = bit 1
-    // likely, but QP-ADMM needs positive = bit 0 likely.
-    if (tid < N) {
-        const float qj = -(llr_b[tid] - s_mean) * s_scale * 0.5f;
-        const float dj = RHO * (float)g_deg_v[tid];
-        sx[tid] = fmaxf(eps, fminf(1.0f - eps, -qj / dj));
-    }
-    for (int idx = tid; idx < M * D_MAX; idx += BLOCK) {
-        sz[idx] = 0.0f;
-        su[idx] = 0.0f;
-    }
-    if (tid == 0) sc_ok = false;
-    __syncthreads();
-
-    for (int it = 0; it < MAX_ITER; ++it) {
-        // x-update
-        if (tid < N) {
-            float zu_sum = 0.0f;
-            for (int e = 0; e < g_deg_v[tid]; ++e) {
-                const int ci = g_var_adj[tid][e][0];
-                const int sk = g_var_adj[tid][e][1];
-                zu_sum += sz[ci * D_MAX + sk] - su[ci * D_MAX + sk];
-            }
-            const float qj = -(llr_b[tid] - s_mean) * s_scale * 0.5f;
-            const float dj = RHO * (float)g_deg_v[tid];
-            sx[tid] = fmaxf(eps, fminf(1.0f - eps,
-                            (RHO * zu_sum - qj) / dj));
-        }
-        __syncthreads();
-
-        // z-update: parity polytope projection per check node
-        if (tid < M) {
-            const int d = g_check_deg[tid];
-            float w[D_MAX];
-            float s = 0.0f, w_min = 1.0f, w_max = 0.0f;
-
-            for (int k = 0; k < d; ++k) {
-                float vk = sx[g_check_var_j[tid][k]] + su[tid * D_MAX + k];
-                vk = fmaxf(0.0f, fminf(1.0f, vk));
-                w[k] = vk;
-                s += vk;
-                if (vk < w_min) w_min = vk;
-                if (vk > w_max) w_max = vk;
-            }
-
-            // k_target = nearest even integer to s, clamped to [0, floor(d/2)*2].
-            // Without the clamp, odd-degree check nodes (d=7) with s==d produce
-            // k_raw = d+1 (IEEE round-to-even: rintf(3.5)=4 → 8 > 7), making the
-            // bisection impossible: it drives theta → -∞ and sets all z_k = 1
-            // (odd parity), permanently stalling ADMM on those rows.
-            const float k_raw    = 2.0f * rintf(s * 0.5f);
-            const float k_target = fmaxf(0.0f, fminf((float)(d & ~1), k_raw));
-            float lo = w_min - 1.0f, hi = w_max + 1e-6f;
-            for (int bb = 0; bb < 30; ++bb) {
-                const float mid = (lo + hi) * 0.5f;
-                float f = 0.0f;
-                for (int k = 0; k < d; ++k)
-                    f += fmaxf(0.0f, fminf(1.0f, w[k] - mid));
-                if (f > k_target) lo = mid;
-                else              hi = mid;
-            }
-            const float theta = (lo + hi) * 0.5f;
-            for (int k = 0; k < d; ++k)
-                sz[tid * D_MAX + k] = fmaxf(0.0f, fminf(1.0f, w[k] - theta));
-        }
-        __syncthreads();
-
-        // u-update
-        if (tid < M) {
-            const int d = g_check_deg[tid];
-            for (int k = 0; k < d; ++k)
-                su[tid * D_MAX + k] +=
-                    sx[g_check_var_j[tid][k]] - sz[tid * D_MAX + k];
-        }
-        __syncthreads();
-
-        // Parity check (thread 0 only)
-        if (tid == 0) {
-            bool ok = true;
-            for (int i = 0; i < M; ++i) {
-                int row_sum = 0;
-                for (int k = 0; k < g_check_deg[i]; ++k)
-                    row_sum += (sx[g_check_var_j[i][k]] > 0.5f) ? 1 : 0;
-                if (row_sum & 1) { ok = false; break; }
-            }
-            sc_ok = ok;
-        }
-        __syncthreads();
-        if (sc_ok) break;
-    }
-
-    if (tid < N)
-        x_hat[(ptrdiff_t)b * N + tid] = (sx[tid] > 0.5f) ? 1u : 0u;
-    if (tid == 0)
-        parity[b] = sc_ok;
-}
-
 void ft8_ldpc_init_constants()
 {
     cudaMemcpyToSymbol(g_check_var_j, k_check_var_j, sizeof(k_check_var_j));
     cudaMemcpyToSymbol(g_check_deg,   k_check_deg,   sizeof(k_check_deg));
     cudaMemcpyToSymbol(g_var_adj,     k_var_adj,     sizeof(k_var_adj));
-    cudaMemcpyToSymbol(g_deg_v,       k_deg_v,       sizeof(k_deg_v));
 }
-
-void ft8_ldpc_decode_batch(
-    uint32_t     n_candidates,
-    const float* log174_d,
-    uint8_t*     x_hat_d,
-    bool*        parity_d,
-    cudaStream_t ldpc_stream)
-{
-    if (n_candidates == 0) return;
-    qp_admm_ft8_kernel<<<(int)n_candidates, BLOCK, 0, ldpc_stream>>>(
-        (int)n_candidates, log174_d, x_hat_d, parity_d);
-    cudaGetLastError();
-}
-
-// ---------------------------------------------------------------------------
-// GPU Sum-Product Belief Propagation LDPC decoder for FT8 (174,91).
-//
-// Matches ft8_lib's bp_decode() algorithm exactly:
-//   - One thread block per candidate, 192 threads.
-//   - Thread 0..173 handle variable nodes (v2c messages, hard decisions).
-//   - Thread 0..82  handle check nodes (c2v messages).
-//   - Shared memory: sx[N] + stotal[N] + stoc[M×D_MAX] + stov[M×D_MAX] ≈ 6 KB.
-//   - Normalization to variance=24 (matching ftx_normalize_logl) but NO mean
-//     centering — BP handles biased LLRs correctly via message passing.
-//   - All-zeros detection: if hard decisions are all-zero, break (prohibited
-//     trivial solution, same guard as ft8_lib).
-//   - 25 iterations, matching ft8_lib's default.
-//
-// c2v messages use a prefix-suffix product trick (O(d) per check, O(d²) avoidance).
-// tanhf / atanhf are CUDA hardware-accelerated.
-// ---------------------------------------------------------------------------
 
 namespace {
-constexpr int BP_MAX_ITER = 25;
 constexpr int BP_BLOCK    = 192;
+constexpr int SP_MAX_ITER = 50;
 
-// Shared memory bytes: s_scale(4) + sx[N](696) + stotal[N](696)
-//   + stoc[M*D_MAX](2324) + stov[M*D_MAX](2324) + sc_ok(4) = 6048
-constexpr int BP_SMEM_BYTES = 4 + N*4 + N*4 + M*D_MAX*4 + M*D_MAX*4 + 4;
-static_assert(BP_SMEM_BYTES <= 49152, "BP shared memory exceeds 48 KB");
+// SP flooded: s_scale(4) + shm_L[N](696) + shm_c2v[M*D_MAX](2324) + shm_ok(4) = 3028 bytes
+constexpr int SP_SMEM_BYTES = 4 + N*4 + M*D_MAX*4 + 4;
+static_assert(SP_SMEM_BYTES <= 49152, "SP flooded shared memory exceeds 48 KB");
 } // namespace
 
+// ---------------------------------------------------------------------------
+// SP flooded kernel — Gallager phi / star-sum, flooding schedule.
+//
+// Exact log-domain sum-product with Gallager phi / star-sum (~3.0 KB shared).
+// LLR convention: positive = bit 1 likely (granolasdr standard).
+// Normalizes to variance=24; guards against the all-zeros trivial solution.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ float ft8_sp_phi(float a)
+{
+    return -logf(tanhf(a * 0.5f));
+}
+
 __launch_bounds__(BP_BLOCK)
-__global__ void bp_ft8_kernel(
+__global__ void sp_flooded_ft8_kernel(
     int          B,
+    int          max_iter,
     const float* llr,
     uint8_t*     x_hat,
     bool*        parity
@@ -432,17 +241,13 @@ __global__ void bp_ft8_kernel(
     if (b >= B) return;
 
     __shared__ float s_scale;
-    __shared__ float sx[N];           // normalized channel LLRs (positive = bit 1)
-    __shared__ float stotal[N];       // total LLR = sx + sum of c2v messages
-    __shared__ float stoc[M * D_MAX]; // v2c tanh messages, indexed [check][slot]
-    __shared__ float stov[M * D_MAX]; // c2v LLR messages,  indexed [check][slot]
-    __shared__ bool  sc_ok;
+    __shared__ float shm_L  [N];
+    __shared__ float shm_c2v[M * D_MAX];
+    __shared__ bool  shm_ok;
 
     const float* llr_b = llr + (ptrdiff_t)b * N;
-    const float  eps   = 1e-7f;
 
-    // Normalize to variance=24 (matching ftx_normalize_logl).
-    // No mean centering: BP message passing handles LLR DC offset correctly.
+    // Normalize to variance=24
     if (tid == 0) {
         float sum = 0.0f, sum2 = 0.0f;
         for (int j = 0; j < N; ++j) {
@@ -457,86 +262,85 @@ __global__ void bp_ft8_kernel(
     __syncthreads();
 
     if (tid < N)
-        sx[tid] = llr_b[tid] * s_scale;
+        shm_L[tid] = llr_b[tid] * s_scale;
 
     for (int idx = tid; idx < M * D_MAX; idx += BP_BLOCK)
-        stov[idx] = 0.0f;
-    if (tid == 0) sc_ok = false;
+        shm_c2v[idx] = 0.0f;
+
+    if (tid == 0) shm_ok = false;
     __syncthreads();
 
-    for (int it = 0; it < BP_MAX_ITER; ++it) {
+    for (int it = 0; it < max_iter; ++it) {
 
-        // ---- Hard decision: stotal[n] = sx[n] + sum of c2v messages -----------
-        if (tid < N) {
-            float tot = sx[tid];
-            for (int e = 0; e < 3; ++e)
-                tot += stov[g_var_adj[tid][e][0] * D_MAX + g_var_adj[tid][e][1]];
-            stotal[tid] = tot;
-        }
-        __syncthreads();
-
-        // ---- Parity check (thread 0 serial, ~580 ops) -------------------------
-        if (tid == 0) {
-            // Count ones; ft8_lib prohibits the all-zeros codeword.
-            int plain_sum = 0;
-            for (int n = 0; n < N; ++n)
-                plain_sum += (stotal[n] > 0.0f) ? 1 : 0;
-
-            bool ok = (plain_sum > 0); // false if all-zeros
-            if (ok) {
-                for (int i = 0; i < M; ++i) {
-                    int row_parity = 0;
-                    for (int k = 0; k < g_check_deg[i]; ++k)
-                        row_parity ^= (stotal[g_check_var_j[i][k]] > 0.0f) ? 1 : 0;
-                    if (row_parity) { ok = false; break; }
-                }
-            }
-            sc_ok = ok;
-        }
-        __syncthreads();
-        if (sc_ok) break;
-
-        // ---- v2c: thread n writes tanh messages for its 3 check connections ----
-        // stoc[check][slot] = tanh( -(stotal[n] - stov[check][slot]) / 2 )
-        if (tid < N) {
-            for (int e = 0; e < 3; ++e) {
-                const int ci  = g_var_adj[tid][e][0];
-                const int sk  = g_var_adj[tid][e][1];
-                const float extrinsic = stotal[tid] - stov[ci * D_MAX + sk];
-                stoc[ci * D_MAX + sk] = tanhf(-extrinsic * 0.5f);
-            }
-        }
-        __syncthreads();
-
-        // ---- c2v: thread m updates LLR messages for its d variable connections -
-        // stov[m][k] = -2 * atanh( product of stoc[m][kk] for kk != k )
-        // Prefix-suffix trick: O(d) multiplications instead of O(d²).
+        // Phase 1 — Check-node update (threads 0..82)
         if (tid < M) {
             const int d = g_check_deg[tid];
-            float pref[D_MAX + 1], suf[D_MAX + 1];
-            pref[0] = 1.0f;
-            for (int k = 0; k < d; ++k)
-                pref[k + 1] = pref[k] * stoc[tid * D_MAX + k];
-            suf[d] = 1.0f;
-            for (int k = d - 1; k >= 0; --k)
-                suf[k] = suf[k + 1] * stoc[tid * D_MAX + k];
+
+            float phi_vals[D_MAX];
+            int   neg_vals[D_MAX];
+            float phi_total = 0.0f;
+            int   neg_total = 0;
+
             for (int k = 0; k < d; ++k) {
-                float excl = pref[k] * suf[k + 1];
-                excl = fmaxf(-1.0f + eps, fminf(1.0f - eps, excl));
-                stov[tid * D_MAX + k] = -2.0f * atanhf(excl);
+                const int   j   = g_check_var_j[tid][k];
+                const float v2c = shm_L[j] - shm_c2v[tid * D_MAX + k];
+                const float a   = fmaxf(fabsf(v2c), 1e-9f);
+                phi_vals[k]  = ft8_sp_phi(a);
+                neg_vals[k]  = (v2c < 0.0f) ? 1 : 0;
+                phi_total   += phi_vals[k];
+                neg_total   += neg_vals[k];
+            }
+
+            for (int k = 0; k < d; ++k) {
+                const float phi_excl = fmaxf(phi_total - phi_vals[k], 1e-9f);
+                const int   neg_excl = neg_total - neg_vals[k];
+                const float sign     = ((neg_excl & 1) == 0) ? 1.0f : -1.0f;
+                shm_c2v[tid * D_MAX + k] = fmaxf(-20.0f, fminf(20.0f,
+                    sign * ft8_sp_phi(phi_excl)));
             }
         }
         __syncthreads();
+
+        // Phase 2 — Variable-node update (threads 0..173), degree-3 unrolled
+        if (tid < N) {
+            float L_j = llr_b[tid] * s_scale;
+            L_j += shm_c2v[g_var_adj[tid][0][0] * D_MAX + g_var_adj[tid][0][1]];
+            L_j += shm_c2v[g_var_adj[tid][1][0] * D_MAX + g_var_adj[tid][1][1]];
+            L_j += shm_c2v[g_var_adj[tid][2][0] * D_MAX + g_var_adj[tid][2][1]];
+            shm_L[tid] = L_j;
+        }
+        __syncthreads();
+
+        // Phase 3 — Parity check + all-zeros guard (thread 0, serial)
+        if (tid == 0) {
+            int plain_sum = 0;
+            for (int j = 0; j < N; ++j)
+                plain_sum += (shm_L[j] > 0.0f) ? 1 : 0;
+
+            bool ok = (plain_sum > 0);
+            if (ok) {
+                for (int i = 0; i < M; ++i) {
+                    const int d = g_check_deg[i];
+                    int s = 0;
+                    for (int k = 0; k < d; ++k)
+                        s += (shm_L[g_check_var_j[i][k]] > 0.0f) ? 1 : 0;
+                    if (s & 1) { ok = false; break; }
+                }
+            }
+            shm_ok = ok;
+        }
+        __syncthreads();
+
+        if (shm_ok) break;
     }
 
-    // Write output: hard decision from final stotal, parity from sc_ok.
     if (tid < N)
-        x_hat[(ptrdiff_t)b * N + tid] = (stotal[tid] > 0.0f) ? 1u : 0u;
+        x_hat[(ptrdiff_t)b * N + tid] = (shm_L[tid] > 0.0f) ? 1u : 0u;
     if (tid == 0)
-        parity[b] = sc_ok;
+        parity[b] = shm_ok;
 }
 
-void ft8_bp_decode_batch(
+void ft8_sp_flooded_decode_batch(
     uint32_t     n_candidates,
     const float* log174_d,
     uint8_t*     x_hat_d,
@@ -544,7 +348,7 @@ void ft8_bp_decode_batch(
     cudaStream_t ldpc_stream)
 {
     if (n_candidates == 0) return;
-    bp_ft8_kernel<<<(int)n_candidates, BP_BLOCK, 0, ldpc_stream>>>(
-        (int)n_candidates, log174_d, x_hat_d, parity_d);
+    sp_flooded_ft8_kernel<<<(int)n_candidates, BP_BLOCK, 0, ldpc_stream>>>(
+        (int)n_candidates, SP_MAX_ITER, log174_d, x_hat_d, parity_d);
     cudaGetLastError();
 }

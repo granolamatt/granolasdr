@@ -13,7 +13,6 @@
 #include "ft8_lib/ft8/constants.h"
 #include "gm/cuda/FT8Cuda.h"       // ContScanResult, CONT_CAND_MAX
 #include "gm/cuda/JS8Cuda.h"
-#include "gm/cuda/JS8LdpcCuda.h"   // js8_ldpc_decode_cpu
 
 // ---- CRC-12: poly 0xC06, augmented, XOR key 42 -----------------------------
 // Matches JS8Call's boost::augmented_crc<12,0xC06>(data,11) ^ 42.
@@ -510,13 +509,11 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         last_epoch_ = epoch;
     }
 
-    uint8_t xhat[174];
-
     for (uint32_t i = 0; i < n; ++i) {
-        const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
+        if (!r.parity[i]) continue;
 
-        if (!js8_ldpc_decode_cpu(llr, xhat)) continue;
-
+        const float*   llr  = r.log174 + (size_t)i * kFtxLdpcN;
+        const uint8_t* xhat = r.x_hat  + (size_t)i * kFtxLdpcN;
         const uint8_t* info = xhat + 87;
         if (!checkCRC12(info)) continue;
 

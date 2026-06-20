@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "gm/cuda/JS8Cuda.h"
 #include "gm/cuda/JS8SoftCuda.h"
+#include "gm/cuda/JS8LdpcCuda.h"
 #include "gm/hf/ft8_capture.h"
 
 namespace gm {
@@ -21,6 +22,7 @@ JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
     cudaStreamCreate(&js8_scan_stream_);
+    js8_ldpc_init_constants();
 
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
     cudaMalloc((void**)&cand_count_d_, sizeof(uint32_t));
@@ -55,6 +57,8 @@ template<int N>
 void JS8Cuda<N>::allocSlots()
 {
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
+    const size_t x_hat_bytes  = (size_t)CAND_MAX * kFtxLdpcN * sizeof(uint8_t);
+    const size_t parity_bytes = (size_t)CAND_MAX * sizeof(bool);
     for (int i = 0; i < CONTINUOUS_SLOTS; ++i) {
         ContScanResult& s = cont_slots_[i];
         cudaMalloc((void**)&s.count_d,  sizeof(uint32_t));
@@ -64,6 +68,8 @@ void JS8Cuda<N>::allocSlots()
         cudaMalloc((void**)&s.fs_d,     CAND_MAX * sizeof(uint8_t));
         cudaMalloc((void**)&s.score_d,  CAND_MAX * sizeof(int16_t));
         cudaMalloc((void**)&s.log174_d, log174_bytes);
+        cudaMalloc((void**)&s.x_hat_d,  x_hat_bytes);
+        cudaMalloc((void**)&s.parity_d, parity_bytes);
         cudaHostAlloc((void**)&s.count,  sizeof(uint32_t),           cudaHostAllocDefault);
         cudaHostAlloc((void**)&s.fo,     CAND_MAX * sizeof(int32_t), cudaHostAllocDefault);
         cudaHostAlloc((void**)&s.to,     CAND_MAX * sizeof(uint8_t), cudaHostAllocDefault);
@@ -71,6 +77,8 @@ void JS8Cuda<N>::allocSlots()
         cudaHostAlloc((void**)&s.fs,     CAND_MAX * sizeof(uint8_t), cudaHostAllocDefault);
         cudaHostAlloc((void**)&s.score,  CAND_MAX * sizeof(int16_t), cudaHostAllocDefault);
         cudaHostAlloc((void**)&s.log174, log174_bytes,               cudaHostAllocDefault);
+        cudaHostAlloc((void**)&s.x_hat,  x_hat_bytes,                cudaHostAllocDefault);
+        cudaHostAlloc((void**)&s.parity, parity_bytes,               cudaHostAllocDefault);
         cudaEventCreateWithFlags(&s.event, cudaEventDisableTiming);
     }
 }
@@ -87,6 +95,8 @@ void JS8Cuda<N>::freeSlots()
         if (s.fs_d)     cudaFree(s.fs_d);
         if (s.score_d)  cudaFree(s.score_d);
         if (s.log174_d) cudaFree(s.log174_d);
+        if (s.x_hat_d)  cudaFree(s.x_hat_d);
+        if (s.parity_d) cudaFree(s.parity_d);
         if (s.count)    cudaFreeHost(s.count);
         if (s.fo)       cudaFreeHost(s.fo);
         if (s.to)       cudaFreeHost(s.to);
@@ -94,6 +104,8 @@ void JS8Cuda<N>::freeSlots()
         if (s.fs)       cudaFreeHost(s.fs);
         if (s.score)    cudaFreeHost(s.score);
         if (s.log174)   cudaFreeHost(s.log174);
+        if (s.x_hat)    cudaFreeHost(s.x_hat);
+        if (s.parity)   cudaFreeHost(s.parity);
         if (s.event)    cudaEventDestroy(s.event);
     }
 }
@@ -161,6 +173,10 @@ void JS8Cuda<N>::scanLoop()
             time_osr_, freq_osr_, (int)CAND_MAX,
             js8_scan_stream_);
 
+        js8_sp_flooded_decode_batch(
+            slot.count_d, CAND_MAX, slot.log174_d, slot.x_hat_d, slot.parity_d,
+            js8_scan_stream_);
+
         cudaMemcpyAsync(slot.count,  slot.count_d,  sizeof(uint32_t),           cudaMemcpyDeviceToHost, js8_scan_stream_);
         cudaMemcpyAsync(slot.fo,     slot.fo_d,     CAND_MAX * sizeof(int32_t), cudaMemcpyDeviceToHost, js8_scan_stream_);
         cudaMemcpyAsync(slot.to,     slot.to_d,     CAND_MAX * sizeof(uint8_t), cudaMemcpyDeviceToHost, js8_scan_stream_);
@@ -169,6 +185,12 @@ void JS8Cuda<N>::scanLoop()
         cudaMemcpyAsync(slot.score,  slot.score_d,  CAND_MAX * sizeof(int16_t), cudaMemcpyDeviceToHost, js8_scan_stream_);
         cudaMemcpyAsync(slot.log174, slot.log174_d,
                         (size_t)CAND_MAX * kFtxLdpcN * sizeof(float),
+                        cudaMemcpyDeviceToHost, js8_scan_stream_);
+        cudaMemcpyAsync(slot.x_hat,  slot.x_hat_d,
+                        (size_t)CAND_MAX * kFtxLdpcN * sizeof(uint8_t),
+                        cudaMemcpyDeviceToHost, js8_scan_stream_);
+        cudaMemcpyAsync(slot.parity, slot.parity_d,
+                        (size_t)CAND_MAX * sizeof(bool),
                         cudaMemcpyDeviceToHost, js8_scan_stream_);
 
         cudaEventRecord(slot.event, js8_scan_stream_);
