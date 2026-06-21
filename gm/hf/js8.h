@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <zmq.hpp>
 #include "wsdict.h"
+#include "gm/hf/llr_capture.h"
 
 namespace gm { namespace cuda { struct ContScanResult; } }
 namespace gm { namespace cuda { class JS8CudaBase; } }
@@ -42,9 +43,12 @@ public:
 
 private:
     // CRC-12 + dedup + publish for one candidate; `info` is the 87-bit message
-    // (codeword + 87).  Shared by the SP-converged and OSD-fallback paths.
-    void publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
-                          const uint8_t* info, const float* llr, double unix_now);
+    // (codeword + 87).  Shared by the SP-converged ("pass") and OSD ("osd") paths.
+    // Captures labeled LLR training data on success.  Returns true if CRC passed
+    // (a real decode), even if a duplicate suppressed re-publishing.
+    bool publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
+                          const uint8_t* info, const float* llr, double unix_now,
+                          const char* status, const float* osd_dist);
 
     int         zmq_port_;
     float       symbol_period_;
@@ -64,8 +68,7 @@ private:
     std::unordered_set<std::string> seen_this_epoch_;
     uint64_t last_epoch_ = 0;
 
-    FILE*      llr_capture_   = nullptr;
-    std::mutex llr_cap_mutex_;
+    LlrCapture llr_capture_;
 
     // OSD fallback config (see setOsdConfig). Disabled by default.
     bool  osd_enable_        = false;

@@ -434,18 +434,7 @@ JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
         }
     }
 
-    if (getenv("JS8_CAPTURE_LLR")) {
-        time_t now_t = time(nullptr);
-        struct tm* tm_p = gmtime(&now_t);
-        char fname[64];
-        snprintf(fname, sizeof(fname), "js8_llr_%04d%02d%02d_%s.jsonl",
-                 tm_p->tm_year + 1900, tm_p->tm_mon + 1, tm_p->tm_mday,
-                 mode_name_);
-        for (char* p = fname; *p; ++p) if (*p == ' ') *p = '_';
-        llr_capture_ = fopen(fname, "a");
-        if (llr_capture_)
-            printf("[%s] LLR capture → %s\n", mode_name_, fname);
-    }
+    llr_capture_.openIfEnabled("JS8_CAPTURE_LLR", "js8", mode_name_);
 
     js8cuda->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
         decodeAndPublishContinuous(r);
@@ -512,12 +501,17 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         last_epoch_ = epoch;
     }
 
+    // Frequency bins that produced a valid decode this scan (pass or osd); used to
+    // keep those bins out of the "fail" training set.
+    std::unordered_set<int32_t> decoded_bins;
+
     // Pass 1: candidates the GPU star-sum SP decoder converged on.
     for (uint32_t i = 0; i < n; ++i) {
         if (!r.parity[i]) continue;
         const float*   llr  = r.log174 + (size_t)i * kFtxLdpcN;
         const uint8_t* info = r.x_hat  + (size_t)i * kFtxLdpcN + 87;
-        publishCandidate(r, i, info, llr, unix_now);
+        if (publishCandidate(r, i, info, llr, unix_now, "pass", nullptr))
+            decoded_bins.insert(r.fo[i]);
     }
 
     if (!osd_enable_) return;
@@ -525,7 +519,8 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
     // Pass 2: OSD fallback on the strongest SP failures.  Gate hard: dedup by
     // frequency bin (keep best sync score), drop anything below the score floor,
     // sort by score, cap per cycle.  This gating — not CRC alone — is what keeps
-    // the OSD-on-noise false-accept rate (~0.045%/attempt) negligible.
+    // the OSD-on-noise false-accept rate (~0.045%/attempt) negligible.  The same
+    // gated set defines the "fail" training label: strong candidates we tried.
     std::unordered_map<int32_t, uint32_t> best_by_bin;   // fo bin -> candidate idx
     for (uint32_t i = 0; i < n; ++i) {
         if (r.parity[i]) continue;
@@ -546,50 +541,49 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
     for (uint32_t i : cands) {
         const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
         float dist = 0.0f;
-        if (!js8_osd_decode(llr, osd_order_, osd_xhat, &dist)) continue;
-        if (osd_soft_thresh_ > 0.0f && dist > osd_soft_thresh_) continue;
-        publishCandidate(r, i, osd_xhat + 87, llr, unix_now);
+        bool ok = js8_osd_decode(llr, osd_order_, osd_xhat, &dist) &&
+                  (osd_soft_thresh_ <= 0.0f || dist <= osd_soft_thresh_) &&
+                  publishCandidate(r, i, osd_xhat + 87, llr, unix_now, "osd", &dist);
+        if (ok) {
+            decoded_bins.insert(r.fo[i]);
+        } else if (llr_capture_.enabled() && !decoded_bins.count(r.fo[i])) {
+            // Strong-Costas candidate the OSD gate tried but no decoder cracked.
+            float snr = (float)r.score[i] - 26.0f;
+            llr_capture_.write(mode_name_, "fail", llr, kFtxLdpcN,
+                               r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
+                               (double)composite_bin_to_rf_hz(r.fo[i], rfft_size_),
+                               (double)snr, unix_now, /*text=*/nullptr, &dist);
+        }
     }
 }
 
-void JS8::publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
-                           const uint8_t* info, const float* llr, double unix_now)
+bool JS8::publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
+                           const uint8_t* info, const float* llr, double unix_now,
+                           const char* status, const float* osd_dist)
 {
-    if (!checkCRC12(info)) return;
+    if (!checkCRC12(info)) return false;
 
     std::string raw = extractMessage12(info);
-    if (raw.empty()) return;
+    if (raw.empty()) return false;
 
     std::string from_call;
     std::string text = decodeJs8Message(info, &from_call);
 
-    // Suppress re-publishing the same message+frequency within one epoch.
+    // Suppress re-publishing the same message+frequency within one epoch.  Still a
+    // real decode, so the caller marks the bin decoded — just don't re-capture.
     std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
-    if (!seen_this_epoch_.insert(dedup_key).second) return;
+    if (!seen_this_epoch_.insert(dedup_key).second) return true;
 
     float freq_hz  = composite_bin_to_rf_hz(r.fo[i], rfft_size_);
     float time_sec = (r.to[i] + (float)r.ts[i] / (float)time_osr_) * symbol_period_;
     float snr      = (float)r.score[i] - 26.0f;
 
-    if (llr_capture_) {
-        nlohmann::json cap;
-        cap["text"] = text;
-        cap["freq"] = (double)freq_hz;
-        cap["snr"]  = (double)snr;
-        cap["unix"] = unix_now;
-        cap["fo"]   = r.fo[i];
-        cap["to"]   = (int)r.to[i];
-        cap["mode"] = mode_name_;
-        auto& la = cap["llr"] = nlohmann::json::array();
-        for (int j = 0; j < 174; ++j)
-            la.push_back((double)llr[j]);
-        std::string line = cap.dump() + "\n";
-        std::lock_guard<std::mutex> lk(llr_cap_mutex_);
-        fputs(line.c_str(), llr_capture_);
-        fflush(llr_capture_);
-    }
+    llr_capture_.write(mode_name_, status, llr, kFtxLdpcN,
+                       r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
+                       (double)freq_hz, (double)snr, unix_now, text.c_str(), osd_dist);
 
     publishDecoded(text.c_str(), from_call.c_str(), freq_hz, snr, unix_now, time_sec);
+    return true;
 }
 
 void JS8::setOsdConfig(bool enable, int order, float score_floor,

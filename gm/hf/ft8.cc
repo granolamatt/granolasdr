@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <zmq.hpp>
 
@@ -145,6 +146,8 @@ namespace hf {
                 fprintf(timing_log_, "wall_clock,epoch_time,epoch_mod15,dt_sec,freq_hz,snr,callsign\n");
             printf("FT8 timing log: ft8_timing.csv\n");
         }
+
+        llr_capture_.openIfEnabled("FT8_CAPTURE_LLR", "ft8", /*mode_tag=*/nullptr);
     }
 
     FT8::~FT8() {
@@ -248,6 +251,22 @@ namespace hf {
                 window_buf_[text] = {snr, freq_hz, r.timestamp, time_sec};
         };
 
+        // Labeled LLR training capture (one line per frequency bin per scan).
+        auto capture = [&](uint32_t i, const char* status,
+                           const char* text, const float* dist) {
+            if (!llr_capture_.enabled()) return;
+            const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
+            float freq_hz = composite_bin_to_rf_hz(r.fo[i]);
+            float snr     = (float)r.score[i] - 26.0f;
+            llr_capture_.write("FT8", status, llr, FTX_LDPC_N,
+                               r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
+                               (double)freq_hz, (double)snr, r.timestamp, text, dist);
+        };
+
+        // Frequency bins that produced a valid decode this scan (pass or osd);
+        // kept out of the "fail" set and used to dedup captures by bin.
+        std::unordered_set<int32_t> decoded_bins;
+
         // Pass 1: BP-decode every candidate; collect BP failures for OSD.
         std::vector<uint32_t> osd_fail;
         for (uint32_t i = 0; i < n; ++i) {
@@ -256,8 +275,11 @@ namespace hf {
             ftx_decode_status_t st;
             if (ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) {
                 char text[FTX_MAX_MESSAGE_LENGTH];
-                if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK)
+                if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK) {
                     publish_spot(i, text);
+                    if (!decoded_bins.count(r.fo[i])) capture(i, "pass", text, nullptr);
+                    decoded_bins.insert(r.fo[i]);
+                }
             } else if (osd_enable_ && (float)r.score[i] >= osd_score_floor_) {
                 osd_fail.push_back(i);
             }
@@ -285,14 +307,24 @@ namespace hf {
         for (uint32_t i : cands) {
             const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
             float dist = 0.0f;
-            if (!ft8_osd_decode(llr, osd_order_, plain174, &dist)) continue;
-            if (osd_soft_thresh_ > 0.0f && dist > osd_soft_thresh_) continue;
-            ftx_message_t msg;
-            ftx_decode_status_t st;
-            if (!ftx_decode_from_bits(plain174, &msg, &st)) continue;   // CRC-14 gate
-            char text[FTX_MAX_MESSAGE_LENGTH];
-            if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK)
-                publish_spot(i, text);
+            bool decoded = false;
+            if (ft8_osd_decode(llr, osd_order_, plain174, &dist) &&
+                (osd_soft_thresh_ <= 0.0f || dist <= osd_soft_thresh_)) {
+                ftx_message_t msg;
+                ftx_decode_status_t st;
+                if (ftx_decode_from_bits(plain174, &msg, &st)) {        // CRC-14 gate
+                    char text[FTX_MAX_MESSAGE_LENGTH];
+                    if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK) {
+                        publish_spot(i, text);
+                        if (!decoded_bins.count(r.fo[i])) capture(i, "osd", text, &dist);
+                        decoded_bins.insert(r.fo[i]);
+                        decoded = true;
+                    }
+                }
+            }
+            // Strong-Costas candidate the OSD gate tried but no decoder cracked.
+            if (!decoded && !decoded_bins.count(r.fo[i]))
+                capture(i, "fail", nullptr, &dist);
         }
     }
 

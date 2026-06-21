@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <zmq.hpp>
 #include "gm/Thread.h"
+#include "gm/hf/llr_capture.h"
 
 // Forward-declare CUDA types so ft8.h doesn't pull in CUDA headers.
 namespace gm { namespace cuda { class FT8Cuda; } }
@@ -58,6 +59,8 @@ private:
     std::unordered_map<std::string, WindowSpot> window_buf_;
     std::mutex   window_mu_;
     double       window_start_{0.0};
+
+    LlrCapture   llr_capture_;
 
     // OSD fallback config (see setOsdConfig). Disabled by default.
     bool  osd_enable_        = false;

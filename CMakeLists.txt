@@ -90,6 +90,7 @@ set(GM_SOURCES
     "gm/zmqcode/zmqserver.cc"
     "gm/zmqcode/zmqworker.cc"
     "gm/hf/band_map.cc"
+    "gm/hf/llr_capture.cc"
     "gm/hf/ft8.cc"
     "gm/hf/js8.cc"
     "gm/hf/jsc.cc"
