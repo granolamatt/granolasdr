@@ -31,6 +31,13 @@ public:
     // Called from contWorker via the FT8Cuda decode callback.
     void decodeAndPublishContinuous(gm::cuda::ContScanResult& r);
 
+    // Enable/configure the OSD fallback (off by default).  Runs only on BP
+    // failures whose sync score >= score_floor, deduped by frequency bin, capped
+    // at max_per_cycle per scan.  soft_thresh > 0 adds a soft-distance gate on top
+    // of CRC-14 (0 = rely on CRC alone).
+    void setOsdConfig(bool enable, int order, float score_floor,
+                      int max_per_cycle, float soft_thresh = 0.0f);
+
 private:
     gm::cuda::FT8Cuda* ft8cuda_;
     int zmq_port_;
@@ -51,6 +58,13 @@ private:
     std::unordered_map<std::string, WindowSpot> window_buf_;
     std::mutex   window_mu_;
     double       window_start_{0.0};
+
+    // OSD fallback config (see setOsdConfig). Disabled by default.
+    bool  osd_enable_        = false;
+    int   osd_order_         = 2;
+    float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
+    int   osd_max_per_cycle_ = 64;
+    float osd_soft_thresh_   = 0.0f;   // 0 = gate on CRC-14 only
 
     void publishDecoded(const char* callsign, float freq_hz, float snr,
                         double unix_time, float time_offset);

@@ -58,7 +58,9 @@ set(GM_CUDA_SOURCES
     "gm/cuda/JS8ScanCuda.cu"
     "gm/cuda/JS8FastScanCuda.cu"
     "gm/cuda/JS8LdpcCuda.cu"
+    "gm/cuda/OsdCore.cc"
     "gm/cuda/JS8Osd.cc"
+    "gm/cuda/FT8Osd.cc"
     "gm/cuda/JS8SoftCuda.cu"
     "gm/cuda/WaterfallKernel.cu"
     "gm/cuda/WaterfallCuda.cc"
@@ -127,8 +129,12 @@ add_executable(test_ldpc_sign test/test_ldpc_sign.cc)
 target_link_libraries(test_ldpc_sign gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
 
 # Host-only OSD test: compiles JS8Osd.cc directly, no CUDA link needed.
-add_executable(test_osd test/test_osd.cc gm/cuda/JS8Osd.cc)
+add_executable(test_osd test/test_osd.cc gm/cuda/JS8Osd.cc gm/cuda/OsdCore.cc)
 target_link_libraries(test_osd -lm)
+
+# FT8 OSD test: links ft8_lib for the generator table, CRC-14 and ftx_decode_from_bits.
+add_executable(test_ft8_osd test/test_ft8_osd.cc gm/cuda/FT8Osd.cc gm/cuda/OsdCore.cc)
+target_link_libraries(test_ft8_osd ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
 
 add_executable(test_ldpc_captures test/test_ldpc_captures.c)
 target_link_libraries(test_ldpc_captures ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)

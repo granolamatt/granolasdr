@@ -1,14 +1,18 @@
 
 #include <string.h>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 #include <zmq.hpp>
 
 #include "gm/hf/ft8.h"
 #include "gm/hf/ft8_capture.h"
 #include "gm/hf/band_map.h"
 #include "gm/cuda/FT8Cuda.h"
+#include "gm/cuda/FT8Osd.h"
 #include "wsdict.h"
 #include "third_party/nlohmann_json.hpp"
 
@@ -233,27 +237,73 @@ namespace hf {
         if (r.timestamp - window_start_ >= 15.0)
             flushWindow(r.timestamp);
 
+        // Keep best SNR per callsign within the current 15s window.
+        auto publish_spot = [&](uint32_t i, const char* text) {
+            float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
+            float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
+            float snr      = (float)r.score[i] - 26.0f;
+            std::lock_guard<std::mutex> lk(window_mu_);
+            auto it = window_buf_.find(text);
+            if (it == window_buf_.end() || snr > it->second.snr)
+                window_buf_[text] = {snr, freq_hz, r.timestamp, time_sec};
+        };
+
+        // Pass 1: BP-decode every candidate; collect BP failures for OSD.
+        std::vector<uint32_t> osd_fail;
         for (uint32_t i = 0; i < n; ++i) {
             const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
             ftx_message_t msg;
             ftx_decode_status_t st;
-            if (!ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) continue;
-
-            char text[FTX_MAX_MESSAGE_LENGTH];
-            ftx_message_rc_t rc = ftx_message_decode(&msg, &hash_if, text);
-            if (rc != FTX_MESSAGE_RC_OK) continue;
-
-            float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
-            float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
-            float snr      = (float)r.score[i] - 26.0f;
-
-            // Keep best SNR per callsign within the current 15s window.
-            std::lock_guard<std::mutex> lk(window_mu_);
-            auto it = window_buf_.find(text);
-            if (it == window_buf_.end() || snr > it->second.snr) {
-                window_buf_[text] = {snr, freq_hz, r.timestamp, time_sec};
+            if (ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) {
+                char text[FTX_MAX_MESSAGE_LENGTH];
+                if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK)
+                    publish_spot(i, text);
+            } else if (osd_enable_ && (float)r.score[i] >= osd_score_floor_) {
+                osd_fail.push_back(i);
             }
         }
+
+        if (!osd_enable_ || osd_fail.empty()) return;
+
+        // Pass 2: OSD fallback on the strongest BP failures.  Dedup by frequency
+        // bin (keep best sync score), sort by score, cap per cycle — this gating,
+        // not CRC-14 alone, holds the OSD-on-noise false-accept rate negligible.
+        std::unordered_map<int32_t, uint32_t> best_by_bin;
+        for (uint32_t i : osd_fail) {
+            auto it = best_by_bin.find(r.fo[i]);
+            if (it == best_by_bin.end() || r.score[i] > r.score[it->second])
+                best_by_bin[r.fo[i]] = i;
+        }
+        std::vector<uint32_t> cands;
+        cands.reserve(best_by_bin.size());
+        for (const auto& kv : best_by_bin) cands.push_back(kv.second);
+        std::sort(cands.begin(), cands.end(),
+                  [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
+        if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
+
+        uint8_t plain174[FTX_LDPC_N];
+        for (uint32_t i : cands) {
+            const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
+            float dist = 0.0f;
+            if (!ft8_osd_decode(llr, osd_order_, plain174, &dist)) continue;
+            if (osd_soft_thresh_ > 0.0f && dist > osd_soft_thresh_) continue;
+            ftx_message_t msg;
+            ftx_decode_status_t st;
+            if (!ftx_decode_from_bits(plain174, &msg, &st)) continue;   // CRC-14 gate
+            char text[FTX_MAX_MESSAGE_LENGTH];
+            if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK)
+                publish_spot(i, text);
+        }
+    }
+
+    void FT8::setOsdConfig(bool enable, int order, float score_floor,
+                           int max_per_cycle, float soft_thresh)
+    {
+        osd_enable_        = enable;
+        osd_order_         = order;
+        osd_score_floor_   = score_floor;
+        osd_max_per_cycle_ = max_per_cycle;
+        osd_soft_thresh_   = soft_thresh;
     }
 
 }
