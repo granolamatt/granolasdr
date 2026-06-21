@@ -5,6 +5,8 @@
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "gm/hf/js8.h"
 #include "gm/hf/jsc.h"
@@ -13,6 +15,7 @@
 #include "ft8_lib/ft8/constants.h"
 #include "gm/cuda/FT8Cuda.h"       // ContScanResult, CONT_CAND_MAX
 #include "gm/cuda/JS8Cuda.h"
+#include "gm/cuda/JS8Osd.h"        // js8_osd_decode
 
 // ---- CRC-12: poly 0xC06, augmented, XOR key 42 -----------------------------
 // Matches JS8Call's boost::augmented_crc<12,0xC06>(data,11) ^ 42.
@@ -509,48 +512,94 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         last_epoch_ = epoch;
     }
 
+    // Pass 1: candidates the GPU star-sum SP decoder converged on.
     for (uint32_t i = 0; i < n; ++i) {
         if (!r.parity[i]) continue;
-
         const float*   llr  = r.log174 + (size_t)i * kFtxLdpcN;
-        const uint8_t* xhat = r.x_hat  + (size_t)i * kFtxLdpcN;
-        const uint8_t* info = xhat + 87;
-        if (!checkCRC12(info)) continue;
-
-        std::string raw = extractMessage12(info);
-        if (raw.empty()) continue;
-
-        std::string from_call;
-        std::string text = decodeJs8Message(info, &from_call);
-
-        // Suppress re-publishing the same message+frequency within one epoch.
-        std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
-        if (!seen_this_epoch_.insert(dedup_key).second) continue;
-
-        float freq_hz  = composite_bin_to_rf_hz(r.fo[i], rfft_size_);
-        float time_sec = (r.to[i] + (float)r.ts[i] / (float)time_osr_) * symbol_period_;
-        float snr      = (float)r.score[i] - 26.0f;
-
-        if (llr_capture_) {
-            nlohmann::json cap;
-            cap["text"] = text;
-            cap["freq"] = (double)freq_hz;
-            cap["snr"]  = (double)snr;
-            cap["unix"] = unix_now;
-            cap["fo"]   = r.fo[i];
-            cap["to"]   = (int)r.to[i];
-            cap["mode"] = mode_name_;
-            auto& la = cap["llr"] = nlohmann::json::array();
-            for (int j = 0; j < 174; ++j)
-                la.push_back((double)llr[j]);
-            std::string line = cap.dump() + "\n";
-            std::lock_guard<std::mutex> lk(llr_cap_mutex_);
-            fputs(line.c_str(), llr_capture_);
-            fflush(llr_capture_);
-        }
-
-        publishDecoded(text.c_str(), from_call.c_str(), freq_hz, snr, unix_now, time_sec);
+        const uint8_t* info = r.x_hat  + (size_t)i * kFtxLdpcN + 87;
+        publishCandidate(r, i, info, llr, unix_now);
     }
+
+    if (!osd_enable_) return;
+
+    // Pass 2: OSD fallback on the strongest SP failures.  Gate hard: dedup by
+    // frequency bin (keep best sync score), drop anything below the score floor,
+    // sort by score, cap per cycle.  This gating — not CRC alone — is what keeps
+    // the OSD-on-noise false-accept rate (~0.045%/attempt) negligible.
+    std::unordered_map<int32_t, uint32_t> best_by_bin;   // fo bin -> candidate idx
+    for (uint32_t i = 0; i < n; ++i) {
+        if (r.parity[i]) continue;
+        if ((float)r.score[i] < osd_score_floor_) continue;
+        auto it = best_by_bin.find(r.fo[i]);
+        if (it == best_by_bin.end() || r.score[i] > r.score[it->second])
+            best_by_bin[r.fo[i]] = i;
+    }
+
+    std::vector<uint32_t> cands;
+    cands.reserve(best_by_bin.size());
+    for (const auto& kv : best_by_bin) cands.push_back(kv.second);
+    std::sort(cands.begin(), cands.end(),
+              [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
+    if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
+
+    uint8_t osd_xhat[kFtxLdpcN];
+    for (uint32_t i : cands) {
+        const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
+        float dist = 0.0f;
+        if (!js8_osd_decode(llr, osd_order_, osd_xhat, &dist)) continue;
+        if (osd_soft_thresh_ > 0.0f && dist > osd_soft_thresh_) continue;
+        publishCandidate(r, i, osd_xhat + 87, llr, unix_now);
+    }
+}
+
+void JS8::publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
+                           const uint8_t* info, const float* llr, double unix_now)
+{
+    if (!checkCRC12(info)) return;
+
+    std::string raw = extractMessage12(info);
+    if (raw.empty()) return;
+
+    std::string from_call;
+    std::string text = decodeJs8Message(info, &from_call);
+
+    // Suppress re-publishing the same message+frequency within one epoch.
+    std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
+    if (!seen_this_epoch_.insert(dedup_key).second) return;
+
+    float freq_hz  = composite_bin_to_rf_hz(r.fo[i], rfft_size_);
+    float time_sec = (r.to[i] + (float)r.ts[i] / (float)time_osr_) * symbol_period_;
+    float snr      = (float)r.score[i] - 26.0f;
+
+    if (llr_capture_) {
+        nlohmann::json cap;
+        cap["text"] = text;
+        cap["freq"] = (double)freq_hz;
+        cap["snr"]  = (double)snr;
+        cap["unix"] = unix_now;
+        cap["fo"]   = r.fo[i];
+        cap["to"]   = (int)r.to[i];
+        cap["mode"] = mode_name_;
+        auto& la = cap["llr"] = nlohmann::json::array();
+        for (int j = 0; j < 174; ++j)
+            la.push_back((double)llr[j]);
+        std::string line = cap.dump() + "\n";
+        std::lock_guard<std::mutex> lk(llr_cap_mutex_);
+        fputs(line.c_str(), llr_capture_);
+        fflush(llr_capture_);
+    }
+
+    publishDecoded(text.c_str(), from_call.c_str(), freq_hz, snr, unix_now, time_sec);
+}
+
+void JS8::setOsdConfig(bool enable, int order, float score_floor,
+                       int max_per_cycle, float soft_thresh)
+{
+    osd_enable_        = enable;
+    osd_order_         = order;
+    osd_score_floor_   = score_floor;
+    osd_max_per_cycle_ = max_per_cycle;
+    osd_soft_thresh_   = soft_thresh;
 }
 
 } // namespace hf

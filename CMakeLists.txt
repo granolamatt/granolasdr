@@ -58,6 +58,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/JS8ScanCuda.cu"
     "gm/cuda/JS8FastScanCuda.cu"
     "gm/cuda/JS8LdpcCuda.cu"
+    "gm/cuda/JS8Osd.cc"
     "gm/cuda/JS8SoftCuda.cu"
     "gm/cuda/WaterfallKernel.cu"
     "gm/cuda/WaterfallCuda.cc"
@@ -124,6 +125,10 @@ target_link_libraries (decode_corpus ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.
 
 add_executable(test_ldpc_sign test/test_ldpc_sign.cc)
 target_link_libraries(test_ldpc_sign gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm cudart)
+
+# Host-only OSD test: compiles JS8Osd.cc directly, no CUDA link needed.
+add_executable(test_osd test/test_osd.cc gm/cuda/JS8Osd.cc)
+target_link_libraries(test_osd -lm)
 
 add_executable(test_ldpc_captures test/test_ldpc_captures.c)
 target_link_libraries(test_ldpc_captures ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)

@@ -33,7 +33,19 @@ public:
 
     void decodeAndPublishContinuous(gm::cuda::ContScanResult& r);
 
+    // Enable/configure the OSD fallback (off by default).  Runs only on SP
+    // parity failures whose sync score >= score_floor, deduped by frequency bin,
+    // capped at max_per_cycle per scan.  soft_thresh > 0 adds a soft-distance
+    // gate on top of CRC-12 (0 = rely on CRC alone).
+    void setOsdConfig(bool enable, int order, float score_floor,
+                      int max_per_cycle, float soft_thresh = 0.0f);
+
 private:
+    // CRC-12 + dedup + publish for one candidate; `info` is the 87-bit message
+    // (codeword + 87).  Shared by the SP-converged and OSD-fallback paths.
+    void publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
+                          const uint8_t* info, const float* llr, double unix_now);
+
     int         zmq_port_;
     float       symbol_period_;
     float       cycle_secs_;
@@ -54,6 +66,13 @@ private:
 
     FILE*      llr_capture_   = nullptr;
     std::mutex llr_cap_mutex_;
+
+    // OSD fallback config (see setOsdConfig). Disabled by default.
+    bool  osd_enable_        = false;
+    int   osd_order_         = 2;
+    float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
+    int   osd_max_per_cycle_ = 64;
+    float osd_soft_thresh_   = 0.0f;   // 0 = gate on CRC-12 only
 };
 
 } // namespace hf

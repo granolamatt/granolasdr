@@ -1,6 +1,8 @@
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <complex>
 #include <thread>
 #include <zmq.hpp>
@@ -103,6 +105,25 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                                       kWsDictPort, wf_floor, wf_ceil);
     waterfall.start();
 
+    // OSD LDPC fallback, off unless JS8_OSD is set in the environment.  Applied
+    // uniformly to every JS8 speed.  Tunables (optional):
+    //   JS8_OSD                enable (presence)
+    //   JS8_OSD_SCORE_FLOOR    min Costas sync score to attempt OSD (default 0)
+    //   JS8_OSD_MAX            max OSD attempts per scan cycle      (default 64)
+    // See gm/hf/js8.cc:setOsdConfig.  Gating bounds the OSD-on-noise false-accept
+    // rate (~0.045%/attempt); CRC-12 is the final discriminator.
+    const bool  osd_enable = std::getenv("JS8_OSD") != nullptr;
+    const float osd_floor  = std::getenv("JS8_OSD_SCORE_FLOOR")
+                                 ? std::stof(std::getenv("JS8_OSD_SCORE_FLOOR")) : 0.0f;
+    const int   osd_max    = std::getenv("JS8_OSD_MAX")
+                                 ? std::stoi(std::getenv("JS8_OSD_MAX")) : 64;
+    auto apply_osd = [&](gm::hf::JS8* j) {
+        if (j) j->setOsdConfig(osd_enable, /*order=*/2, osd_floor, osd_max);
+    };
+    if (osd_enable)
+        printf("JS8 OSD fallback: ENABLED (order=2, score_floor=%.1f, max_per_cycle=%d)\n",
+               (double)osd_floor, osd_max);
+
     std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
     std::unique_ptr<gm::hf::JS8>            js8_obj;
     if (enable_js8) {
@@ -187,6 +208,12 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
             kUltraSymPer, kUltraCycleSec, kUltraTimeOsr, kUltraRfftLen,
             "JS8 Ultra", kWsDictPort);
     }
+
+    apply_osd(js8_obj.get());
+    apply_osd(js8fast_obj.get());
+    apply_osd(js8slow_obj.get());
+    apply_osd(js8turbo_obj.get());
+    apply_osd(js8ultra_obj.get());
 
     while (true) {
         usleep(1000000);
