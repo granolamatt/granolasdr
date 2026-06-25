@@ -3,6 +3,15 @@ services:
     build: .
     image: ghcr.io/granolamatt/granolasdr:latest
     command: ["./build/hf_rx", "--js8", "--js8-fast", "--js8-slow", "--js8-turbo", "--js8-ultra", "--tci-port=40001"]
+    environment:
+      # OSD LDPC fallback. The binary defaults to OFF; enabled here to match
+      # production runs. Presence of <MODE>_OSD enables; SCORE_FLOOR gates OSD
+      # attempts by Costas sync score (6 = only strong-sync candidates).
+      # FT8_* are inert unless --ft8 is added to command above.
+      - JS8_OSD=1
+      - JS8_OSD_SCORE_FLOOR=6
+      - FT8_OSD=1
+      - FT8_OSD_SCORE_FLOOR=6
     devices:
       - /dev/bus/usb:/dev/bus/usb
     deploy:

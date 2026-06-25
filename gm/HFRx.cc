@@ -105,23 +105,26 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                                       kWsDictPort, wf_floor, wf_ceil);
     waterfall.start();
 
-    // OSD LDPC fallback, off unless the matching *_OSD env var is set.  FT8 and
-    // JS8 are configured independently.  Tunables (optional, per mode):
-    //   <MODE>_OSD                enable (presence)
-    //   <MODE>_OSD_SCORE_FLOOR    min Costas sync score to attempt OSD (default 0)
+    // OSD LDPC fallback, ON by default (score_floor 6).  FT8 and JS8 are
+    // configured independently.  Tunables (optional, per mode):
+    //   <MODE>_OSD                "0" disables; unset/any other value enables (default ON)
+    //   <MODE>_OSD_SCORE_FLOOR    min Costas sync score to attempt OSD (default 6)
     //   <MODE>_OSD_MAX            max OSD attempts per scan cycle       (default 64)
     // where <MODE> is FT8 or JS8.  See gm/hf/{ft8,js8}.cc:setOsdConfig.  Gating
     // bounds the OSD-on-noise false-accept rate (~0.045%/attempt); CRC is final.
     struct OsdEnv { bool enable; float floor; int max; };
     auto read_osd_env = [](const char* en, const char* fl, const char* mx) -> OsdEnv {
-        return { std::getenv(en) != nullptr,
-                 std::getenv(fl) ? std::stof(std::getenv(fl)) : 0.0f,
+        const char* e = std::getenv(en);
+        return { (e == nullptr) || (std::string(e) != "0"),  // default ON; <MODE>_OSD=0 disables
+                 std::getenv(fl) ? std::stof(std::getenv(fl)) : 6.0f,
                  std::getenv(mx) ? std::stoi(std::getenv(mx)) : 64 };
     };
     auto log_osd = [](const char* mode, const OsdEnv& o) {
         if (o.enable)
             printf("%s OSD fallback: ENABLED (order=2, score_floor=%.1f, max_per_cycle=%d)\n",
                    mode, (double)o.floor, o.max);
+        else
+            printf("%s OSD fallback: disabled (%s_OSD=0)\n", mode, mode);
     };
 
     const OsdEnv ft8_osd = read_osd_env("FT8_OSD", "FT8_OSD_SCORE_FLOOR", "FT8_OSD_MAX");
