@@ -1,8 +1,13 @@
 # JS8 Normal Decode — Phase 10 CEO Plan
 
+**Status:** ✅ COMPLETE (shipped 2026-06-27)  
 **Mode:** SELECTIVE EXPANSION  
 **Authored:** 2026-05-27  
 **Review:** /plan-ceo-review
+
+> **Done.** JS8 Normal decode shipped via the ring-sharing architecture as planned.
+> Note: LDPC decode has since moved out of granolasdr to `../qp-admm`; granolasdr now
+> captures LLRs only and hands them off. The plan below is retained as a historical record.
 
 ---
 

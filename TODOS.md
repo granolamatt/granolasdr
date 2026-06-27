@@ -1,10 +1,11 @@
 # TODOS
 
-Updated 2026-06-09.
+Updated 2026-06-27.
 
-## TCI Server (WSJT-X audio interface)
+## TCI Server (WSJT-X audio interface) — ✅ COMPLETE (active 2026-06-27)
 
-CEO review complete (2026-06-09). Eng review required before implement.
+Shipped and active. WSJT-X audio interface live. Original plan retained below for reference.
+(IQ stream item TC-IQ remains deferred — see P3.)
 
 **P1 — core:**
 - **TC1** `wsserver/src/tci.rs` (new): TCI server module — init sequence with RX_ENABLE (×4), AUDIO_START/STOP subscription, audio accumulator (480 samples/10ms per sink), INT16 conversion (u32::to_le_bytes serialization), auto-start 1s after READY, VFO command queue draining-to-empty per tick, RX_CHANNEL_SENSORS at 1 Hz (dBFS from norm_ema_h_ via tci_push_smeter). Runs in existing tokio runtime via OnceLock<Handle>. **VERIFY Stream struct binary format against ExpertSDR3/TCI repo spec before implementing serialization.**
@@ -40,9 +41,10 @@ CEO review complete (2026-06-09). Eng review required before implement.
   Context: TCI IQ frame uses StreamType::IQ_STREAM=0, same Stream struct. Would need `tci_push_iq(const complex<float>* buf, count)` FFI and a subscriber path from HFChannelizer output.
   Effort: M (human ~1 day / CC ~30 min). No deps on audio path.
 
-## Phase 15: Turbo + Ultra JS8 modes
+## Phase 15: Turbo + Ultra JS8 modes — ✅ COMPLETE (shipped 2026-06-27)
 
-CEO review complete (2026-06-09). Eng review complete (2026-06-09). Ready to implement.
+Turbo and Ultra modes shipped. granolasdr now decodes all five JS8 speed modes
+simultaneously. Original plan retained below for reference.
 
 **P1 — bug fixes (do first):**
 - **T1** `gm/HFRx.cc`: Fix cap_blocks — kNormalCapBlks 106→108, kFastCapBlks 100→108, kSlowCapBlks 94→108
@@ -73,38 +75,19 @@ CEO review complete (2026-06-09). Eng review complete (2026-06-09). Ready to imp
 
 
 
-## Remaining Phase 12 work
+## Remaining Phase 12 work — ✅ COMPLETE
 
-Phase 11 (MagBlock, DeviceRingBuffer, JS8 integration) and Phase 12 (epoch
-scan removal, 15s window accumulation, BufferFile, flow graph cleanup) are
-complete. The following items remain from the original Phase 12 list:
+Phase 11 and Phase 12 complete, including the previously-open items (wideband
+waterfall resolution, CUDA error checking on FT8Cuda/JS8Cuda launches, corpus
+re-enable).
 
-- **Wideband waterfall resolution fix**: 2048 bins over 0–70 MHz gives ~34 kHz/bin — too coarse.
-  Easiest fix: clamp the quadratic mapping to `[0, 30 MHz]` only by setting
-  `rfft_bin_max = round(30e6 / 6.25)` before mapping to 2048 output bins.
-  Gives ~7 kHz/bin across the amateur HF window with no canvas changes.
+## Docker deployment — ✅ COMPLETE
 
-- **CUDA error checking**: add `cudaGetLastError()` checks to FT8Cuda + JS8Cuda
-  kernel launches (MagBlock already has this from Phase 11).
+Docker smoke test and layer caching complete.
 
-- **Corpus re-enable**: MagBlock exposes `demodFT8_d` callback so a
-  `--record`-based corpus capture path can be used for JTDX/WSJT-X comparison.
+## LDPC decode → moved to ../qp-admm
 
-## Docker deployment
-
-- **Docker smoke test** (P2, S effort): Add a compose `healthcheck` or standalone script that
-  verifies `hf_rx` started cleanly — e.g. `curl http://localhost:8765/` returns 200 within 30s.
-  Context: Docker image has no automated test; currently users must manually check `docker logs`.
-  Start in `docker-compose.yml` healthcheck block using curl.
-
-- **Docker layer caching** (P3, S effort): Split cmake configure from make into separate `RUN`
-  layers so source code changes don't invalidate the dependency install layers and trigger a
-  full 30-min CUDA rebuild. Currently cmake configure + nvcc compile are in one `RUN` layer.
-
-## QP-ADMM vs BP convergence baseline
-
-Measure decode counts per epoch on corpus recordings with both decoders
-at equal SNR. Target: QP-ADMM ≥ BP at FT8_GPU_CAND_MAX=500.
-Gate: if QP-ADMM loses >2% decodes vs BP on real traffic, investigate
-rho/max_iter tuning before enabling by default.
-Prerequisite: corpus session recorded with `--record`.
+LDPC decode (QP-ADMM, BP, OSD fallback) has moved out of granolasdr to the
+`../qp-admm` repo. granolasdr's role is now **LLR capture only**: it produces
+labeled LLRs (pass/osd/fail) and hands them off. Decoder convergence work,
+the QP-ADMM vs BP baseline, and any decoder tuning now live in `../qp-admm`.
