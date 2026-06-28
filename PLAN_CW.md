@@ -391,8 +391,8 @@ Synthesized from this review. P1 blocks ship, P2 same branch, P3 follow-up. Effo
 - [ ] **T3 (P1, human ~3h / CC ~20m)** — Phase -1 — extract shared composite-builder (bin-select + assemble + IFFT) from HFChannelizer for DRY reuse by CWChannelizer.
 - [ ] **T4 (P1, human ~1d / CC ~40m)** — Phase -1 — `gm/cuda/CWChannelizer.h/.cc`: 8192-pt CW composite IFFT → 819.2 kHz; own stream; const-ref wideband FFT; forward-construct in HFRx.cc behind `--cw`.
 - [ ] **T5 (P1, human ~2h / CC ~15m)** — Phase -1 — `test_cw_channelizer` (CUDA) + the **CRITICAL** FT8/JS8 byte-identical decoupling regression.
-- [ ] **T6 (P1, human ~1d / CC ~45m)** — Phase 0 — `gm/hf/cw_morse.h/.cc`: pure-CPU decoder core (threshold, dit estimate, element/gap classify, Morse table).
-- [ ] **T7 (P1, human ~4h / CC ~30m)** — Phase 0 — `test_cw_morse` (host-only, no CUDA) covering every branch + the synthetic golden-message eval grid (WPM×SNR).
+- [x] **T6 (P1) DONE** — Phase 0 — `gm/hf/cw_morse.h/.cc`: pure-CPU decoder core (smoothing + AGC + Otsu + two-pass timing + Morse table). Commit 042f5a4.
+- [x] **T7 (P1) DONE** — Phase 0 — `test_cw_morse` host-only gate: clean 18/26/36 WPM exact, adaptive lock, 12 dB noise, workable QSB. Commit 042f5a4.
 - [ ] **T8 (P1, human ~2h / CC ~15m)** — Phase 0 — `test/cw_decode_offline.cc`: `--record` capture → cw_morse → text; validate vs fldigi/known. **GATE.**
 - [ ] **T9 (P1, human ~1d / CC ~40m)** — Phase 1 — `gm/cuda/CWSkimmerCuda.h/.cc` + `CWKernel.cu`: peak-detect + envelope gather; own stream; `test_cw_skimmer`.
 - [ ] **T10 (P1, human ~1d / CC ~45m)** — Phase 2 — `gm/hf/cw.h/.cc`: drive cw_morse per active bin, batched; carrier-drift tracking; wire CWSkimmerCuda → gm::hf::CW.
