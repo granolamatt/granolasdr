@@ -13,6 +13,7 @@
 #include "gm/rx888/rx888.h"
 
 #include "gm/hf/hf_bands.h"
+#include "gm/hf/cw_bands.h"
 #include "third_party/nlohmann_json.hpp"
 #include "wsdict.h"
 #include "tci_server.h"
@@ -37,8 +38,9 @@ static const struct { const char* name; uint32_t freq_hz; } kFT8Presets[] = {
 static const int kNumFT8Presets = (int)(sizeof(kFT8Presets) / sizeof(kFT8Presets[0]));
 
 HFChannelizer::HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP,
-                              int wsdict_port) :
+                              int wsdict_port, bool cw_enabled) :
 inPos(inP),
+cw_enabled_(cw_enabled),
 inData_d(NULL),
 fftInData_d(NULL),
 fftData_d(NULL),
@@ -132,6 +134,31 @@ wsdict_port_(wsdict_port) {
         printf("Audio ring: %.1f MB pinned (%d slots × %d sinks × %d bins)\n",
                (double)audio_ring_bytes / 1e6, AUDIO_RING, NUM_SINKS, AUDIO_BINS);
 
+        // CW skimmer second composite (--cw): pack kCWBands from the same
+        // wideband FFT into an 8192-pt IFFT -> 819.2 kHz, emitted on its own
+        // BufferPosition.  Additive: when disabled, none of this runs and the
+        // FT8/JS8 path above is untouched.
+        if (cw_enabled_) {
+            cw_fft_length = kCWCompositeFFT;          // 8192
+            cw_bins.resize(kNumCWBands);
+            uint32_t cw_total = 0;
+            for (int i = 0; i < kNumCWBands; ++i) {
+                cw_bins[i] = {kCWBands[i].wb_start, kCWBands[i].wb_end, kCWBands[i].bw};
+                cw_total += kCWBands[i].bw;
+            }
+            cuda_check_error(cudaMalloc((void**)&cwChannelData_d,
+                cw_fft_length * sizeof(std::complex<float>) + 1024));
+            cuda_check_error(cudaMalloc((void**)&cwDemodData_d,
+                BUFFERS * cw_fft_length / 2 * sizeof(std::complex<float>) + 1024));
+            cwBufferPosition.setBuffer(cwDemodData_d, {BUFFERS, cw_fft_length / 2});
+            cufftResult cwr = cufftPlan1d(&cw_iplan, cw_fft_length, CUFFT_C2C, 1);
+            if (cwr) printf("HFChannelizer: CW cufftPlan1d (C2C) failed\n");
+            cwr = cufftSetStream(cw_iplan, stream);
+            if (cwr) printf("HFChannelizer: CW cufftSetStream failed\n");
+            printf("CW composite: %d bands, %u/%u bins -> %u-pt IFFT (819.2 kHz), %u samples/block\n",
+                   kNumCWBands, cw_total, cw_fft_length, cw_fft_length, cw_fft_length / 2);
+        }
+
         cmd_thread_ = std::thread(&HFChannelizer::cmdWorker, this);
         cmd_thread_.detach();
 
@@ -151,15 +178,19 @@ HFChannelizer::~HFChannelizer() {
     if (fftData_d) cudaFree(fftData_d);
     if (channelData_d) cudaFree(channelData_d);
     if (demodData_d) cudaFree(demodData_d);
+    if (cwChannelData_d) cudaFree(cwChannelData_d);
+    if (cwDemodData_d) cudaFree(cwDemodData_d);
     cufftDestroy(plan);
     cufftDestroy(iplan);
     cufftDestroy(audio_plan);
+    if (cw_iplan) cufftDestroy(cw_iplan);
     cudaStreamDestroy(stream);
 }
 
 int HFChannelizer::doCopy(uint64_t now) {
     try {
         static gm::buffer::BufferPosition<std::complex<float>>* bpos = &hfBufferPosition;
+        static gm::buffer::BufferPosition<std::complex<float>>* cw_bpos = &cwBufferPosition;
         size_t length = inShape[1];
         int in_position = (now % inShape[0]) * length;
 
@@ -320,6 +351,36 @@ int HFChannelizer::doCopy(uint64_t now) {
             *pos += 1;
         }
         , (void *)&buffer_number, 0);
+
+        // CW skimmer second composite: pack kCWBands from the same wideband FFT
+        // (fftData_d, already computed above) into the 8192-pt CW IFFT and emit
+        // on cwBufferPosition.  No SpectrumNorm gains (CW bands are outside the
+        // FT8/JS8 norm windows; raw |FFT| is fine for a narrowband tone scan).
+        if (cw_enabled_) {
+            uint32_t cwoff = 0;
+            cuda_check_error(cudaMemsetAsync(cwChannelData_d, 0,
+                cw_fft_length * sizeof(std::complex<float>), stream));
+            for (const std::vector<uint32_t>& b : cw_bins) {
+                cuda_check_error(cudaMemcpyAsync(&cwChannelData_d[cwoff],
+                    &fftData_d[b[0]],
+                    b[2] * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
+                cwoff += b[2];
+            }
+            cufftResult_t cwval = cufftExecC2C(cw_iplan, (cufftComplex*)cwChannelData_d,
+                (cufftComplex*)cwChannelData_d, CUFFT_INVERSE);
+            if (cwval) printf("Error in CW composite IFFT\n");
+            cuda_check_error(cudaMemcpyAsync(
+                &cwDemodData_d[(cw_buffer_number % BUFFERS) * (cw_fft_length / 2)],
+                &cwChannelData_d[cw_fft_length / 4],
+                cw_fft_length / 2 * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
+            cudaStreamAddCallback(stream,
+            [](cudaStream_t mstream, cudaError_t status, void *data) {
+                uint64_t* pos = (uint64_t*)data;
+                cw_bpos->setPosition(*pos, 1);
+                *pos += 1;
+            }
+            , (void *)&cw_buffer_number, 0);
+        }
 
         return 1;
     } catch (thrust::system_error &e) {

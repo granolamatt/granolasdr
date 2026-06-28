@@ -85,7 +85,8 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         float min_score, bool enable_js8, bool enable_js8_fast,
                         bool enable_js8_slow, bool enable_js8_turbo, bool enable_js8_ultra,
                         int wf_bin_start, int wf_bin_end,
-                        bool legacy_costas, uint8_t wf_floor, uint8_t wf_ceil) {
+                        bool legacy_costas, uint8_t wf_floor, uint8_t wf_ceil,
+                        gm::buffer::BufferPosition<std::complex<float>>* cwbuf = nullptr) {
 
     // RAII order: MagBlocks own ring memory; all readers hold const refs.
     // C++ destroys in reverse declaration order (readers before rings).
@@ -228,6 +229,18 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     apply_osd(js8turbo_obj.get());
     apply_osd(js8ultra_obj.get());
 
+    // CW skimmer (--cw): the CW composite (819.2 kHz, 9 CW sub-bands) feeds a
+    // dedicated CW MagBlock at rfft=16384/osr4 -> 50 Hz/bin, 20 ms window, 5 ms
+    // hop.  Phase -1: build the ring so CW signals are visible; CWSkimmerCuda +
+    // gm::hf::CW decode land in Phase 1+.
+    std::unique_ptr<gm::cuda::MagBlock<128>> magblock_cw;
+    if (cwbuf) {
+        magblock_cw = std::make_unique<gm::cuda::MagBlock<128>>(
+            cwbuf, /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
+        magblock_cw->start();
+        printf("CW skimmer: ring up (16384-pt FFT @ 819.2 kHz -> 50 Hz/bin, 20 ms window)\n");
+    }
+
     while (true) {
         usleep(1000000);
     }
@@ -240,6 +253,7 @@ int main(int argc, char* argv[]) {
     bool        enable_js8_slow  = false;
     bool        enable_js8_turbo = false;
     bool        enable_js8_ultra = false;
+    bool        enable_cw        = false;
     bool        legacy_costas   = true;
     int         tci_port        = 40001;  // 0 = disabled
     float       tci_gain        = 1.0f;
@@ -275,6 +289,8 @@ int main(int argc, char* argv[]) {
             enable_js8_slow = true;
         } else if (strcmp(argv[i], "--js8-turbo") == 0) {
             enable_js8_turbo = true;
+        } else if (strcmp(argv[i], "--cw") == 0) {
+            enable_cw = true;
         } else if (strcmp(argv[i], "--js8-ultra") == 0) {
             enable_js8_ultra = true;
         } else if (strcmp(argv[i], "--max-log-costas") == 0) {
@@ -360,7 +376,7 @@ int main(int argc, char* argv[]) {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
 
-        gm::cuda::HFChannelizer channelizer(mydsp.getRxBufferPosition(), kWsDictPort);
+        gm::cuda::HFChannelizer channelizer(mydsp.getRxBufferPosition(), kWsDictPort, enable_cw);
         channelizer.start();
 
         std::unique_ptr<gm::buffer::BufferFile<std::complex<float>>> recorder;
@@ -372,7 +388,8 @@ int main(int argc, char* argv[]) {
 
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
-                    wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil);
+                    wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil,
+                    enable_cw ? channelizer.getCWBuffer() : nullptr);
 
         // TC5/TC6 shutdown order: stop channelizer workers before TCI server
         // so tciVfoWorker never polls a destroyed Rust global.

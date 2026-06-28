@@ -19,7 +19,7 @@ namespace cuda {
 class HFChannelizer : public Thread {
 public:
     HFChannelizer(gm::buffer::BufferPosition<int16_t>* inP,
-                  int wsdict_port = 8765);
+                  int wsdict_port = 8765, bool cw_enabled = false);
     ~HFChannelizer();
     void run();
     void stop() {
@@ -31,6 +31,13 @@ public:
     }
     gm::buffer::BufferPosition<std::complex<float>>* getBuffer() {
         return &hfBufferPosition;
+    }
+    // Second composite output: CW sub-bands (kCWBands) packed into an 8192-pt
+    // IFFT -> 819.2 kHz.  Only produced when cw_enabled (--cw); null/idle
+    // otherwise.  Built in-place from the same wideband FFT as the FT8/JS8
+    // composite, so the FT8/JS8 path is byte-identical regardless.
+    gm::buffer::BufferPosition<std::complex<float>>* getCWBuffer() {
+        return &cwBufferPosition;
     }
 
 
@@ -47,6 +54,16 @@ private:
     uint64_t buffer_number;
 
     gm::buffer::BufferPosition<std::complex<float>> hfBufferPosition;
+
+    // CW skimmer second composite (parallel to hfBufferPosition; --cw only).
+    bool          cw_enabled_{false};
+    gm::buffer::BufferPosition<std::complex<float>> cwBufferPosition;
+    cufftHandle   cw_iplan{0};
+    std::complex<float>* cwChannelData_d{nullptr};   // cw_fft_length, packed+IFFT scratch
+    std::complex<float>* cwDemodData_d{nullptr};     // BUFFERS × cw_fft_length/2 ring
+    std::vector<std::vector<uint32_t>> cw_bins;       // {wb_start, wb_end, bw} per CW band
+    uint32_t      cw_fft_length{0};
+    uint64_t      cw_buffer_number{0};
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
