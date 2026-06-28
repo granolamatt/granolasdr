@@ -133,6 +133,10 @@ target_link_libraries(test_ldpc_sign gmcuda ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/
 add_executable(test_osd test/test_osd.cc gm/cuda/JS8Osd.cc gm/cuda/OsdCore.cc)
 target_link_libraries(test_osd -lm)
 
+# Host-only CW Morse decoder test (Phase 0 gate): pure CPU, no CUDA link.
+add_executable(test_cw_morse test/test_cw_morse.cc gm/hf/cw_morse.cc)
+target_link_libraries(test_cw_morse -lm)
+
 # FT8 OSD test: links ft8_lib for the generator table, CRC-14 and ftx_decode_from_bits.
 add_executable(test_ft8_osd test/test_ft8_osd.cc gm/cuda/FT8Osd.cc gm/cuda/OsdCore.cc)
 target_link_libraries(test_ft8_osd ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
