@@ -10,6 +10,7 @@
 #include "gm/rx888/rx888.h"
 #include "gm/cuda/HFChannelizer.h"
 #include "gm/cuda/MagBlock.h"
+#include "gm/cuda/CWSkimmerCuda.h"
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/JS8Cuda.h"
 #include "gm/cuda/JS8ScanCuda.h"
@@ -233,12 +234,17 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     // dedicated CW MagBlock at rfft=16384/osr4 -> 50 Hz/bin, 20 ms window, 5 ms
     // hop.  Phase -1: build the ring so CW signals are visible; CWSkimmerCuda +
     // gm::hf::CW decode land in Phase 1+.
-    std::unique_ptr<gm::cuda::MagBlock<128>> magblock_cw;
+    std::unique_ptr<gm::cuda::MagBlock<128>>      magblock_cw;
+    std::unique_ptr<gm::cuda::CWSkimmerCuda<128>> cw_skimmer;
     if (cwbuf) {
         magblock_cw = std::make_unique<gm::cuda::MagBlock<128>>(
             cwbuf, /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
         magblock_cw->start();
-        printf("CW skimmer: ring up (16384-pt FFT @ 819.2 kHz -> 50 Hz/bin, 20 ms window)\n");
+        cw_skimmer = std::make_unique<gm::cuda::CWSkimmerCuda<128>>(
+            magblock_cw->getRing(), "CW");
+        cw_skimmer->start();
+        printf("CW skimmer: ring up (16384-pt FFT @ 819.2 kHz -> 50 Hz/bin, 20 ms window); "
+               "decode active (CW_SNR to tune threshold)\n");
     }
 
     while (true) {

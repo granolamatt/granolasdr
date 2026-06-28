@@ -72,6 +72,8 @@ set(GM_CUDA_SOURCES
     "gm/cuda/MagBlock.cc"
     "gm/cuda/FT8Cuda.cc"
     "gm/cuda/JS8Cuda.cc"
+    "gm/cuda/CWSkimmerCuda.cc"
+    "gm/hf/cw_morse.cc"
     "ft8_lib/fft/kiss_fft.c"
     )
 
