@@ -93,14 +93,44 @@ void CWSkimmerCuda<N>::worker() {
         cudaStreamSynchronize(stream_);
 
         // Per-bin detection: peak vs average over the window (keyed CW -> high gap).
+        int gmin = 255, gmax = 0; double gsum = 0;
         for (int bin = 0; bin < content_bins_; ++bin) {
             int peak = 0; long sum = 0;
             for (int s = 0; s < WSLOTS; ++s)
                 for (int r = 0; r < TOSR; ++r) {
                     int v = val(s, r, bin);
                     sum += v; if (v > peak) peak = v;
+                    if (v < gmin) gmin = v; if (v > gmax) gmax = v;
                 }
+            gsum += sum;
             snr[bin] = (float)peak - (float)sum / WROWS;
+        }
+
+        // CW_DEBUG: report the ring magnitude range + the strongest bins, so a
+        // dead/clamped scale or an absent signal is visible without a decode.
+        if (std::getenv("CW_DEBUG")) {
+            int passed = 0;
+            for (int b = 0; b < content_bins_; ++b) if (snr[b] >= SNR_THRESH) ++passed;
+            // top bin by SNR
+            int top = 0; for (int b = 1; b < content_bins_; ++b) if (snr[b] > snr[top]) top = b;
+            fprintf(stderr,
+                "[CWdbg] wi=%llu mag[min/mean/max]=%d/%.0f/%d  bins=%d thr=%.0f passed=%d  "
+                "top bin=%d (%.3f kHz) snr=%.0f\n",
+                (unsigned long long)wi, gmin, gsum / ((double)content_bins_ * WROWS), gmax,
+                content_bins_, SNR_THRESH, passed, top, binToHz(top) / 1000.0, snr[top]);
+            // coarse envelope of the top bin (50 cols, '#'=above mid, '.'=below)
+            int emin = 255, emax = 0;
+            for (int sl = 0; sl < WSLOTS; ++sl) for (int r = 0; r < TOSR; ++r) {
+                int v = val(sl, r, top); if (v < emin) emin = v; if (v > emax) emax = v;
+            }
+            int mid = (emin + emax) / 2; char line[64]; int li = 0;
+            const int step = WROWS / 50 ? WROWS / 50 : 1;
+            for (int i = 0; i < WROWS && li < 50; i += step) {
+                int sl = i / TOSR, r = i % TOSR;
+                line[li++] = (val(sl, r, top) > mid) ? '#' : '.';
+            }
+            line[li] = 0;
+            fprintf(stderr, "[CWdbg]   top env [%d..%d]: %s\n", emin, emax, line);
         }
 
         // Peak-pick: local maximum over ±2 bins (min ~200 Hz separation), SNR gate.
