@@ -159,3 +159,14 @@ target_link_libraries(test_js8_fast_gpu_scan gmcuda -lm cudart)
 
 pybind11_add_module(granolasdr gm/PythonModel.cc)
 target_link_libraries(granolasdr PRIVATE lib_granolamatt ${GM_LIBS})
+
+# Offline FT8 decode binding for the coherent/overlap experiments (host-only).
+# Compile the ft8_lib sources in directly (libft8.a is non-PIC, can't link into a .so).
+pybind11_add_module(ft8decode coherent/ft8decode.cc
+    ft8_lib/ft8/decode.c ft8_lib/ft8/message.c ft8_lib/ft8/ldpc.c
+    ft8_lib/ft8/crc.c ft8_lib/ft8/constants.c ft8_lib/ft8/text.c
+    ft8_lib/fft/kiss_fftr.c ft8_lib/fft/kiss_fft.c)
+target_include_directories(ft8decode PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/ft8 ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib)
+set_target_properties(ft8decode PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/coherent)

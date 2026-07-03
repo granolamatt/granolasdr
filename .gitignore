@@ -20,3 +20,4 @@ out.txt
 # --record complex composite captures (GNLH format, large binary)
 *.dat
 *.gnlh
+coherent/*.so
