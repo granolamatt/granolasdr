@@ -89,5 +89,36 @@ float refine_llr(const std::complex<float>* frame, int frame_len,
     return best_e;
 }
 
+void extract_frame(const std::complex<float>* in, int n_in, float freq_hz,
+                   int sr_in, std::complex<float>* out, int n_out) {
+    const int decim = sr_in / kRefineSr;                 // 32 (409600 -> 12800)
+    // Windowed-sinc lowpass, cutoff below the decimated Nyquist (kRefineSr/2).
+    const int   half = 4 * decim;                        // 128 -> 257 taps
+    const float fc   = 0.40f * (float)kRefineSr / sr_in; // ~5 kHz normalized
+    std::vector<float> h(2 * half + 1);
+    float hsum = 0.0f;
+    for (int t = -half; t <= half; ++t) {
+        float sinc = (t == 0) ? 2*fc : std::sin(2*(float)M_PI*fc*t) / ((float)M_PI*t);
+        float win  = 0.5f * (1 - std::cos(2*(float)M_PI*(t + half) / (2*half)));
+        h[t + half] = sinc * win;
+        hsum += h[t + half];
+    }
+    for (auto& v : h) v /= hsum;                         // unity DC gain
+
+    const float w = -2.0f * (float)M_PI * freq_hz / sr_in;
+    for (int k = 0; k < n_out; ++k) {
+        int c = k * decim;
+        std::complex<float> acc(0, 0);
+        for (int t = -half; t <= half; ++t) {
+            int idx = c + t;
+            if (idx < 0 || idx >= n_in) continue;
+            float ph = w * idx;
+            std::complex<float> s = in[idx] * std::complex<float>(std::cos(ph), std::sin(ph));
+            acc += h[t + half] * s;
+        }
+        out[k] = acc;
+    }
+}
+
 } // namespace hf
 } // namespace gm

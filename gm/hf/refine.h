@@ -33,5 +33,12 @@ constexpr int kRefineFrame = kRefineNsym * kRefineNsps;
 float refine_llr(const std::complex<float>* frame, int frame_len,
                  const RefineMode& mode, float* log174);
 
+// Downconvert (mix by -freq_hz) + decimate a raw composite frame at sr_in to the
+// kRefineSr baseband frame refine_llr expects. Windowed-sinc FIR lowpass. `out`
+// holds n_out complex samples (typically kRefineFrame). This is the CPU
+// extraction the pipeline runs on a D2H'd complex-ring frame before refine_llr.
+void extract_frame(const std::complex<float>* in, int n_in, float freq_hz,
+                   int sr_in, std::complex<float>* out, int n_out);
+
 } // namespace hf
 } // namespace gm
