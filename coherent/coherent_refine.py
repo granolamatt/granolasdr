@@ -22,7 +22,8 @@ import ft8decode
 from gnlh import open_recording
 from ft8 import extract_band, ft8_dial_comp_hz
 
-COARSE = int(os.environ.get("COARSE", "2"))   # coarse-detect osr (1 or 2)
+COARSE   = int(os.environ.get("COARSE", "2"))    # coarse-detect osr (1 or 2)
+MINSCORE = int(os.environ.get("MINSCORE", "10"))  # coarse Costas sync threshold
 
 SR       = 12800
 NSPS     = 2048            # samples/symbol (SR*0.16)
@@ -104,7 +105,7 @@ def coarse_candidates(audio, win_s=15.0, step_s=5.0):
     W, STEP = int(win_s * SR), int(step_s * SR)
     seen = []
     for start in range(0, max(1, len(audio) - W), STEP):
-        for c in ft8decode.find_candidates(audio[start:start+W], SR, COARSE, COARSE, 200.0, 3400.0, 10, 300):
+        for c in ft8decode.find_candidates(audio[start:start+W], SR, COARSE, COARSE, 200.0, 3400.0, MINSCORE, 600):
             f, t = c["freq_hz"], start / SR + c["time_sec"]
             if not any(abs(f-ff) < 4 and abs(t-tt) < 0.5 for ff, tt in seen):
                 seen.append((f, t))
@@ -122,7 +123,7 @@ def main(path, secs=0.0):
     print(f"20m: {len(bb)/SR:.1f} s\n")
 
     cands = coarse_candidates(audio)
-    print(f"coarse ({COARSE},{COARSE}) candidates: {len(cands)}")
+    print(f"coarse ({COARSE},{COARSE}) min_score={MINSCORE} candidates: {len(cands)}")
 
     nc_set, co_set = set(), set()
     for f, t in cands:
