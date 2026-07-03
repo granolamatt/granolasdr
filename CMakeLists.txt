@@ -138,6 +138,10 @@ add_executable(test_osd test/test_osd.cc gm/cuda/JS8Osd.cc gm/cuda/OsdCore.cc)
 target_link_libraries(test_osd -lm)
 
 # Host-only CW Morse decoder test (Phase 0 gate): pure CPU, no CUDA link.
+# Host-only FT8 refine round-trip (Path A refine core): links ft8_lib.
+add_executable(test_refine test/test_refine.cc gm/hf/refine.cc ft8_lib/fft/kiss_fft.c)
+target_link_libraries(test_refine ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
+
 add_executable(test_cw_morse test/test_cw_morse.cc gm/hf/cw_morse.cc)
 target_link_libraries(test_cw_morse -lm)
 
