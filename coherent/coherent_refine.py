@@ -15,11 +15,14 @@ Compares decode sets: (2,2) direct, refine+non-coherent, refine+coherent, (4,4).
 
 Usage:  python3.14 coherent/coherent_refine.py ../raw.dat [secs]
 """
+import os
 import sys
 import numpy as np
 import ft8decode
 from gnlh import open_recording
 from ft8 import extract_band, ft8_dial_comp_hz
+
+COARSE = int(os.environ.get("COARSE", "2"))   # coarse-detect osr (1 or 2)
 
 SR       = 12800
 NSPS     = 2048            # samples/symbol (SR*0.16)
@@ -50,7 +53,7 @@ def costas_energy(frame):
     return np.abs(F[np.arange(len(CPOS)), CTONE]).sum()
 
 
-def refine(bb, start, f, dt_max=448, dt_step=64, f_span=2.5, nf=11):
+def refine(bb, start, f, dt_max=1088, dt_step=128, f_span=3.5, nf=13):
     """Joint fine time+freq sync. Centers on candidate freq f, then searches a
     sub-symbol time shift and residual frequency to maximize Costas energy.
     Precise timing is essential: a 512-sample error rotates tone phase by radians
@@ -101,7 +104,7 @@ def coarse_candidates(audio, win_s=15.0, step_s=5.0):
     W, STEP = int(win_s * SR), int(step_s * SR)
     seen = []
     for start in range(0, max(1, len(audio) - W), STEP):
-        for c in ft8decode.find_candidates(audio[start:start+W], SR, 2, 2, 200.0, 3400.0, 10, 300):
+        for c in ft8decode.find_candidates(audio[start:start+W], SR, COARSE, COARSE, 200.0, 3400.0, 10, 300):
             f, t = c["freq_hz"], start / SR + c["time_sec"]
             if not any(abs(f-ff) < 4 and abs(t-tt) < 0.5 for ff, tt in seen):
                 seen.append((f, t))
@@ -119,7 +122,7 @@ def main(path, secs=0.0):
     print(f"20m: {len(bb)/SR:.1f} s\n")
 
     cands = coarse_candidates(audio)
-    print(f"coarse (2,2) candidates: {len(cands)}")
+    print(f"coarse ({COARSE},{COARSE}) candidates: {len(cands)}")
 
     nc_set, co_set = set(), set()
     for f, t in cands:
