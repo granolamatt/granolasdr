@@ -146,8 +146,23 @@ def main(path, secs=0.0):
     print(f"(4,4) direct decode : {len(direct44)}   <- brute-force target")
     print(f"refine + non-coherent: {len(nc_set)}")
     print(f"refine + coherent    : {len(co_set)}")
-    print(f"\ncoherent vs (4,4):  both={len(co_set & direct44)}  "
-          f"only coherent={len(co_set - direct44)}  only (4,4)={len(direct44 - co_set)}")
+
+    both = nc_set & direct44
+    only_ref = nc_set - direct44
+    only_44 = direct44 - nc_set
+    print(f"\nrefine(non-coh) vs (4,4):  both={len(both)}  "
+          f"only refine={len(only_ref)}  only (4,4)={len(only_44)}")
+    union = nc_set | direct44
+    print(f"union (either method): {len(union)}   refine recall of (4,4): "
+          f"{len(both)}/{len(direct44)} = {100*len(both)/max(1,len(direct44)):.0f}%")
+    if only_44:
+        print("(4,4) gets, refine misses:")
+        for t in sorted(only_44):
+            print(f"    - {t}")
+    if only_ref:
+        print("refine gets, (4,4) misses:")
+        for t in sorted(only_ref)[:12]:
+            print(f"    + {t}")
 
 
 if __name__ == "__main__":
