@@ -537,6 +537,10 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
               [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
     if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
 
+    // Refine is ~250 ms/candidate; cap per scan to keep the callback under budget
+    // (a transmission reappears across many scans, so strong failures still refine).
+    const int kRefineMaxPerCycle = 2;
+    int refine_used = 0;
     uint8_t osd_xhat[kFtxLdpcN];
     for (uint32_t i : cands) {
         const float* llr = r.log174 + (size_t)i * kFtxLdpcN;
@@ -548,7 +552,8 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         // Refine fallback: grid-LLR OSD failed on a strong candidate.  Re-extract
         // LLRs from the retained complex frame with continuous freq/time alignment
         // (beats the STFT grid), then retry OSD on the sharper LLRs.
-        if (!ok && refine_enable_) {
+        if (!ok && refine_enable_ && refine_used < kRefineMaxPerCycle) {
+            ++refine_used;
             float rllr[kFtxLdpcN];
             float rdist = 0.0f;
             if (js8cuda_->refineCandidate(r.fo[i], (int)r.to[i], r.snap_start, rllr) &&

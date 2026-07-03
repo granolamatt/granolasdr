@@ -29,6 +29,12 @@ static float sym_tones(const std::complex<float>* frame, int flen,
     const float w = -2.0f * (float)M_PI * df / kRefineSr;
     float energy = 0.0f;
     for (int p = 0; p < NSYM; ++p) {
+        // During the fine-alignment search (Z == null) only the 21 Costas pilots
+        // contribute to the energy — skip the 58 data-symbol FFTs entirely.
+        bool is_pilot = false;
+        for (int b = 0; b < 3; ++b) { int rel = p - COS_POS[b]; if (rel >= 0 && rel < 7) is_pilot = true; }
+        if (!Z && !is_pilot) continue;
+
         int base = p * NSPS + dt;
         for (int i = 0; i < NSPS; ++i) {
             int idx = base + i;
@@ -105,18 +111,33 @@ void extract_frame(const std::complex<float>* in, int n_in, float freq_hz,
     }
     for (auto& v : h) v /= hsum;                         // unity DC gain
 
+    // Downconvert-then-FIR factors into a single complex-tap FIR plus a per-output
+    // phase rotation.  The mix factor is exp(i*w*idx); for output center c,
+    //   acc = Σ_t h[t]·in[c+t]·exp(i·w·(c+t)) = exp(i·w·c) · Σ_t g[t]·in[c+t]
+    // with combined taps g[t] = h[t]·exp(i·w·t).  This computes the trig ONCE for
+    // the taps (2·half+1) instead of once per (output × tap) — the inner loop is
+    // then pure complex MACs.  exp(i·w·c) advances incrementally per output.
     const float w = -2.0f * (float)M_PI * freq_hz / sr_in;
+    std::vector<std::complex<float>> g(2 * half + 1);
+    for (int t = -half; t <= half; ++t) {
+        float ph = w * t;
+        g[t + half] = h[t + half] * std::complex<float>(std::cos(ph), std::sin(ph));
+    }
+    const std::complex<float> rot_step(std::cos(w * decim), std::sin(w * decim));
+    std::complex<float> phasor(1.0f, 0.0f);              // exp(i·w·c), c = k·decim
     for (int k = 0; k < n_out; ++k) {
-        int c = k * decim;
+        int c  = k * decim;
+        int t0 = std::max(-half, -c);
+        int t1 = std::min(half, n_in - 1 - c);
         std::complex<float> acc(0, 0);
-        for (int t = -half; t <= half; ++t) {
-            int idx = c + t;
-            if (idx < 0 || idx >= n_in) continue;
-            float ph = w * idx;
-            std::complex<float> s = in[idx] * std::complex<float>(std::cos(ph), std::sin(ph));
-            acc += h[t + half] * s;
+        for (int t = t0; t <= t1; ++t)
+            acc += g[t + half] * in[c + t];
+        out[k] = phasor * acc;
+        phasor *= rot_step;
+        if ((k & 1023) == 0) {                           // guard against drift
+            float m = std::abs(phasor);
+            if (m > 1e-6f) phasor /= m;
         }
-        out[k] = acc;
     }
 }
 

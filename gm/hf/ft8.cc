@@ -27,6 +27,12 @@
 
 const int kLDPC_iterations = 25;
 
+// Refine is ~250 ms/candidate (FFT grid search); the continuous scan runs every
+// ~1 s (on top of BP+OSD), so cap refines per scan to keep the decode callback
+// under budget.  A given transmission reappears across ~12 scans, so the strong
+// failures still get refined over time — the cap just spreads the work out.
+const int kRefineMaxPerCycle = 2;
+
 #define CALLSIGN_HASHTABLE_SIZE 2048
 
 static thread_local struct
@@ -305,6 +311,7 @@ namespace hf {
         if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
 
         uint8_t plain174[FTX_LDPC_N];
+        int refine_used = 0;
         for (uint32_t i : cands) {
             const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
             float dist = 0.0f;
@@ -326,7 +333,8 @@ namespace hf {
             // Refine fallback: BP+OSD both failed on the discrete-grid LLRs.
             // Re-extract LLRs from the retained complex frame with continuous
             // freq/time alignment (beats the STFT grid), then retry BP then OSD.
-            if (!decoded && refine_enable_) {
+            if (!decoded && refine_enable_ && refine_used < kRefineMaxPerCycle) {
+                ++refine_used;
                 float rllr[FTX_LDPC_N];
                 if (ft8cuda_->refineCandidate(r.fo[i], (int)r.to[i], r.snap_start, rllr)) {
                     ftx_message_t msg;
