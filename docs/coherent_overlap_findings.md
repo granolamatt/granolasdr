@@ -118,11 +118,24 @@ symbol. JS8 shares the frame structure and the same limitation.
 - **Coherent gain** for FT8/JS8 is blocked by the modulation (CPM); a trellis is a
   large, uncertain effort and out of scope unless the ~1–2 dB is worth it.
 
+## Breadth check — holds on every band tested
+
+Refine vs the 4×4 grid, same recipe:
+
+| band | (4,4) grid | (2,2) + refine | recall of grid |
+|------|-----------|----------------|----------------|
+| 20m  | 51 (full) / 22 (120s) | 67 / 26 | ~100% + more |
+| 17m  | 11 | 13 | ~100% (+2–3) |
+| 15m  | 4  | 7  | 100% (+3) |
+
+Same result on all three: refine recovers 100% of the grid's decodes and adds
+more. The gain tracks band activity but the effect is universal, not a 20m
+artifact.
+
 ## Caveats
 
-- One band (20m), one recording. The effect is large and consistent (26>22 at
-  120 s, 67>51 at full) but a breadth check (17m/15m, a second capture) would
-  fully settle it.
+- One recording. Effect is large and consistent across 20m/17m/15m; a second
+  capture (different conditions) would fully settle it.
 - The Python refine is unoptimized (~minutes); the *algorithm* is cheap (few
   candidates × narrow search).
 - The binding builds its own STFT (ft8_lib's CPU monitor is stripped in this

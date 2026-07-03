@@ -118,9 +118,10 @@ def main(path, secs=0.0):
     x = rec["samples"]
     if secs:
         x = x[:int(secs * sr_in)]
-    bb, sr = extract_band(np.asarray(x), sr_in, ft8_dial_comp_hz("20m") - DIAL, decim=32)
+    band = os.environ.get("BAND", "20m")
+    bb, sr = extract_band(np.asarray(x), sr_in, ft8_dial_comp_hz(band) - DIAL, decim=32)
     audio = np.real(bb).astype(np.float32)
-    print(f"20m: {len(bb)/SR:.1f} s\n")
+    print(f"{band}: {len(bb)/SR:.1f} s\n")
 
     cands = coarse_candidates(audio)
     print(f"coarse ({COARSE},{COARSE}) min_score={MINSCORE} candidates: {len(cands)}")
