@@ -61,6 +61,23 @@ same messages with a hashed callsign resolved *better* by refine), and it adds
 alignment refine is a strict improvement over the fixed 4×4 grid. This is the
 actionable result for the runtime pipeline.
 
+### Detect at (2,2), not (1,1) — overlap gives detection SNR too
+
+The overlap benefit is two separable things: **detection SNR** (finding marginal
+signals) and **alignment** (extracting good LLRs). The refine handles alignment;
+it cannot help detection, you can't refine a candidate you never found.
+
+- (1,1) coarse + refine: 19 decodes, only 73% recall of the 4×4 grid — it misses
+  weak signals outright.
+- The missed signals score only 5–10 in (1,1) Costas sync (below a clean
+  threshold). Lowering the threshold to ~5 does detect them, but floods to ~8,000
+  candidates (47×) because (1,1) scalloping buries real signals in the noise band.
+- (2,2) concentrates each signal's energy, lifting its sync score above the noise,
+  so the same signals are caught at a clean high threshold with ~300 candidates.
+
+**Recipe: (2,2) coarse detect + per-candidate refine.** (2,2) for detection SNR,
+refine for alignment. This beat the 4×4 grid (67 vs 51) at lower STFT cost.
+
 ## Finding 3 — coherent phase does NOT work for FT8
 
 The original idea: conjugate the known Costas pattern to recover the carrier
