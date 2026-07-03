@@ -96,7 +96,8 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
         /*retain_complex=*/true);   // FT8/JS8 Normal refine reads the complex ring
     magblock.start();
 
-    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, legacy_costas);
+    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, legacy_costas,
+                                 &magblock.getComplexRing(), magblock.getSlotCplxIdx());
     ft8channel.start();
 
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort, kWsDictPort);

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <functional>
 #include <fstream>
 #include <iostream>
@@ -52,11 +53,17 @@ struct ContScanResult {
 
 class FT8Cuda : public Thread {
 public:
+    // cplx_ring + slot_cplx_idx (optional): MagBlock's complex-composite retention
+    // ring and its per-mag-slot map, for the per-candidate refine fallback. Null
+    // disables refine (decode path unchanged).
     FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
             float min_score = 5.0f,
             const std::string& tag = "EPOCH",
             int zmq_port = 0,
-            bool legacy_costas = false);
+            bool legacy_costas = false,
+            const gm::buffer::DeviceRingBuffer<std::complex<float>,
+                  gm::buffer::kComplexCompositeBlocks>* cplx_ring = nullptr,
+            const uint64_t* slot_cplx_idx = nullptr);
     ~FT8Cuda();
 
     void run();
@@ -70,6 +77,11 @@ private:
     std::string tag_;
     float       min_score_;
     bool        legacy_costas_;
+
+    // Complex-composite retention for the refine fallback (null = disabled).
+    const gm::buffer::DeviceRingBuffer<std::complex<float>,
+          gm::buffer::kComplexCompositeBlocks>* cplx_ring_{nullptr};
+    const uint64_t* slot_cplx_idx_{nullptr};
 
     static constexpr int CONTINUOUS_SLOTS = 8;
     int cont_stride_{6};

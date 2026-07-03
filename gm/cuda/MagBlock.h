@@ -40,7 +40,7 @@ public:
 
     // Complex-composite retention ring (valid only when retain_complex).  Depth
     // in input blocks; one FT8/JS8 frame is 79*32 = 2528 blocks (~12.6 s).
-    static constexpr int kComplexBlocks = 4096;   // ~20 s at 409.6 kHz / 2048-block
+    static constexpr int kComplexBlocks = gm::buffer::kComplexCompositeBlocks;
     const gm::buffer::DeviceRingBuffer<std::complex<float>, kComplexBlocks>&
     getComplexRing() const { return complex_ring_; }
     // Per-mag-slot snapshot of the complex ring block index of that slot's window

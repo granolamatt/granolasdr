@@ -13,16 +13,25 @@ namespace gm {
 namespace cuda {
 
 FT8Cuda::FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
-                 float min_score, const std::string& tag, int zmq_port, bool legacy_costas)
+                 float min_score, const std::string& tag, int zmq_port, bool legacy_costas,
+                 const gm::buffer::DeviceRingBuffer<std::complex<float>,
+                       gm::buffer::kComplexCompositeBlocks>* cplx_ring,
+                 const uint64_t* slot_cplx_idx)
     : ring_(ring)
     , tag_(tag)
     , min_score_(min_score)
     , legacy_costas_(legacy_costas)
+    , cplx_ring_(cplx_ring)
+    , slot_cplx_idx_(slot_cplx_idx)
     , zmq_ctx_(1)
     , zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
+
+    if (cplx_ring_)
+        printf("FT8: complex-refine ring available (%d blocks)\n",
+               gm::buffer::kComplexCompositeBlocks);
 
     cuda_check_error(cudaSetDevice(0));
     cuda_check_error(cudaStreamCreate(&cont_scan_stream_));

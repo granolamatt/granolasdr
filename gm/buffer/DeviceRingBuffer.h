@@ -7,6 +7,11 @@
 namespace gm {
 namespace buffer {
 
+// Depth (in composite input blocks) of MagBlock's optional complex-composite
+// retention ring, shared by MagBlock (writer) and FT8Cuda/JS8Cuda (refine
+// readers). One FT8/JS8 frame is 79*32 = 2528 blocks (~12.6 s); 4096 ~= 20 s.
+inline constexpr int kComplexCompositeBlocks = 4096;
+
 // Non-copyable GPU ring buffer shared between one writer (MagBlock) and
 // multiple readers (FT8Cuda, JS8Cuda). Readers track their own read cursor
 // against write_idx; they wait on ready before accessing device memory.
