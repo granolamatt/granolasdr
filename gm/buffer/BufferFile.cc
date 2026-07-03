@@ -128,7 +128,9 @@ void BufferFile<T>::runPlayback()
                 fseek(fp_, data_start, SEEK_SET);
                 continue;
             }
-            printf("BufferFile: end of file\n");
+            printf("BufferFile: end of file (%llu blocks fed)\n",
+                   (unsigned long long)block_num_);
+            finished_.store(true, std::memory_order_release);
             break;
         }
 
