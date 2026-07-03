@@ -442,6 +442,13 @@ JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
     js8cuda->start();
 }
 
+JS8::~JS8()
+{
+    refine_run_.store(false);
+    refine_cv_.notify_all();
+    if (refine_thread_.joinable()) refine_thread_.join();
+}
+
 void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
                          float snr, double unix_time, float time_offset)
 {
@@ -495,10 +502,13 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
     auto now = std::chrono::system_clock::now();
     double unix_now = std::chrono::duration<double>(now.time_since_epoch()).count();
 
-    uint64_t epoch = (uint64_t)(unix_now / (double)cycle_secs_);
-    if (epoch != last_epoch_) {
-        seen_this_epoch_.clear();
-        last_epoch_ = epoch;
+    {
+        std::lock_guard<std::mutex> lk(pub_mu_);   // shared with the refine worker
+        uint64_t epoch = (uint64_t)(unix_now / (double)cycle_secs_);
+        if (epoch != last_epoch_) {
+            seen_this_epoch_.clear();
+            last_epoch_ = epoch;
+        }
     }
 
     // Frequency bins that produced a valid decode this scan (pass or osd); used to
@@ -537,8 +547,8 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
               [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
     if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
 
-    // Refine is ~50 ms/candidate; cap per scan to keep the callback under budget
-    // (a transmission reappears across many scans, so strong failures still refine).
+    // Refine is capped per scan; a transmission reappears across many scans, so
+    // strong failures still get refined over time.
     const int kRefineMaxPerCycle = 2;
     int refine_used = 0;
     uint8_t osd_xhat[kFtxLdpcN];
@@ -549,30 +559,61 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
                   (osd_soft_thresh_ <= 0.0f || dist <= osd_soft_thresh_) &&
                   publishCandidate(r, i, osd_xhat + 87, llr, unix_now, "osd", &dist);
 
-        // Refine fallback: grid-LLR OSD failed on a strong candidate.  Re-extract
-        // LLRs from the retained complex frame with continuous freq/time alignment
-        // (beats the STFT grid), then retry OSD on the sharper LLRs.
-        if (!ok && refine_enable_ && refine_used < kRefineMaxPerCycle) {
-            ++refine_used;
-            float rllr[kFtxLdpcN];
-            float rdist = 0.0f;
-            if (js8cuda_->refineCandidate(r.fo[i], (int)r.to[i], r.snap_start, rllr) &&
-                js8_osd_decode(rllr, osd_order_, osd_xhat, &rdist) &&
-                (osd_soft_thresh_ <= 0.0f || rdist <= osd_soft_thresh_) &&
-                publishCandidate(r, i, osd_xhat + 87, rllr, unix_now, "refine", &rdist))
-                ok = true;
-        }
-
         if (ok) {
             decoded_bins.insert(r.fo[i]);
-        } else if (llr_capture_.enabled() && !decoded_bins.count(r.fo[i])) {
-            // Strong-Costas candidate the OSD gate tried but no decoder cracked.
-            float snr = (float)r.score[i] - 26.0f;
-            llr_capture_.write(mode_name_, "fail", llr, kFtxLdpcN,
-                               r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
-                               (double)composite_bin_to_rf_hz(r.fo[i], rfft_size_),
-                               (double)snr, unix_now, /*text=*/nullptr, &dist);
+            continue;
         }
+
+        // Strong-Costas candidate the OSD gate tried but no decoder cracked.
+        if (!decoded_bins.count(r.fo[i])) {
+            float snr = (float)r.score[i] - 26.0f;
+            std::lock_guard<std::mutex> lk(pub_mu_);
+            if (llr_capture_.enabled())
+                llr_capture_.write(mode_name_, "fail", llr, kFtxLdpcN,
+                                   r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
+                                   (double)composite_bin_to_rf_hz(r.fo[i], rfft_size_),
+                                   (double)snr, unix_now, /*text=*/nullptr, &dist);
+        }
+
+        // Refine fallback runs OFF this thread: enqueue the failed strong candidate
+        // for the refine worker (bounded, drop-oldest) so the heavy FFT search
+        // never blocks the scan callback.
+        if (refine_enable_ && refine_used < kRefineMaxPerCycle) {
+            ++refine_used;
+            std::lock_guard<std::mutex> lk(refine_mu_);
+            if (refine_q_.size() >= kRefineQueueMax) refine_q_.pop_front();
+            refine_q_.push_back({r.fo[i], (int)r.to[i], (int)r.ts[i],
+                                 r.snap_start, r.score[i], unix_now});
+            refine_cv_.notify_one();
+        }
+    }
+}
+
+// Refine worker: drains the job queue, re-extracts LLRs from the retained complex
+// frame with continuous alignment, retries OSD, and publishes any decode the
+// discrete-grid path missed.  Runs on its own thread + CUDA stream.
+void JS8::refineWorker()
+{
+    uint8_t osd_xhat[kFtxLdpcN];
+    while (refine_run_.load(std::memory_order_acquire)) {
+        RefineJob job;
+        {
+            std::unique_lock<std::mutex> lk(refine_mu_);
+            refine_cv_.wait(lk, [&] {
+                return !refine_run_.load(std::memory_order_acquire) || !refine_q_.empty();
+            });
+            if (!refine_run_.load(std::memory_order_acquire)) break;
+            job = refine_q_.front();
+            refine_q_.pop_front();
+        }
+
+        float rllr[kFtxLdpcN];
+        float rdist = 0.0f;
+        if (js8cuda_->refineCandidate(job.fo, job.to, job.snap_start, rllr) &&
+            js8_osd_decode(rllr, osd_order_, osd_xhat, &rdist) &&
+            (osd_soft_thresh_ <= 0.0f || rdist <= osd_soft_thresh_))
+            publishCandidateCore(osd_xhat + 87, rllr, job.fo, job.to, job.ts,
+                                 job.score, job.unix_now, "refine", &rdist);
     }
 }
 
@@ -580,26 +621,38 @@ bool JS8::publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
                            const uint8_t* info, const float* llr, double unix_now,
                            const char* status, const float* osd_dist)
 {
-    if (!checkCRC12(info)) return false;
+    return publishCandidateCore(info, llr, r.fo[i], (int)r.to[i], (int)r.ts[i],
+                                r.score[i], unix_now, status, osd_dist);
+}
 
-    std::string raw = extractMessage12(info);
-    if (raw.empty()) return false;
+bool JS8::publishCandidateCore(const uint8_t* info, const float* llr, int32_t fo,
+                               int to, int ts, int16_t score, double unix_now,
+                               const char* status, const float* osd_dist)
+{
+    std::string text, from_call;
+    float freq_hz, time_sec, snr;
+    {
+        // The JS8 message decode (jsc dictionary) + dedup set + capture file are
+        // all shared with the scan thread — serialize under pub_mu_.  publishDecoded
+        // (network/stdout I/O) runs afterwards, outside the lock.
+        std::lock_guard<std::mutex> lk(pub_mu_);
+        if (!checkCRC12(info)) return false;
+        if (extractMessage12(info).empty()) return false;
 
-    std::string from_call;
-    std::string text = decodeJs8Message(info, &from_call);
+        text = decodeJs8Message(info, &from_call);
 
-    // Suppress re-publishing the same message+frequency within one epoch.  Still a
-    // real decode, so the caller marks the bin decoded — just don't re-capture.
-    std::string dedup_key = text + "|" + std::to_string(r.fo[i]);
-    if (!seen_this_epoch_.insert(dedup_key).second) return true;
+        // Suppress re-publishing the same message+frequency within one epoch.  Still
+        // a real decode, so the caller marks the bin decoded — just don't re-publish.
+        std::string dedup_key = text + "|" + std::to_string(fo);
+        if (!seen_this_epoch_.insert(dedup_key).second) return true;
 
-    float freq_hz  = composite_bin_to_rf_hz(r.fo[i], rfft_size_);
-    float time_sec = (r.to[i] + (float)r.ts[i] / (float)time_osr_) * symbol_period_;
-    float snr      = (float)r.score[i] - 26.0f;
+        freq_hz  = composite_bin_to_rf_hz(fo, rfft_size_);
+        time_sec = (to + (float)ts / (float)time_osr_) * symbol_period_;
+        snr      = (float)score - 26.0f;
 
-    llr_capture_.write(mode_name_, status, llr, kFtxLdpcN,
-                       r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
-                       (double)freq_hz, (double)snr, unix_now, text.c_str(), osd_dist);
+        llr_capture_.write(mode_name_, status, llr, kFtxLdpcN, fo, to, ts, (int)score,
+                           (double)freq_hz, (double)snr, unix_now, text.c_str(), osd_dist);
+    }
 
     publishDecoded(text.c_str(), from_call.c_str(), freq_hz, snr, unix_now, time_sec);
     return true;

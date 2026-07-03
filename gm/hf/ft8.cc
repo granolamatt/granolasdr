@@ -157,6 +157,9 @@ namespace hf {
     }
 
     FT8::~FT8() {
+        refine_run_.store(false);
+        refine_cv_.notify_all();
+        if (refine_thread_.joinable()) refine_thread_.join();
         if (timing_log_) fclose(timing_log_);
     }
 
@@ -246,28 +249,23 @@ namespace hf {
         if (r.timestamp - window_start_ >= 15.0)
             flushWindow(r.timestamp);
 
-        // Keep best SNR per callsign within the current 15s window.
+        // Forwarders to the shared members (also used by the refine worker).
         auto publish_spot = [&](uint32_t i, const char* text) {
-            float freq_hz  = composite_bin_to_rf_hz(r.fo[i]);
-            float time_sec = (r.to[i] + (float)r.ts[i] / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
-            float snr      = (float)r.score[i] - 26.0f;
-            std::lock_guard<std::mutex> lk(window_mu_);
-            auto it = window_buf_.find(text);
-            if (it == window_buf_.end() || snr > it->second.snr)
-                window_buf_[text] = {snr, freq_hz, r.timestamp, time_sec};
+            publishSpot(text, r.fo[i], (int)r.to[i], (int)r.ts[i], r.score[i], r.timestamp);
         };
-
-        // Labeled LLR training capture (one line per frequency bin per scan).
         auto capture = [&](uint32_t i, const char* status, const char* text,
                            const float* dist, const float* llr_override = nullptr) {
-            if (!llr_capture_.enabled()) return;
             const float* llr = llr_override ? llr_override
                                             : r.log174 + (size_t)i * FTX_LDPC_N;
-            float freq_hz = composite_bin_to_rf_hz(r.fo[i]);
-            float snr     = (float)r.score[i] - 26.0f;
-            llr_capture_.write("FT8", status, llr, FTX_LDPC_N,
-                               r.fo[i], (int)r.to[i], (int)r.ts[i], (int)r.score[i],
-                               (double)freq_hz, (double)snr, r.timestamp, text, dist);
+            captureCand(status, llr, r.fo[i], (int)r.to[i], (int)r.ts[i],
+                        r.score[i], r.timestamp, text, dist);
+        };
+
+        // ftx_message_decode mutates a shared callsign hashtable — guard it since
+        // the refine worker thread also decodes concurrently.
+        auto decode_msg = [&](ftx_message_t& msg, char* text) {
+            std::lock_guard<std::mutex> lk(decode_mu_);
+            return ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK;
         };
 
         // Frequency bins that produced a valid decode this scan (pass or osd);
@@ -282,7 +280,7 @@ namespace hf {
             ftx_decode_status_t st;
             if (ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) {
                 char text[FTX_MAX_MESSAGE_LENGTH];
-                if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK) {
+                if (decode_msg(msg, text)) {
                     publish_spot(i, text);
                     if (!decoded_bins.count(r.fo[i])) capture(i, "pass", text, nullptr);
                     decoded_bins.insert(r.fo[i]);
@@ -322,36 +320,9 @@ namespace hf {
                 ftx_decode_status_t st;
                 if (ftx_decode_from_bits(plain174, &msg, &st)) {        // CRC-14 gate
                     char text[FTX_MAX_MESSAGE_LENGTH];
-                    if (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK) {
+                    if (decode_msg(msg, text)) {
                         publish_spot(i, text);
                         if (!decoded_bins.count(r.fo[i])) capture(i, "osd", text, &dist);
-                        decoded_bins.insert(r.fo[i]);
-                        decoded = true;
-                    }
-                }
-            }
-            // Refine fallback: BP+OSD both failed on the discrete-grid LLRs.
-            // Re-extract LLRs from the retained complex frame with continuous
-            // freq/time alignment (beats the STFT grid), then retry BP then OSD.
-            if (!decoded && refine_enable_ && refine_used < kRefineMaxPerCycle) {
-                ++refine_used;
-                float rllr[FTX_LDPC_N];
-                if (ft8cuda_->refineCandidate(r.fo[i], (int)r.to[i], r.snap_start, rllr)) {
-                    ftx_message_t msg;
-                    ftx_decode_status_t st;
-                    char text[FTX_MAX_MESSAGE_LENGTH];
-                    float rdist = 0.0f;
-                    bool cracked =
-                        ftx_decode_from_llr(rllr, kLDPC_iterations, &msg, &st);
-                    if (!cracked &&
-                        ft8_osd_decode(rllr, osd_order_, plain174, &rdist) &&
-                        (osd_soft_thresh_ <= 0.0f || rdist <= osd_soft_thresh_))
-                        cracked = ftx_decode_from_bits(plain174, &msg, &st);
-                    if (cracked &&
-                        ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK) {
-                        publish_spot(i, text);
-                        if (!decoded_bins.count(r.fo[i]))
-                            capture(i, "refine", text, &rdist, rllr);
                         decoded_bins.insert(r.fo[i]);
                         decoded = true;
                     }
@@ -361,6 +332,85 @@ namespace hf {
             // Strong-Costas candidate the OSD gate tried but no decoder cracked.
             if (!decoded && !decoded_bins.count(r.fo[i]))
                 capture(i, "fail", nullptr, &dist);
+
+            // Refine fallback runs OFF this thread: enqueue the failed strong
+            // candidate for the refine worker (bounded, drop-oldest) so the heavy
+            // FFT search never blocks the scan callback.
+            if (!decoded && refine_enable_ && refine_used < kRefineMaxPerCycle) {
+                ++refine_used;
+                std::lock_guard<std::mutex> lk(refine_mu_);
+                if (refine_q_.size() >= kRefineQueueMax) refine_q_.pop_front();
+                refine_q_.push_back({r.fo[i], (int)r.to[i], (int)r.ts[i],
+                                     r.snap_start, r.score[i], r.timestamp});
+                refine_cv_.notify_one();
+            }
+        }
+    }
+
+    // Shared window/capture helpers (scan callback + refine worker).
+    void FT8::publishSpot(const char* text, int32_t fo, int to, int ts,
+                          int16_t score, double timestamp) {
+        float freq_hz  = composite_bin_to_rf_hz(fo);
+        float time_sec = (to + (float)ts / FT8_TIME_OSR) * FT8_SYMBOL_PERIOD;
+        float snr      = (float)score - 26.0f;
+        std::lock_guard<std::mutex> lk(window_mu_);
+        auto it = window_buf_.find(text);
+        if (it == window_buf_.end() || snr > it->second.snr)
+            window_buf_[text] = {snr, freq_hz, timestamp, time_sec};
+    }
+
+    void FT8::captureCand(const char* status, const float* llr, int32_t fo, int to,
+                          int ts, int16_t score, double timestamp,
+                          const char* text, const float* dist) {
+        if (!llr_capture_.enabled()) return;
+        float freq_hz = composite_bin_to_rf_hz(fo);
+        float snr     = (float)score - 26.0f;
+        std::lock_guard<std::mutex> lk(capture_mu_);
+        llr_capture_.write("FT8", status, llr, FTX_LDPC_N, fo, to, ts, (int)score,
+                           (double)freq_hz, (double)snr, timestamp, text, dist);
+    }
+
+    // Refine worker: drains the job queue, re-extracts LLRs from the retained
+    // complex frame with continuous freq/time alignment, retries BP then OSD, and
+    // publishes/captures any decode the discrete-grid path missed.  Runs on its
+    // own thread + CUDA stream, so it never stalls the continuous scan.
+    void FT8::refineWorker() {
+        uint8_t plain174[FTX_LDPC_N];
+        while (refine_run_.load(std::memory_order_acquire)) {
+            RefineJob job;
+            {
+                std::unique_lock<std::mutex> lk(refine_mu_);
+                refine_cv_.wait(lk, [&] {
+                    return !refine_run_.load(std::memory_order_acquire) || !refine_q_.empty();
+                });
+                if (!refine_run_.load(std::memory_order_acquire)) break;
+                job = refine_q_.front();
+                refine_q_.pop_front();
+            }
+
+            float rllr[FTX_LDPC_N];
+            if (!ft8cuda_->refineCandidate(job.fo, job.to, job.snap_start, rllr))
+                continue;
+
+            ftx_message_t msg;
+            ftx_decode_status_t st;
+            float rdist = 0.0f;
+            bool cracked = ftx_decode_from_llr(rllr, kLDPC_iterations, &msg, &st);
+            if (!cracked && osd_enable_ &&
+                ft8_osd_decode(rllr, osd_order_, plain174, &rdist) &&
+                (osd_soft_thresh_ <= 0.0f || rdist <= osd_soft_thresh_))
+                cracked = ftx_decode_from_bits(plain174, &msg, &st);   // CRC-14 gate
+            if (!cracked) continue;
+
+            char text[FTX_MAX_MESSAGE_LENGTH];
+            {
+                std::lock_guard<std::mutex> lk(decode_mu_);
+                if (ftx_message_decode(&msg, &hash_if, text) != FTX_MESSAGE_RC_OK)
+                    continue;
+            }
+            publishSpot(text, job.fo, job.to, job.ts, job.score, job.timestamp);
+            captureCand("refine", rllr, job.fo, job.to, job.ts, job.score,
+                        job.timestamp, text, &rdist);
         }
     }
 

@@ -28,6 +28,7 @@ JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
     cudaStreamCreate(&js8_scan_stream_);
+    if (cplx_ring_) cudaStreamCreate(&refine_stream_);
     js8_ldpc_init_constants();
 
     const size_t log174_bytes = (size_t)CAND_MAX * kFtxLdpcN * sizeof(float);
@@ -57,6 +58,7 @@ JS8Cuda<N>::~JS8Cuda()
     freeSlots();
 
     cudaStreamDestroy(js8_scan_stream_);
+    if (refine_stream_) cudaStreamDestroy(refine_stream_);
 }
 
 template<int N>
@@ -160,6 +162,7 @@ void JS8Cuda<N>::scanLoop()
 
         ContScanResult& slot = cont_slots_[cw % CONTINUOUS_SLOTS];
         int snap_start       = (int)((wi - cap_blocks_) % N);
+        slot.snap_start      = wi - cap_blocks_;   // absolute, for refine's ring map
 
         cudaStreamWaitEvent(js8_scan_stream_, ring_.ready, 0);
 
@@ -291,14 +294,14 @@ bool JS8Cuda<N>::refineCandidate(int32_t fo, int to, uint64_t snap_start, float*
     cuda_check_error(cudaMemcpyAsync(
         refine_host_.data(), cplx_ring_->base_d + s0 * (uint64_t)BLK,
         (size_t)first * BLK * sizeof(std::complex<float>),
-        cudaMemcpyDeviceToHost, js8_scan_stream_));
+        cudaMemcpyDeviceToHost, refine_stream_));
     if (first < FRAME_BLOCKS) {
         cuda_check_error(cudaMemcpyAsync(
             refine_host_.data() + (size_t)first * BLK, cplx_ring_->base_d,
             (size_t)(FRAME_BLOCKS - first) * BLK * sizeof(std::complex<float>),
-            cudaMemcpyDeviceToHost, js8_scan_stream_));
+            cudaMemcpyDeviceToHost, refine_stream_));
     }
-    cuda_check_error(cudaStreamSynchronize(js8_scan_stream_));
+    cuda_check_error(cudaStreamSynchronize(refine_stream_));
 
     if ((int)refine_decim_.size() != gm::hf::kRefineFrame)
         refine_decim_.resize(gm::hf::kRefineFrame);

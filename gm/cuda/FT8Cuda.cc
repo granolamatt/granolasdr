@@ -37,6 +37,8 @@ FT8Cuda::FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
 
     cuda_check_error(cudaSetDevice(0));
     cuda_check_error(cudaStreamCreate(&cont_scan_stream_));
+    if (cplx_ring_)
+        cuda_check_error(cudaStreamCreate(&refine_stream_));
 
     allocContSlots();
 
@@ -50,6 +52,7 @@ FT8Cuda::~FT8Cuda()
     if (cont_worker_thread_.joinable()) cont_worker_thread_.join();
     freeContSlots();
     cudaStreamDestroy(cont_scan_stream_);
+    if (refine_stream_) cudaStreamDestroy(refine_stream_);
 }
 
 bool FT8Cuda::refineCandidate(int32_t fo, int to, uint64_t snap_start, float* log174)
@@ -80,14 +83,14 @@ bool FT8Cuda::refineCandidate(int32_t fo, int to, uint64_t snap_start, float* lo
     cuda_check_error(cudaMemcpyAsync(
         refine_host_.data(), cplx_ring_->base_d + s0 * (uint64_t)BLK,
         (size_t)first * BLK * sizeof(std::complex<float>),
-        cudaMemcpyDeviceToHost, cont_scan_stream_));
+        cudaMemcpyDeviceToHost, refine_stream_));
     if (first < FRAME_BLOCKS) {
         cuda_check_error(cudaMemcpyAsync(
             refine_host_.data() + (size_t)first * BLK, cplx_ring_->base_d,
             (size_t)(FRAME_BLOCKS - first) * BLK * sizeof(std::complex<float>),
-            cudaMemcpyDeviceToHost, cont_scan_stream_));
+            cudaMemcpyDeviceToHost, refine_stream_));
     }
-    cuda_check_error(cudaStreamSynchronize(cont_scan_stream_));
+    cuda_check_error(cudaStreamSynchronize(refine_stream_));
 
     // Downconvert to baseband (fo * bin_hz) + decimate, then fine-align + LLRs.
     if ((int)refine_decim_.size() != gm::hf::kRefineFrame)

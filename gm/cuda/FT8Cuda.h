@@ -90,6 +90,7 @@ private:
     const uint64_t* slot_cplx_idx_{nullptr};
     std::vector<std::complex<float>> refine_host_;   // D2H raw frame (~41 MB)
     std::vector<std::complex<float>> refine_decim_;  // decimated baseband frame
+    cudaStream_t refine_stream_{};                   // refine D2H (off the scan stream)
 
     static constexpr int CONTINUOUS_SLOTS = 8;
     int cont_stride_{6};
