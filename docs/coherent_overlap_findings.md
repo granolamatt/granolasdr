@@ -78,6 +78,23 @@ it cannot help detection, you can't refine a candidate you never found.
 **Recipe: (2,2) coarse detect + per-candidate refine.** (2,2) for detection SNR,
 refine for alignment. This beat the 4×4 grid (67 vs 51) at lower STFT cost.
 
+### The two levers, sized (120 s, 20m)
+
+| approach | decodes |
+|----------|---------|
+| (1,1) direct grid | 11 |
+| (2,2) direct grid | 18 |
+| (4,4) direct grid | 22 |
+| (2,2) detect + refine | 26 |
+| (4,4) detect + refine | 28 |
+
+- **Alignment (the refine) is the big lever:** +6 over the 4×4 grid (22→28), cheap per candidate.
+- **Detection SNR (finer coarse STFT) is the small lever:** (4,4) vs (2,2) detection adds only +2 (26→28).
+
+(2,2)+refine captures ~93% of the ceiling at 1/4 the detection cost. (4,4)+refine
+is the max-decode option. Either way, the refine dominates; detection osr is a
+second-order knob.
+
 ## Finding 3 — coherent phase does NOT work for FT8
 
 The original idea: conjugate the known Costas pattern to recover the carrier

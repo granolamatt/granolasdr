@@ -54,7 +54,7 @@ def costas_energy(frame):
     return np.abs(F[np.arange(len(CPOS)), CTONE]).sum()
 
 
-def refine(bb, start, f, dt_max=1088, dt_step=128, f_span=3.5, nf=13):
+def refine(bb, start, f, dt_max=int(os.environ.get("DTMAX", "512")), dt_step=64, f_span=3.5, nf=13):
     """Joint fine time+freq sync. Centers on candidate freq f, then searches a
     sub-symbol time shift and residual frequency to maximize Costas energy.
     Precise timing is essential: a 512-sample error rotates tone phase by radians
