@@ -92,7 +92,8 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     // RAII order: MagBlocks own ring memory; all readers hold const refs.
     // C++ destroys in reverse declaration order (readers before rings).
     gm::cuda::MagBlock<200> magblock(&buf,
-        kNormalRfftLen, kNormalTimeOsr, kNormalFreqOsr, kProxyXSubPort);
+        kNormalRfftLen, kNormalTimeOsr, kNormalFreqOsr, kProxyXSubPort,
+        /*retain_complex=*/true);   // FT8/JS8 Normal refine reads the complex ring
     magblock.start();
 
     gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, legacy_costas);

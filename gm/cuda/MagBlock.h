@@ -23,9 +23,12 @@ namespace cuda {
 template<int N>
 class MagBlock : public Thread {
 public:
+    // retain_complex: also keep a rolling ring of the raw complex composite (one
+    // slot per input block) so consumers can re-read a full frame with phase for
+    // per-candidate refine.  Off by default (extra VRAM); enable on the Normal ring.
     explicit MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP,
                       int rfft_len, int time_osr, int freq_osr,
-                      int zmq_port = 0);
+                      int zmq_port = 0, bool retain_complex = false);
     ~MagBlock();
 
     void run();
@@ -34,6 +37,17 @@ public:
     const gm::buffer::DeviceRingBuffer<uint8_t, N>& getRing() const {
         return ring_;
     }
+
+    // Complex-composite retention ring (valid only when retain_complex).  Depth
+    // in input blocks; one FT8/JS8 frame is 79*32 = 2528 blocks (~12.6 s).
+    static constexpr int kComplexBlocks = 4096;   // ~20 s at 409.6 kHz / 2048-block
+    const gm::buffer::DeviceRingBuffer<std::complex<float>, kComplexBlocks>&
+    getComplexRing() const { return complex_ring_; }
+    // Per-mag-slot snapshot of the complex ring block index of that slot's window
+    // start.  Index by (mag write_idx % N).  Maps a candidate's mag-slot time to
+    // its complex-frame start; the refine's fine time search absorbs any slop.
+    const uint64_t* getSlotCplxIdx() const { return slot_cplx_idx_; }
+    bool retainsComplex() const { return retain_complex_; }
 
 private:
     gm::buffer::BufferPosition<std::complex<float>>* inPos_;
@@ -56,6 +70,12 @@ private:
     uint8_t*             magFT8_d_{nullptr};
 
     gm::buffer::DeviceRingBuffer<uint8_t, N> ring_;
+
+    // Complex-composite retention (retain_complex only).
+    bool     retain_complex_{false};
+    gm::buffer::DeviceRingBuffer<std::complex<float>, kComplexBlocks> complex_ring_;
+    uint64_t cplx_wi_{0};                 // complex ring write index (input blocks)
+    uint64_t slot_cplx_idx_[N] = {};      // mag-slot -> complex block of window start
 
     zmq::context_t zmq_ctx_;
     zmq::socket_t  zmq_pub_;
