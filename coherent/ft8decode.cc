@@ -14,6 +14,7 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -186,6 +187,47 @@ static py::list decode_audio(py::array_t<float, py::array::c_style | py::array::
     return out;
 }
 
+// Raw candidates (freq/time in Hz) from the Costas sync — the coarse detector
+// for the coherent-refine experiment (includes candidates that don't decode).
+static py::list find_candidates(py::array_t<float, py::array::c_style | py::array::forcecast> audio,
+                                int sample_rate, int time_osr, int freq_osr,
+                                float f_min, float f_max, int min_score, int max_cand) {
+    auto a = audio.unchecked<1>();
+    int n = (int)a.shape(0);
+    std::vector<float> x(n);
+    for (int i = 0; i < n; ++i) x[i] = a(i);
+    Waterfall W = build_waterfall(x.data(), n, sample_rate, time_osr, freq_osr, f_min, f_max);
+    py::list out;
+    if (W.wf.num_blocks == 0) return out;
+    W.wf.mag = W.mag.data();
+    std::vector<ftx_candidate_t> cands(max_cand);
+    int nc = ftx_find_candidates(&W.wf, max_cand, cands.data(), min_score);
+    for (int i = 0; i < nc; ++i) {
+        const ftx_candidate_t* c = &cands[i];
+        py::dict d;
+        d["freq_hz"]  = (W.min_bin + c->freq_offset + (float)c->freq_sub / freq_osr) * TONE_HZ;
+        d["time_sec"] = (c->time_offset + (float)c->time_sub / time_osr) * FT8_SYM_SEC;
+        d["score"]    = (int)c->score;
+        out.append(d);
+    }
+    return out;
+}
+
+// Decode a numpy array of 174 LLRs (coherent or not) -> message text or None.
+// ft8_lib normalizes internally, so pass un-normalized LLRs.
+static py::object decode_llr(py::array_t<float, py::array::c_style | py::array::forcecast> llr,
+                             int ldpc_iters) {
+    auto a = llr.unchecked<1>();
+    if (a.shape(0) != FTX_LDPC_N) throw std::runtime_error("llr must have 174 elements");
+    float log174[FTX_LDPC_N];
+    for (int i = 0; i < FTX_LDPC_N; ++i) log174[i] = a(i);
+    ftx_message_t msg; ftx_decode_status_t st;
+    if (!ftx_decode_from_llr(log174, ldpc_iters, &msg, &st)) return py::none();
+    char text[64];
+    if (ftx_message_decode(&msg, &g_hash_if, text) != FTX_MESSAGE_RC_OK) return py::none();
+    return py::str(text);
+}
+
 PYBIND11_MODULE(ft8decode, m) {
     m.doc() = "FT8 decode via ft8_lib at a chosen STFT overlap (time_osr, freq_osr)";
     m.def("decode_audio", &decode_audio,
@@ -194,4 +236,10 @@ PYBIND11_MODULE(ft8decode, m) {
           py::arg("f_min") = 200.0f, py::arg("f_max") = 3200.0f,
           py::arg("min_score") = 10, py::arg("max_cand") = 440,
           py::arg("ldpc_iters") = 25);
+    m.def("find_candidates", &find_candidates,
+          py::arg("audio"), py::arg("sample_rate"),
+          py::arg("time_osr") = 2, py::arg("freq_osr") = 2,
+          py::arg("f_min") = 200.0f, py::arg("f_max") = 3200.0f,
+          py::arg("min_score") = 10, py::arg("max_cand") = 440);
+    m.def("decode_llr", &decode_llr, py::arg("llr"), py::arg("ldpc_iters") = 25);
 }
