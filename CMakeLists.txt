@@ -170,6 +170,7 @@ target_link_libraries(granolasdr PRIVATE lib_granolamatt ${GM_LIBS})
 pybind11_add_module(ft8decode coherent/ft8decode.cc
     ft8_lib/ft8/decode.c ft8_lib/ft8/message.c ft8_lib/ft8/ldpc.c
     ft8_lib/ft8/crc.c ft8_lib/ft8/constants.c ft8_lib/ft8/text.c
+    ft8_lib/ft8/encode.c
     ft8_lib/fft/kiss_fftr.c ft8_lib/fft/kiss_fft.c)
 target_include_directories(ft8decode PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/ft8 ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib)

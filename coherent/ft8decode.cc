@@ -23,6 +23,7 @@
 extern "C" {
 #include "ft8_lib/fft/kiss_fftr.h"
 #include "ft8_lib/ft8/decode.h"
+#include "ft8_lib/ft8/encode.h"
 #include "ft8_lib/ft8/message.h"
 #include "ft8_lib/ft8/constants.h"
 }
@@ -228,8 +229,24 @@ static py::object decode_llr(py::array_t<float, py::array::c_style | py::array::
     return py::str(text);
 }
 
+// Encode a message string -> 79 FT8 tones (uint8, 0..7). For synthetic tests:
+// encode -> GFSK modulate -> demod -> decode round-trips through the real payload,
+// so a CRC-valid decode of the recovered LLRs proves the demod is correct.
+static py::object encode(const std::string& text) {
+    ftx_message_t msg;
+    if (ftx_message_encode(&msg, nullptr, text.c_str()) != FTX_MESSAGE_RC_OK)
+        return py::none();
+    uint8_t tones[FT8_NN];
+    ft8_encode(msg.payload, tones);
+    py::array_t<uint8_t> out(FT8_NN);
+    std::memcpy(out.mutable_data(), tones, FT8_NN);
+    return out;
+}
+
 PYBIND11_MODULE(ft8decode, m) {
     m.doc() = "FT8 decode via ft8_lib at a chosen STFT overlap (time_osr, freq_osr)";
+    m.def("encode", &encode, py::arg("text"),
+          "Encode a message -> 79 tones (uint8), or None if the text is invalid.");
     m.def("decode_audio", &decode_audio,
           py::arg("audio"), py::arg("sample_rate"),
           py::arg("time_osr") = 2, py::arg("freq_osr") = 2,
