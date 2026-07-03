@@ -537,7 +537,7 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
               [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
     if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
 
-    // Refine is ~250 ms/candidate; cap per scan to keep the callback under budget
+    // Refine is ~50 ms/candidate; cap per scan to keep the callback under budget
     // (a transmission reappears across many scans, so strong failures still refine).
     const int kRefineMaxPerCycle = 2;
     int refine_used = 0;

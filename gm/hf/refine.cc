@@ -64,17 +64,30 @@ float refine_llr(const std::complex<float>* frame, int frame_len,
                  const RefineMode& mode, float* log174) {
     kiss_fft_cfg cfg = kiss_fft_alloc(NSPS, 0, nullptr, nullptr);
 
-    // Fine time+freq search maximizing Costas energy (continuous, absorbs the
+    // Fine time+freq alignment maximizing Costas energy (continuous, absorbs the
     // coarse grid's residual offset). ±512 samples, ±3.5 Hz — matches the offline.
-    int   best_dt = 0;
-    float best_df = 0.0f, best_e = -1.0f;
-    for (int dt = -512; dt <= 512; dt += 64) {
+    // The energy surface is smooth and near-unimodal over one coarse cell, so
+    // coordinate descent (dt, then df, then dt again to catch interaction) finds
+    // the same optimum as the full 17x13 joint grid in 17+13+17 evals — ~4.7x
+    // cheaper, which is what keeps refine off the scan worker's critical path.
+    auto sweep_dt = [&](float df, int& best_dt, float& best_e) {
+        for (int dt = -512; dt <= 512; dt += 64) {
+            float e = sym_tones(frame, frame_len, dt, df, mode, cfg, nullptr);
+            if (e > best_e) { best_e = e; best_dt = dt; }
+        }
+    };
+    auto sweep_df = [&](int dt, float& best_df, float& best_e) {
         for (int fi = 0; fi < 13; ++fi) {
             float df = -3.5f + 7.0f * fi / 12.0f;
             float e = sym_tones(frame, frame_len, dt, df, mode, cfg, nullptr);
-            if (e > best_e) { best_e = e; best_dt = dt; best_df = df; }
+            if (e > best_e) { best_e = e; best_df = df; }
         }
-    }
+    };
+    int   best_dt = 0;
+    float best_df = 0.0f, best_e = -1.0f;
+    sweep_dt(0.0f, best_dt, best_e);               // dt at df=0
+    best_e = -1.0f; sweep_df(best_dt, best_df, best_e);   // df at best dt (grid incl. df=0)
+    best_e = -1.0f; sweep_dt(best_df, best_dt, best_e);   // dt at best df
 
     // Re-run at the best alignment, keep the tone bins, extract LLRs.
     std::vector<std::complex<float>> Z(NSYM * 8);

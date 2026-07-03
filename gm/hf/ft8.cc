@@ -27,10 +27,10 @@
 
 const int kLDPC_iterations = 25;
 
-// Refine is ~250 ms/candidate (FFT grid search); the continuous scan runs every
-// ~1 s (on top of BP+OSD), so cap refines per scan to keep the decode callback
-// under budget.  A given transmission reappears across ~12 scans, so the strong
-// failures still get refined over time — the cap just spreads the work out.
+// Refine is ~50 ms/candidate (coordinate-descent FFT search + D2H); the scan
+// runs every ~1 s on top of BP+OSD, so cap refines per scan to keep the decode
+// callback well under budget.  A transmission reappears across ~12 scans, so the
+// strong failures still get refined over time — the cap just spreads the work.
 const int kRefineMaxPerCycle = 2;
 
 #define CALLSIGN_HASHTABLE_SIZE 2048
