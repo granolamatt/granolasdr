@@ -141,3 +141,55 @@ artifact.
 - The binding builds its own STFT (ft8_lib's CPU monitor is stripped in this
   fork); magnitudes are noise-floor-referenced since ft8_lib uses only relative
   values.
+
+---
+
+# Coherent / trellis follow-up (revisited)
+
+Question: could a coherent (Costas-conjugate) demod or a Viterbi/BCJR trellis
+beat the non-coherent refine? Two synthetic experiments settle it.
+
+## Setup
+`coherent/coherent_ceiling.py` and `coherent/coherent_timing.py`: encode a real
+message (ft8decode.encode), GFSK-modulate (WSJT-X BT=2.0, h=1), add AWGN, decode
+with ft8_lib, sweep per-symbol Es/N0, score against the noiseless canonical decode.
+
+## Key fact: FT8 has h = df*T = 6.25 * 0.16 = 1
+With h=1 the continuous phase returns to phi0 (mod 2pi) at every symbol boundary
+regardless of data. There is NO data-dependent phase state, so a trellis has
+almost nothing to resolve — only the BT=2.0 GFSK ISI (pulse spans 3 symbols).
+
+## Ceiling experiment (genie timing), 50% decode Es/N0
+| detector | gain vs baseline |
+|---|---|
+| A rect-FFT \|.\| (pipeline/refine today) | — |
+| B GFSK matched filter \|.\|, genie neighbours | +0.1 dB  (what a trellis buys) |
+| C coherent, genie phase + neighbours | +2.2 dB  (ceiling) |
+| D coherent, phi0 estimated from Costas, genie neighbours | +1.1 dB |
+| E coherent, phi0 estimated, isolated symbol (no neighbours) | +1.5 dB |
+
+- The trellis/ISI is worth ~0.1 dB. Dead end.
+- The prize is coherent phase (~2.2 dB ceiling; ~1.5 dB with an estimated
+  constant phi0). Isolated-symbol MF beats genie-neighbour MF — a constant phi0
+  fits the neighbour-independent phase better, so the *simplest* detector wins.
+
+## Timing-sensitivity experiment (the killer), coherent gain A->E
+| fine timing step | residual | coherent gain |
+|---|---|---|
+| 2 samples  | ~+/-1  | +1.35 dB |
+| 32 samples | ~+/-16 | +0.18 dB |
+| 64 samples | ~+/-32 | +0.01 dB |
+
+The coherent gain is destroyed by timing error. Capturing it needs symbol timing
+to ~+/-2 samples (0.1% of a symbol). refine locks timing at step 64 (~+/-32
+samples) via a *non-coherent* Costas search, which yields ~0 coherent gain — and
+even a step-2 search doesn't reliably deliver coherent-quality timing at the
+coarse-acquisition stage.
+
+## Conclusion
+Not worth wiring a coherent/trellis mode into the GPU pipeline:
+- trellis (ISI): ~0.1 dB;
+- coherence: ~1.35 dB ceiling, but only with ~10x finer timing than refine does,
+  plus coherent-quality acquisition, and still above genie neighbour assumptions.
+The non-coherent per-candidate refine (shipped) is the right ROI. Revisit only if
+a sub-sample timing/phase lock becomes cheap on the GPU.
