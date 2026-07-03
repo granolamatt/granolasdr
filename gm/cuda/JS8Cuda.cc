@@ -4,7 +4,9 @@
 #include "gm/cuda/JS8Cuda.h"
 #include "gm/cuda/JS8SoftCuda.h"
 #include "gm/cuda/JS8LdpcCuda.h"
+#include "gm/cuda/HostCuda.h"
 #include "gm/hf/ft8_capture.h"
+#include "gm/hf/refine.h"
 
 namespace gm {
 namespace cuda {
@@ -13,8 +15,12 @@ template<int N>
 JS8Cuda<N>::JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
                     float min_score, int zmq_port,
                     JS8ScanFn scan_fn, int time_osr, int freq_osr, int cap_blocks,
-                    const char* label, bool legacy_costas)
+                    const char* label, bool legacy_costas,
+                    const gm::buffer::DeviceRingBuffer<std::complex<float>,
+                          gm::buffer::kComplexCompositeBlocks>* cplx_ring,
+                    const uint64_t* slot_cplx_idx)
     : ring_(ring), min_score_(min_score), legacy_costas_(legacy_costas),
+      cplx_ring_(cplx_ring), slot_cplx_idx_(slot_cplx_idx),
       scan_fn_(scan_fn), time_osr_(time_osr), freq_osr_(freq_osr), cap_blocks_(cap_blocks),
       label_(label),
       zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
@@ -257,6 +263,51 @@ void JS8Cuda<N>::workerLoop()
         slot.dispatched.store(false, std::memory_order_release);
         cont_read_idx_.store(++ri, std::memory_order_release);
     }
+}
+
+template<int N>
+bool JS8Cuda<N>::refineCandidate(int32_t fo, int to, uint64_t snap_start, float* log174)
+{
+    if (!cplx_ring_ || !slot_cplx_idx_) return false;
+
+    // One composite block = cplx_ring_->num_bins samples; one symbol (ring_.num_bins
+    // samples) spans that many blocks; a frame is 79 symbols. Mirrors FT8Cuda.
+    const int BLK            = (int)cplx_ring_->num_bins;
+    const int blocks_per_sym = (int)(ring_.num_bins / cplx_ring_->num_bins);
+    const int FRAME_BLOCKS   = gm::hf::kRefineNsym * blocks_per_sym;
+    const int n_in           = FRAME_BLOCKS * BLK;
+
+    const uint64_t mag_slot   = snap_start + (uint64_t)to;
+    const uint64_t cplx_start = slot_cplx_idx_[mag_slot % N];
+    const uint64_t cwi        = cplx_ring_->write_idx.load(std::memory_order_acquire);
+
+    if (cplx_start + (uint64_t)FRAME_BLOCKS > cwi) return false;                 // incomplete
+    if (cwi - cplx_start > (uint64_t)gm::buffer::kComplexCompositeBlocks) return false; // aged out
+
+    if ((int)refine_host_.size() != n_in) refine_host_.resize(n_in);
+    const uint64_t s0    = cplx_start % (uint64_t)gm::buffer::kComplexCompositeBlocks;
+    const int      first = (int)std::min<uint64_t>(
+        (uint64_t)FRAME_BLOCKS, (uint64_t)gm::buffer::kComplexCompositeBlocks - s0);
+    cuda_check_error(cudaMemcpyAsync(
+        refine_host_.data(), cplx_ring_->base_d + s0 * (uint64_t)BLK,
+        (size_t)first * BLK * sizeof(std::complex<float>),
+        cudaMemcpyDeviceToHost, js8_scan_stream_));
+    if (first < FRAME_BLOCKS) {
+        cuda_check_error(cudaMemcpyAsync(
+            refine_host_.data() + (size_t)first * BLK, cplx_ring_->base_d,
+            (size_t)(FRAME_BLOCKS - first) * BLK * sizeof(std::complex<float>),
+            cudaMemcpyDeviceToHost, js8_scan_stream_));
+    }
+    cuda_check_error(cudaStreamSynchronize(js8_scan_stream_));
+
+    if ((int)refine_decim_.size() != gm::hf::kRefineFrame)
+        refine_decim_.resize(gm::hf::kRefineFrame);
+    const float freq_hz = (float)fo * (409600.0f / (float)ring_.num_bins);
+    gm::hf::extract_frame(refine_host_.data(), n_in, freq_hz, 409600,
+                          refine_decim_.data(), gm::hf::kRefineFrame);
+    gm::hf::refine_llr(refine_decim_.data(), gm::hf::kRefineFrame,
+                       gm::hf::kJS8Refine, log174);
+    return true;
 }
 
 template class JS8Cuda<200>;

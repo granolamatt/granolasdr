@@ -20,6 +20,12 @@ public:
     virtual void setDecodeCallback(std::function<void(ContScanResult&)> cb) = 0;
     virtual void start() = 0;
     virtual void stop()  = 0;
+    // Per-candidate freq/time refine (fallback). Fills log174[174] from the
+    // retained complex frame with continuous alignment + kJS8Refine LLRs.
+    // Returns false when no complex ring is attached (e.g. Fast) or the frame
+    // has aged out. See FT8Cuda::refineCandidate for the shared design.
+    virtual bool refineCandidate(int32_t fo, int to, uint64_t snap_start,
+                                 float* log174) = 0;
 };
 
 // Scan kernel function pointer — matches js8_gpu_scan and js8_fast_gpu_scan.
@@ -39,12 +45,17 @@ using JS8ScanFn = void(*)(
 template<int N>
 class JS8Cuda : public JS8CudaBase {
 public:
+    // cplx_ring + slot_cplx_idx (optional): MagBlock's complex-composite
+    // retention ring for the refine fallback (Normal/N=200 only). Null disables.
     explicit JS8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
                      float min_score, int zmq_port,
                      JS8ScanFn scan_fn,
                      int time_osr, int freq_osr, int cap_blocks,
                      const char* label = "JS8",
-                     bool legacy_costas = false);
+                     bool legacy_costas = false,
+                     const gm::buffer::DeviceRingBuffer<std::complex<float>,
+                           gm::buffer::kComplexCompositeBlocks>* cplx_ring = nullptr,
+                     const uint64_t* slot_cplx_idx = nullptr);
     ~JS8Cuda() override;
 
     void setDecodeCallback(std::function<void(ContScanResult&)> cb) override {
@@ -54,10 +65,20 @@ public:
     void start() override;
     void stop()  override;
 
+    bool refineCandidate(int32_t fo, int to, uint64_t snap_start,
+                         float* log174) override;
+
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring_;
     float       min_score_;
     bool        legacy_costas_;
+
+    // Complex-composite retention for the refine fallback (null = disabled).
+    const gm::buffer::DeviceRingBuffer<std::complex<float>,
+          gm::buffer::kComplexCompositeBlocks>* cplx_ring_{nullptr};
+    const uint64_t* slot_cplx_idx_{nullptr};
+    std::vector<std::complex<float>> refine_host_;   // D2H raw frame (~41 MB)
+    std::vector<std::complex<float>> refine_decim_;  // decimated baseband frame
     JS8ScanFn   scan_fn_;
     int         time_osr_;
     int         freq_osr_;

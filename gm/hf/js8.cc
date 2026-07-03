@@ -407,7 +407,7 @@ namespace hf {
 JS8::JS8(gm::cuda::JS8CudaBase* js8cuda, int zmq_port,
          float symbol_period, float cycle_secs, int time_osr, int rfft_size,
          const char* mode_name, int wsdict_port)
-    : zmq_port_(zmq_port),
+    : js8cuda_(js8cuda), zmq_port_(zmq_port),
       symbol_period_(symbol_period), cycle_secs_(cycle_secs),
       time_osr_(time_osr), rfft_size_(rfft_size), mode_name_(mode_name),
       zmq_ctx_(1),
@@ -544,6 +544,20 @@ void JS8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r)
         bool ok = js8_osd_decode(llr, osd_order_, osd_xhat, &dist) &&
                   (osd_soft_thresh_ <= 0.0f || dist <= osd_soft_thresh_) &&
                   publishCandidate(r, i, osd_xhat + 87, llr, unix_now, "osd", &dist);
+
+        // Refine fallback: grid-LLR OSD failed on a strong candidate.  Re-extract
+        // LLRs from the retained complex frame with continuous freq/time alignment
+        // (beats the STFT grid), then retry OSD on the sharper LLRs.
+        if (!ok && refine_enable_) {
+            float rllr[kFtxLdpcN];
+            float rdist = 0.0f;
+            if (js8cuda_->refineCandidate(r.fo[i], (int)r.to[i], r.snap_start, rllr) &&
+                js8_osd_decode(rllr, osd_order_, osd_xhat, &rdist) &&
+                (osd_soft_thresh_ <= 0.0f || rdist <= osd_soft_thresh_) &&
+                publishCandidate(r, i, osd_xhat + 87, rllr, unix_now, "refine", &rdist))
+                ok = true;
+        }
+
         if (ok) {
             decoded_bins.insert(r.fo[i]);
         } else if (llr_capture_.enabled() && !decoded_bins.count(r.fo[i])) {

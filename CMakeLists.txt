@@ -72,6 +72,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/MagBlock.cc"
     "gm/cuda/FT8Cuda.cc"
     "gm/cuda/JS8Cuda.cc"
+    "gm/hf/refine.cc"
     "ft8_lib/fft/kiss_fft.c"
     )
 

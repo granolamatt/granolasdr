@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <thread>
@@ -7,6 +8,7 @@
 #include "gm/cuda/FT8SoftCuda.h"
 #include "gm/cuda/HostCuda.h"
 #include "gm/hf/ft8_capture.h"
+#include "gm/hf/refine.h"
 #include "ft8_lib/ft8/constants.h"
 
 namespace gm {
@@ -48,6 +50,54 @@ FT8Cuda::~FT8Cuda()
     if (cont_worker_thread_.joinable()) cont_worker_thread_.join();
     freeContSlots();
     cudaStreamDestroy(cont_scan_stream_);
+}
+
+bool FT8Cuda::refineCandidate(int32_t fo, int to, uint64_t snap_start, float* log174)
+{
+    if (!cplx_ring_ || !slot_cplx_idx_) return false;
+
+    // One composite block = cplx_ring_->num_bins samples; one FT8 symbol (65536
+    // samples = ring_.num_bins) spans that many blocks; a frame is 79 symbols.
+    const int BLK            = (int)cplx_ring_->num_bins;                    // 2048
+    const int blocks_per_sym = (int)(ring_.num_bins / cplx_ring_->num_bins); // 32
+    const int FRAME_BLOCKS   = gm::hf::kRefineNsym * blocks_per_sym;         // 2528
+    const int n_in           = FRAME_BLOCKS * BLK;                          // 5,177,344
+
+    // Candidate's complex frame start block, via the mag-slot -> block map.
+    const uint64_t mag_slot   = snap_start + (uint64_t)to;
+    const uint64_t cplx_start = slot_cplx_idx_[mag_slot % 200];
+    const uint64_t cwi        = cplx_ring_->write_idx.load(std::memory_order_acquire);
+
+    // Frame must be fully written and still inside the retention window.
+    if (cplx_start + (uint64_t)FRAME_BLOCKS > cwi) return false;                 // incomplete
+    if (cwi - cplx_start > (uint64_t)gm::buffer::kComplexCompositeBlocks) return false; // aged out
+
+    // D2H the frame (one ring wrap at most).
+    if ((int)refine_host_.size() != n_in) refine_host_.resize(n_in);
+    const uint64_t s0    = cplx_start % (uint64_t)gm::buffer::kComplexCompositeBlocks;
+    const int      first = (int)std::min<uint64_t>(
+        (uint64_t)FRAME_BLOCKS, (uint64_t)gm::buffer::kComplexCompositeBlocks - s0);
+    cuda_check_error(cudaMemcpyAsync(
+        refine_host_.data(), cplx_ring_->base_d + s0 * (uint64_t)BLK,
+        (size_t)first * BLK * sizeof(std::complex<float>),
+        cudaMemcpyDeviceToHost, cont_scan_stream_));
+    if (first < FRAME_BLOCKS) {
+        cuda_check_error(cudaMemcpyAsync(
+            refine_host_.data() + (size_t)first * BLK, cplx_ring_->base_d,
+            (size_t)(FRAME_BLOCKS - first) * BLK * sizeof(std::complex<float>),
+            cudaMemcpyDeviceToHost, cont_scan_stream_));
+    }
+    cuda_check_error(cudaStreamSynchronize(cont_scan_stream_));
+
+    // Downconvert to baseband (fo * bin_hz) + decimate, then fine-align + LLRs.
+    if ((int)refine_decim_.size() != gm::hf::kRefineFrame)
+        refine_decim_.resize(gm::hf::kRefineFrame);
+    const float freq_hz = (float)fo * (409600.0f / (float)ring_.num_bins);
+    gm::hf::extract_frame(refine_host_.data(), n_in, freq_hz, 409600,
+                          refine_decim_.data(), gm::hf::kRefineFrame);
+    gm::hf::refine_llr(refine_decim_.data(), gm::hf::kRefineFrame,
+                       gm::hf::kFT8Refine, log174);
+    return true;
 }
 
 void FT8Cuda::pubJson(const char* topic, const char* json)

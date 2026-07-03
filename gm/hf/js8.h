@@ -41,6 +41,10 @@ public:
     void setOsdConfig(bool enable, int order, float score_floor,
                       int max_per_cycle, float soft_thresh = 0.0f);
 
+    // Enable the per-candidate refine fallback (needs the complex retention ring;
+    // Normal only). Runs after OSD fails on a strong candidate.
+    void setRefineEnabled(bool enable) { refine_enable_ = enable; }
+
 private:
     // CRC-12 + dedup + publish for one candidate; `info` is the 87-bit message
     // (codeword + 87).  Shared by the SP-converged ("pass") and OSD ("osd") paths.
@@ -50,6 +54,7 @@ private:
                           const uint8_t* info, const float* llr, double unix_now,
                           const char* status, const float* osd_dist);
 
+    gm::cuda::JS8CudaBase* js8cuda_;   // for the refine fallback
     int         zmq_port_;
     float       symbol_period_;
     float       cycle_secs_;
@@ -76,6 +81,9 @@ private:
     float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
     int   osd_max_per_cycle_ = 64;
     float osd_soft_thresh_   = 0.0f;   // 0 = gate on CRC-12 only
+
+    // Per-candidate refine fallback (see setRefineEnabled). Off by default.
+    bool  refine_enable_ = false;
 };
 
 } // namespace hf

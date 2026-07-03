@@ -135,11 +135,24 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     ft8.setOsdConfig(ft8_osd.enable, /*order=*/2, ft8_osd.floor, ft8_osd.max);
     log_osd("FT8", ft8_osd);
 
+    // Per-candidate freq/time refine fallback (reads MagBlock's complex ring).
+    // OFF by default; FT8_REFINE=1 enables. Runs only after BP+OSD both fail.
+    const bool ft8_refine = std::getenv("FT8_REFINE") &&
+                            std::string(std::getenv("FT8_REFINE")) != "0";
+    ft8.setRefineEnabled(ft8_refine);
+    printf("FT8 refine fallback: %s\n", ft8_refine ? "ENABLED (FT8_REFINE=1)"
+                                                    : "disabled (set FT8_REFINE=1)");
+
     const OsdEnv js8_osd = read_osd_env("JS8_OSD", "JS8_OSD_SCORE_FLOOR", "JS8_OSD_MAX");
     auto apply_osd = [&](gm::hf::JS8* j) {
         if (j) j->setOsdConfig(js8_osd.enable, /*order=*/2, js8_osd.floor, js8_osd.max);
     };
     log_osd("JS8", js8_osd);
+
+    // JS8 Normal shares MagBlock<200> with FT8, so it refines from the same
+    // complex ring.  OFF by default; JS8_REFINE=1 enables (Normal only).
+    const bool js8_refine = std::getenv("JS8_REFINE") &&
+                            std::string(std::getenv("JS8_REFINE")) != "0";
 
     std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
     std::unique_ptr<gm::hf::JS8>            js8_obj;
@@ -147,11 +160,14 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
         js8channel = std::make_unique<gm::cuda::JS8Cuda<200>>(
             magblock.getRing(), min_score, kProxyXSubPort,
             js8_gpu_scan, kNormalTimeOsr, kNormalFreqOsr, kNormalCapBlks, "JS8",
-            legacy_costas);
+            legacy_costas, &magblock.getComplexRing(), magblock.getSlotCplxIdx());
         js8_obj = std::make_unique<gm::hf::JS8>(
             js8channel.get(), kProxyXSubPort,
             kNormalSymPer, kNormalCycleSec, kNormalTimeOsr, kNormalRfftLen,
             "JS8", kWsDictPort);
+        js8_obj->setRefineEnabled(js8_refine);
+        printf("JS8 refine fallback: %s\n", js8_refine ? "ENABLED (JS8_REFINE=1)"
+                                                       : "disabled (set JS8_REFINE=1)");
     }
 
     std::unique_ptr<gm::cuda::MagBlock<128>>  magblock_fast;

@@ -252,10 +252,11 @@ namespace hf {
         };
 
         // Labeled LLR training capture (one line per frequency bin per scan).
-        auto capture = [&](uint32_t i, const char* status,
-                           const char* text, const float* dist) {
+        auto capture = [&](uint32_t i, const char* status, const char* text,
+                           const float* dist, const float* llr_override = nullptr) {
             if (!llr_capture_.enabled()) return;
-            const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
+            const float* llr = llr_override ? llr_override
+                                            : r.log174 + (size_t)i * FTX_LDPC_N;
             float freq_hz = composite_bin_to_rf_hz(r.fo[i]);
             float snr     = (float)r.score[i] - 26.0f;
             llr_capture_.write("FT8", status, llr, FTX_LDPC_N,
@@ -322,6 +323,33 @@ namespace hf {
                     }
                 }
             }
+            // Refine fallback: BP+OSD both failed on the discrete-grid LLRs.
+            // Re-extract LLRs from the retained complex frame with continuous
+            // freq/time alignment (beats the STFT grid), then retry BP then OSD.
+            if (!decoded && refine_enable_) {
+                float rllr[FTX_LDPC_N];
+                if (ft8cuda_->refineCandidate(r.fo[i], (int)r.to[i], r.snap_start, rllr)) {
+                    ftx_message_t msg;
+                    ftx_decode_status_t st;
+                    char text[FTX_MAX_MESSAGE_LENGTH];
+                    float rdist = 0.0f;
+                    bool cracked =
+                        ftx_decode_from_llr(rllr, kLDPC_iterations, &msg, &st);
+                    if (!cracked &&
+                        ft8_osd_decode(rllr, osd_order_, plain174, &rdist) &&
+                        (osd_soft_thresh_ <= 0.0f || rdist <= osd_soft_thresh_))
+                        cracked = ftx_decode_from_bits(plain174, &msg, &st);
+                    if (cracked &&
+                        ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK) {
+                        publish_spot(i, text);
+                        if (!decoded_bins.count(r.fo[i]))
+                            capture(i, "refine", text, &rdist, rllr);
+                        decoded_bins.insert(r.fo[i]);
+                        decoded = true;
+                    }
+                }
+            }
+
             // Strong-Costas candidate the OSD gate tried but no decoder cracked.
             if (!decoded && !decoded_bins.count(r.fo[i]))
                 capture(i, "fail", nullptr, &dist);

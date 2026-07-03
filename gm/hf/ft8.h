@@ -39,6 +39,9 @@ public:
     void setOsdConfig(bool enable, int order, float score_floor,
                       int max_per_cycle, float soft_thresh = 0.0f);
 
+    // Enable the per-candidate refine fallback (needs the complex retention ring).
+    void setRefineEnabled(bool enable) { refine_enable_ = enable; }
+
 private:
     gm::cuda::FT8Cuda* ft8cuda_;
     int zmq_port_;
@@ -68,6 +71,12 @@ private:
     float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
     int   osd_max_per_cycle_ = 64;
     float osd_soft_thresh_   = 0.0f;   // 0 = gate on CRC-14 only
+
+    // Per-candidate freq/time refine fallback (see setRefineEnabled). Runs after
+    // BP+OSD both fail on a strong-Costas candidate: re-extracts LLRs from the
+    // retained complex frame with continuous alignment, then retries BP+OSD.
+    // Requires MagBlock's complex ring (Normal only); disabled by default.
+    bool  refine_enable_ = false;
 
     void publishDecoded(const char* callsign, float freq_hz, float snr,
                         double unix_time, float time_offset);
