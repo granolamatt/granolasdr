@@ -15,6 +15,7 @@
 #include "gm/cuda/FT8Cuda.h"
 #include "gm/cuda/FT8Osd.h"
 #include "wsdict.h"
+#include "gm/hf/decode_stats.h"
 #include "third_party/nlohmann_json.hpp"
 
 #include "ft8_lib/ft8/decode.h"
@@ -173,6 +174,7 @@ namespace hf {
     {
         printf("DECODED: %s time_offset=%.3fs freq=%.0fHz snr=%.1f unix=%.0f\n",
                callsign, (double)time_offset, (double)freq_hz, (double)snr, unix_time);
+        gm::hf::decode_stats_count("FT8");
 
         nlohmann::json v;
         v["call"]   = callsign;

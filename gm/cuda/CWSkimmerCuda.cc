@@ -1,6 +1,7 @@
 #include "gm/cuda/CWSkimmerCuda.h"
 #include "gm/hf/cw_bands.h"
 #include "gm/hf/cw_morse.h"
+#include "gm/hf/decode_stats.h"
 
 #include <algorithm>
 #include <chrono>
@@ -154,6 +155,7 @@ void CWSkimmerCuda<N>::worker() {
             if (hz <= 0.0) continue;
             printf("[%s] %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s\n",
                    label_, hz / 1000.0, dec.wpm(), s, txt.c_str());
+            gm::hf::decode_stats_count(label_);
             ++emitted;
         }
     }

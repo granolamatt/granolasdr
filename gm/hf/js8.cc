@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "gm/hf/js8.h"
+#include "gm/hf/decode_stats.h"
 #include "gm/hf/jsc.h"
 #include "gm/hf/ft8_capture.h"
 #include "gm/hf/band_map.h"
@@ -454,6 +455,7 @@ void JS8::publishDecoded(const char* text, const char* from_call, float freq_hz,
 {
     printf("[%s] DECODED: %-24s  freq=%7.0f Hz  snr=%+5.1f  offset=%+.3fs\n",
            mode_name_, text, (double)freq_hz, (double)snr, (double)time_offset);
+    gm::hf::decode_stats_count(mode_name_);
 
     nlohmann::json v;
     v["text"]   = text;
