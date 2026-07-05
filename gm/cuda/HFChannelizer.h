@@ -130,6 +130,21 @@ private:
     std::vector<float>               norm_ema_h_;     // EMA of linear |mag| per bin
     std::vector<float>               norm_logmag_h_;  // log10(ema) per bin for poly fit
 
+    // Wideband equalization (WIDEBAND_EQ=1): flatten the ENTIRE wideband FFT
+    // before any bin-selection, so CW and audio (tunable anywhere) get equalized
+    // too.  Mutually exclusive with the per-band norm above.  All GPU-side.
+    bool   wideband_eq_{false};
+    int    weq_nbins_{0};                   // R2C bins of the wideband FFT (NLARGE+1)
+    int    weq_half_win_{128};              // box-filter half window (WEQ_WIN)
+    float  weq_max_gain_{100.0f};           // gain clamp (WEQ_MAXGAIN)
+    int    weq_frame_{0};
+    int    weq_update_count_{0};
+    float* weq_ema_d_{nullptr};             // per-bin noise-floor EMA
+    float* weq_logema_d_{nullptr};          // log10(ema) scratch for the box filter
+    float* weq_gain_targ_d_{nullptr};       // latest computed per-bin gain (ramp end)
+    float* weq_gain_prev_d_{nullptr};       // gain at start of the current ramp
+    float* weq_sum_d_{nullptr};             // 1-float global-mean-log accumulator
+
 public:
     gm::buffer::BufferFileParams getBufferFileParams() const;
     // Same, for the CW composite (819.2 kHz, cw_fft_length/2 samples/block).

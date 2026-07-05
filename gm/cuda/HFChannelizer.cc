@@ -107,6 +107,27 @@ wsdict_port_(wsdict_port) {
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
 
+        // Wideband equalization: flatten the entire wideband FFT before any
+        // bin-selection.  ON by default (mutually exclusive with the per-band
+        // norm); set WIDEBAND_EQ=0 to fall back to per-band normalization.
+        {
+            const char* we = std::getenv("WIDEBAND_EQ");
+            wideband_eq_ = (we == nullptr) || (std::string(we) != "0");
+        }
+        if (wideband_eq_) {
+            weq_nbins_ = gm::rx888::rx888::NLARGE + 1;   // R2C bins of the 2*NLARGE FFT
+            if (const char* w = std::getenv("WEQ_WIN"))     weq_half_win_ = std::atoi(w);
+            if (const char* m = std::getenv("WEQ_MAXGAIN")) weq_max_gain_ = (float)std::atof(m);
+            cuda_check_error(cudaMalloc((void**)&weq_ema_d_,       weq_nbins_ * sizeof(float)));
+            cuda_check_error(cudaMalloc((void**)&weq_logema_d_,    weq_nbins_ * sizeof(float)));
+            cuda_check_error(cudaMalloc((void**)&weq_gain_targ_d_, weq_nbins_ * sizeof(float)));
+            cuda_check_error(cudaMalloc((void**)&weq_gain_prev_d_, weq_nbins_ * sizeof(float)));
+            cuda_check_error(cudaMalloc((void**)&weq_sum_d_,       sizeof(float)));
+            printf("Wideband EQ: ENABLED  nbins=%d  half_win=%d (%.1f kHz)  max_gain=%.0f  "
+                   "(whole-spectrum, pre-composite; per-band norm disabled)\n",
+                   weq_nbins_, weq_half_win_, weq_half_win_ * 2 * 0.1, (double)weq_max_gain_);
+        }
+
         fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
         if (fftRes) printf("HFChannelizer: cufftPlan1d (C2C) failed\n");
         fftRes = cufftSetStream(iplan, stream);
@@ -180,6 +201,11 @@ HFChannelizer::~HFChannelizer() {
     if (demodData_d) cudaFree(demodData_d);
     if (cwChannelData_d) cudaFree(cwChannelData_d);
     if (cwDemodData_d) cudaFree(cwDemodData_d);
+    if (weq_ema_d_) cudaFree(weq_ema_d_);
+    if (weq_logema_d_) cudaFree(weq_logema_d_);
+    if (weq_gain_targ_d_) cudaFree(weq_gain_targ_d_);
+    if (weq_gain_prev_d_) cudaFree(weq_gain_prev_d_);
+    if (weq_sum_d_) cudaFree(weq_sum_d_);
     cufftDestroy(plan);
     cufftDestroy(iplan);
     cufftDestroy(audio_plan);
@@ -210,6 +236,41 @@ int HFChannelizer::doCopy(uint64_t now) {
         if (rval) {
             printf("Error in R2C FFT\n");
             return 0;
+        }
+
+        // Wideband equalization: flatten the whole FFT HERE, before audio
+        // extraction and the FT8/JS8/CW composites, so every downstream consumer
+        // sees a flat noise floor.  EMA reads the raw FFT; the apply is in-place
+        // (fftData_d is regenerated each frame, so the EMA always sees raw data).
+        if (wideband_eq_) {
+            const int phase = weq_frame_ % NORM_INTERVAL;
+            if (phase == 0) {
+                bool  warm   = weq_update_count_ < 5;
+                float a_down = warm ? 0.30f : 0.10f;
+                float a_up   = warm ? 0.10f : 0.005f;
+                // Old target becomes the ramp start, so the applied gain is
+                // continuous across the update; then compute the new target.
+                if (weq_update_count_ > 0)
+                    cudaMemcpyAsync(weq_gain_prev_d_, weq_gain_targ_d_,
+                                    weq_nbins_ * sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream);
+                weq_update_ema((cufftComplex*)fftData_d, weq_ema_d_, weq_nbins_,
+                               a_down, a_up, weq_update_count_ == 0, stream);
+                weq_compute_gains(weq_ema_d_, weq_logema_d_, weq_gain_targ_d_, weq_sum_d_,
+                                  weq_nbins_, weq_half_win_, weq_max_gain_, stream);
+                if (weq_update_count_ == 0)   // first tap set: no ramp, prev = targ
+                    cudaMemcpyAsync(weq_gain_prev_d_, weq_gain_targ_d_,
+                                    weq_nbins_ * sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream);
+                weq_update_count_++;
+            }
+            if (weq_update_count_ > 0) {
+                // Ramp gains prev->targ across the interval so audio sees no step.
+                float t = (float)phase / (float)(NORM_INTERVAL - 1);
+                weq_apply_interp((cufftComplex*)fftData_d, weq_gain_prev_d_,
+                                 weq_gain_targ_d_, weq_nbins_, t, stream);
+            }
+            weq_frame_++;
         }
 
         // Audio extraction: D2D gather bins → audioBins_d, batched GPU IFFT, D2H to pinned ring.
@@ -247,7 +308,8 @@ int HFChannelizer::doCopy(uint64_t now) {
         // constant at 10 s/update), fit a per-band polynomial, and recompute gains.
         // Gains are applied to channelData_d after composite assembly, before the IFFT,
         // so both the waterfall and the decoders receive a spectrally flattened signal.
-        if (++norm_frame_ % NORM_INTERVAL == 0) {
+        // Skipped entirely under wideband EQ (fftData_d is already flat above).
+        if (!wideband_eq_ && ++norm_frame_ % NORM_INTERVAL == 0) {
             cudaStreamSynchronize(stream);  // wait for R2C FFT to finish
 
             // D2H: collect complex band bins from the wideband FFT output.
@@ -329,8 +391,10 @@ int HFChannelizer::doCopy(uint64_t now) {
         }
 
         // Apply per-bin equalization gains to the packed composite (before IFFT).
-        norm_apply_gains((cufftComplex*)channelData_d, norm_gains_d_,
-                         norm_total_bins_, stream);
+        // Under wideband EQ, fftData_d was already flattened, so skip this.
+        if (!wideband_eq_)
+            norm_apply_gains((cufftComplex*)channelData_d, norm_gains_d_,
+                             norm_total_bins_, stream);
 
         // 4096-pt composite C2C IFFT → 2048 valid samples (center half) at 409.6 kHz.
         rval = cufftExecC2C(iplan, (cufftComplex*)&channelData_d[0],
