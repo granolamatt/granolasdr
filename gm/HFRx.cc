@@ -257,14 +257,14 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     // dedicated CW MagBlock at rfft=16384/osr4 -> 50 Hz/bin, 20 ms window, 5 ms
     // hop.  Phase -1: build the ring so CW signals are visible; CWSkimmerCuda +
     // gm::hf::CW decode land in Phase 1+.
-    std::unique_ptr<gm::cuda::MagBlock<128>>       magblock_cw;
-    std::unique_ptr<gm::cuda::CWSkimmerCuda<128>>  cw_skimmer;
-    std::unique_ptr<gm::cuda::WaterfallCuda<128>>  cw_waterfall;
+    std::unique_ptr<gm::cuda::MagBlock<256>>       magblock_cw;
+    std::unique_ptr<gm::cuda::CWSkimmerCuda<256>>  cw_skimmer;
+    std::unique_ptr<gm::cuda::WaterfallCuda<256>>  cw_waterfall;
     if (cwbuf) {
-        magblock_cw = std::make_unique<gm::cuda::MagBlock<128>>(
+        magblock_cw = std::make_unique<gm::cuda::MagBlock<256>>(
             cwbuf, /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
         magblock_cw->start();
-        cw_skimmer = std::make_unique<gm::cuda::CWSkimmerCuda<128>>(
+        cw_skimmer = std::make_unique<gm::cuda::CWSkimmerCuda<256>>(
             magblock_cw->getRing(), "CW");
         cw_skimmer->start();
 
@@ -275,9 +275,9 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
         uint32_t cw_total = 0;
         for (int i = 0; i < kNumCWBands; ++i) cw_total += kCWBands[i].bw;
         const int cw_content_bins = (int)(2 * cw_total);   // ~9400
-        cw_waterfall = std::make_unique<gm::cuda::WaterfallCuda<128>>(
+        cw_waterfall = std::make_unique<gm::cuda::WaterfallCuda<256>>(
             magblock_cw->getRing(), /*bin_start=*/0, /*bin_end=*/cw_content_bins,
-            gm::cuda::WaterfallCuda<128>::DEFAULT_OUT_BINS, kWsDictPort,
+            gm::cuda::WaterfallCuda<256>::DEFAULT_OUT_BINS, kWsDictPort,
             "granolasdr:cwwaterfall:", /*full_rate_hz=*/819200.0f,
             /*min_publish_ms=*/120);
         cw_waterfall->start();
@@ -309,19 +309,19 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
 // replay here under CW_SNR / CW_DEBUG to tune without the radio.  The capture loops
 // at EOF (BufferFile default), so this runs until interrupted.
 static void runCWPlayback(gm::buffer::BufferPosition<std::complex<float>>& cwbuf) {
-    gm::cuda::MagBlock<128> magblock_cw(&cwbuf,
+    gm::cuda::MagBlock<256> magblock_cw(&cwbuf,
         /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
     magblock_cw.start();
-    gm::cuda::CWSkimmerCuda<128> cw_skimmer(magblock_cw.getRing(), "CW");
+    gm::cuda::CWSkimmerCuda<256> cw_skimmer(magblock_cw.getRing(), "CW");
     cw_skimmer.start();
 
     // CW waterfall over the replayed composite, so the dashboard (CW mode) confirms
     // the capture actually holds signals.
     uint32_t cw_total = 0;
     for (int i = 0; i < kNumCWBands; ++i) cw_total += kCWBands[i].bw;
-    gm::cuda::WaterfallCuda<128> cw_waterfall(
+    gm::cuda::WaterfallCuda<256> cw_waterfall(
         magblock_cw.getRing(), /*bin_start=*/0, /*bin_end=*/(int)(2 * cw_total),
-        gm::cuda::WaterfallCuda<128>::DEFAULT_OUT_BINS, kWsDictPort,
+        gm::cuda::WaterfallCuda<256>::DEFAULT_OUT_BINS, kWsDictPort,
         "granolasdr:cwwaterfall:", /*full_rate_hz=*/819200.0f,
         /*min_publish_ms=*/120);
     cw_waterfall.start();

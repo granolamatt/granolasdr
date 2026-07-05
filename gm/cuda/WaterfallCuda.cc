@@ -181,6 +181,7 @@ void WaterfallCuda<N>::run()
 // Explicit instantiations: FT8/JS8 composite ring (200) and CW composite ring (128).
 template class WaterfallCuda<200>;
 template class WaterfallCuda<128>;
+template class WaterfallCuda<256>;
 
 } // namespace cuda
 } // namespace gm

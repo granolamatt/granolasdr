@@ -169,7 +169,9 @@ std::string CwMorse::decode(const float* env, int n) {
     // AGC: divide by a slow peak envelope (forward+backward max-hold, decay ~
     // 0.5 s) so slow QSB fades flatten out before a global threshold is applied.
     // Floor the envelope at a fraction of the global peak so pure-noise regions
-    // are not amplified up to signal level.
+    // are not amplified up to signal level.  (Callers should trim leading/trailing
+    // silence: a long key-up region lets the peak-hold decay to the noise floor,
+    // which then normalizes up to signal level and becomes one giant mark.)
     {
         float gmax = s[0];
         for (int i = 1; i < n; ++i) if (s[i] > gmax) gmax = s[i];
@@ -204,6 +206,24 @@ std::string CwMorse::decode(const float* env, int n) {
     }
     if (k && run > 0) runs.push_back({true, run * hop_ms_});
     if (runs.empty()) return "";
+
+    // De-glitch: absorb spurious short runs (1-2 sample noise crossings) into their
+    // neighbours before estimating the dit.  Without this a handful of noise blips
+    // collapse the 2-means dit centroid to ~1 sample and the whole decode mis-times
+    // (the 240 WPM "T T TE" garbage).  A real dit is >= 3 samples even at the 80 WPM
+    // ceiling, so anything shorter is noise.
+    {
+        const float glitch = 2.5f * hop_ms_;
+        while (!runs.empty() && runs.front().second < glitch) runs.erase(runs.begin());
+        for (size_t i = 1; i + 1 < runs.size(); ) {
+            if (runs[i].second < glitch) {
+                runs[i-1].second += runs[i].second + runs[i+1].second;
+                runs.erase(runs.begin() + i, runs.begin() + i + 2);  // re-check runs[i]
+            } else ++i;
+        }
+        while (!runs.empty() && runs.back().second < glitch) runs.pop_back();
+        if (runs.empty()) return "";
+    }
 
     // Estimate the unit length: 2-means on mark durations -> smaller centroid = dit.
     std::vector<float> marks;
