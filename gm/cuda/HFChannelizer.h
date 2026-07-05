@@ -132,6 +132,9 @@ private:
 
 public:
     gm::buffer::BufferFileParams getBufferFileParams() const;
+    // Same, for the CW composite (819.2 kHz, cw_fft_length/2 samples/block).
+    // Valid only when cw_enabled (--cw); used to record getCWBuffer().
+    gm::buffer::BufferFileParams getCWBufferFileParams() const;
 };
 }
 }

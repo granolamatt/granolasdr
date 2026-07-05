@@ -508,15 +508,27 @@ void HFChannelizer::tciVfoWorker() {
     }
 }
 
-gm::buffer::BufferFileParams HFChannelizer::getBufferFileParams() const {
+// Params for a composite recorded once per rx888 input block.  block_samples is
+// the composite's valid samples/block (ifft_length/2); block_interval_ns is the
+// input-block cadence (shared by every composite), so the derived sample_rate_hz
+// is what distinguishes the FT8 composite (409.6 kHz) from the CW one (819.2 kHz).
+static gm::buffer::BufferFileParams compositeParams(uint32_t ifft_length) {
     gm::buffer::BufferFileParams p;
-    p.block_samples     = fft_length / 2;
+    p.block_samples     = ifft_length / 2;
     p.block_interval_ns = (uint64_t)(
         (double)gm::rx888::rx888::NLARGE / gm::rx888::rx888::rx_samplerate * 1e9);
     p.sample_rate_hz    = (uint32_t)(
-        ((double)(fft_length / 2)) * 1e9 / (double)p.block_interval_ns);
+        ((double)(ifft_length / 2)) * 1e9 / (double)p.block_interval_ns);
     p.rx_sample_rate    = gm::rx888::rx888::rx_samplerate;
     return p;
+}
+
+gm::buffer::BufferFileParams HFChannelizer::getBufferFileParams() const {
+    return compositeParams(fft_length);
+}
+
+gm::buffer::BufferFileParams HFChannelizer::getCWBufferFileParams() const {
+    return compositeParams(cw_fft_length);
 }
 
 void HFChannelizer::run() {

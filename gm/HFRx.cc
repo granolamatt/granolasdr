@@ -252,6 +252,23 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     }
 }
 
+// CW-only playback: replay a --record-cw capture (819.2 kHz CW composite) through
+// the CW MagBlock -> CWSkimmerCuda, with no FT8/JS8 chain.  This closes the offline
+// iteration loop for the CW detector/decoder: capture live with --record-cw, then
+// replay here under CW_SNR / CW_DEBUG to tune without the radio.
+static void runCWPlayback(gm::buffer::BufferPosition<std::complex<float>>& cwbuf) {
+    gm::cuda::MagBlock<128> magblock_cw(&cwbuf,
+        /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
+    magblock_cw.start();
+    gm::cuda::CWSkimmerCuda<128> cw_skimmer(magblock_cw.getRing(), "CW");
+    cw_skimmer.start();
+    printf("CW playback: ring up (16384-pt FFT @ 819.2 kHz -> 50 Hz/bin, 20 ms window); "
+           "decode active (CW_SNR / CW_DEBUG to tune)\n");
+    while (true) {
+        usleep(1000000);
+    }
+}
+
 int main(int argc, char* argv[]) {
 
     bool        enable_js8       = false;
@@ -272,7 +289,9 @@ int main(int argc, char* argv[]) {
     float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 45000 Hz
     float       wf_bw_hz      = kCompositeContentHz;          // 90000 Hz
     std::string record_file;
+    std::string record_cw_file;
     std::string playback_file;
+    std::string playback_cw_file;
     int         zoom_band_start = -1;
     int         zoom_band_end   = -1;
 
@@ -285,8 +304,13 @@ int main(int argc, char* argv[]) {
             wf_bw_hz = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
             record_file = argv[++i];
+        } else if (strcmp(argv[i], "--record-cw") == 0 && i + 1 < argc) {
+            record_cw_file = argv[++i];
+            enable_cw = true;   // the CW composite only exists when --cw is on
         } else if (strcmp(argv[i], "--playback") == 0 && i + 1 < argc) {
             playback_file = argv[++i];
+        } else if (strcmp(argv[i], "--playback-cw") == 0 && i + 1 < argc) {
+            playback_cw_file = argv[++i];
         } else if (strcmp(argv[i], "--js8") == 0) {
             enable_js8 = true;
         } else if (strcmp(argv[i], "--js8-fast") == 0) {
@@ -372,7 +396,11 @@ int main(int argc, char* argv[]) {
                tci_port, (double)tci_gain);
     }
 
-    if (!playback_file.empty()) {
+    if (!playback_cw_file.empty()) {
+        gm::buffer::BufferFile<std::complex<float>> playback(playback_cw_file);
+        playback.start();
+        runCWPlayback(*playback.getBuffer());
+    } else if (!playback_file.empty()) {
         gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
         playback.start();
         runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast,
@@ -390,6 +418,16 @@ int main(int argc, char* argv[]) {
             recorder = std::make_unique<gm::buffer::BufferFile<std::complex<float>>>(
                 channelizer.getBuffer(), record_file, channelizer.getBufferFileParams());
             recorder->start();
+        }
+
+        // Record the CW composite (819.2 kHz, 9 CW sub-bands) to its own file, in
+        // the same BufferFile format as --record.  --record-cw forces --cw above.
+        std::unique_ptr<gm::buffer::BufferFile<std::complex<float>>> recorder_cw;
+        if (!record_cw_file.empty()) {
+            recorder_cw = std::make_unique<gm::buffer::BufferFile<std::complex<float>>>(
+                channelizer.getCWBuffer(), record_cw_file, channelizer.getCWBufferFileParams());
+            recorder_cw->start();
+            printf("CW record: %s  (819.2 kHz composite)\n", record_cw_file.c_str());
         }
 
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
