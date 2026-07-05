@@ -1,5 +1,5 @@
 #pragma once
-// Lightweight decode-rate counter for A/B comparisons (e.g. WIDEBAND_EQ on vs off).
+// Lightweight per-mode decode-rate counter (A/B comparisons, tuning, monitoring).
 // Enabled with DECODE_STATS=1; prints a cumulative + per-minute summary every
 // DECODE_STATS_SEC seconds (default 60), broken down by mode.  Header-only,
 // thread-safe; call gm::hf::decode_stats_count("FT8") once per emitted decode.

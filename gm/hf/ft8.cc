@@ -115,11 +115,9 @@ static ftx_callsign_hash_interface_t hash_if = {
 namespace gm {
 namespace hf {
 
-    FT8::FT8(gm::cuda::FT8Cuda* ft8cuda_in, int zmq_port, int wsdict_port,
-             const char* label, bool log_timing)
+    FT8::FT8(gm::cuda::FT8Cuda* ft8cuda_in, int zmq_port, int wsdict_port)
       : ft8cuda_(ft8cuda_in)
       , zmq_port_(zmq_port)
-      , label_(label)
       , zmq_ctx_(1)
       , zmq_pub_(zmq_ctx_, ZMQ_PUB)
       , timing_log_(nullptr) {
@@ -148,7 +146,7 @@ namespace hf {
             }
         }
 
-        timing_log_ = log_timing ? fopen("ft8_timing.csv", "a") : nullptr;
+        timing_log_ = fopen("ft8_timing.csv", "a");
         if (timing_log_) {
             fseek(timing_log_, 0, SEEK_END);
             if (ftell(timing_log_) == 0)
@@ -176,7 +174,7 @@ namespace hf {
     {
         printf("DECODED: %s time_offset=%.3fs freq=%.0fHz snr=%.1f unix=%.0f\n",
                callsign, (double)time_offset, (double)freq_hz, (double)snr, unix_time);
-        gm::hf::decode_stats_count(label_.c_str());
+        gm::hf::decode_stats_count("FT8");
 
         nlohmann::json v;
         v["call"]   = callsign;

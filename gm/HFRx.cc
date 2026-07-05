@@ -90,8 +90,7 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         int wf_bin_start, int wf_bin_end,
                         bool legacy_costas,
                         gm::buffer::BufferFile<std::complex<float>>* playback = nullptr,
-                        gm::buffer::BufferPosition<std::complex<float>>* cwbuf = nullptr,
-                        gm::buffer::BufferPosition<std::complex<float>>* altbuf = nullptr) {
+                        gm::buffer::BufferPosition<std::complex<float>>* cwbuf = nullptr) {
 
     // RAII order: MagBlocks own ring memory; all readers hold const refs.
     // C++ destroys in reverse declaration order (readers before rings).
@@ -147,30 +146,6 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     ft8.setRefineEnabled(ft8_refine);
     printf("FT8 refine fallback: %s\n", ft8_refine ? "ENABLED"
                                                     : "disabled (FT8_REFINE=0)");
-
-    // A/B test (AB_TEST): parallel FT8 chain on the per-band-norm alt composite,
-    // decoding the SAME input as the primary (wideband-EQ) FT8 chain.  Same OSD +
-    // refine config; no ZMQ/wsdict/CSV (stats only).  Compare with DECODE_STATS:
-    // "FT8" (wideband) vs "FT8-NORM" (per-band).
-    std::unique_ptr<gm::cuda::MagBlock<200>> magblock_alt;
-    std::unique_ptr<gm::cuda::FT8Cuda>       ft8channel_alt;
-    std::unique_ptr<gm::hf::FT8>             ft8_alt;
-    if (altbuf) {
-        magblock_alt = std::make_unique<gm::cuda::MagBlock<200>>(
-            altbuf, kNormalRfftLen, kNormalTimeOsr, kNormalFreqOsr, 0,
-            /*retain_complex=*/true);
-        magblock_alt->start();
-        ft8channel_alt = std::make_unique<gm::cuda::FT8Cuda>(
-            magblock_alt->getRing(), min_score, "EPOCH-ALT", 0, legacy_costas,
-            &magblock_alt->getComplexRing(), magblock_alt->getSlotCplxIdx());
-        ft8channel_alt->start();
-        ft8_alt = std::make_unique<gm::hf::FT8>(ft8channel_alt.get(), /*zmq=*/0,
-            /*wsdict=*/0, "FT8-NORM", /*log_timing=*/false);
-        ft8_alt->setOsdConfig(ft8_osd.enable, /*order=*/2, ft8_osd.floor, ft8_osd.max);
-        ft8_alt->setRefineEnabled(ft8_refine);
-        ft8_alt->start();
-        printf("A/B test: parallel FT8-NORM chain (per-band norm) vs FT8 (wideband EQ)\n");
-    }
 
     const OsdEnv js8_osd = read_osd_env("JS8_OSD", "JS8_OSD_SCORE_FLOOR", "JS8_OSD_MAX");
     auto apply_osd = [&](gm::hf::JS8* j) {
@@ -381,7 +356,6 @@ static void printUsage(const char* prog) {
 "  --min-score <f>            Costas sync threshold (default 5.0 legacy / 3.0 max-log)\n"
 "  --max-log-costas           Use the max-log 8-FSK Costas metric (default: legacy)\n"
 "  env FT8_REFINE=0/JS8_REFINE=0     disable per-candidate refine (on by default)\n"
-"  env WIDEBAND_EQ=0                 disable whole-spectrum equalization (on by default)\n"
 "\n"
 "Waterfall:\n"
 "  --waterfall-center-hz <f>  Composite center to display (default 45000)\n"
@@ -592,8 +566,7 @@ int main(int argc, char* argv[]) {
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
                     wf_bin_start, wf_bin_end, legacy_costas,
                     /*playback=*/nullptr,
-                    enable_cw ? channelizer.getCWBuffer() : nullptr,
-                    channelizer.getAltBuffer());
+                    enable_cw ? channelizer.getCWBuffer() : nullptr);
 
         // TC5/TC6 shutdown order: stop channelizer workers before TCI server
         // so tciVfoWorker never polls a destroyed Rust global.

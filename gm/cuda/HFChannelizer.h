@@ -39,13 +39,6 @@ public:
     gm::buffer::BufferPosition<std::complex<float>>* getCWBuffer() {
         return &cwBufferPosition;
     }
-    // A/B test (AB_TEST=1): a second FT8/JS8 composite built from the RAW wideband
-    // FFT with the per-band SpectrumNorm, in parallel with the primary (wideband-EQ)
-    // composite.  A second FT8 chain decodes it so wideband-vs-per-band decode rate
-    // can be compared on identical input.  null unless ab_test_.
-    gm::buffer::BufferPosition<std::complex<float>>* getAltBuffer() {
-        return ab_test_ ? &altBufferPosition : nullptr;
-    }
 
 
 private:
@@ -71,13 +64,6 @@ private:
     std::vector<std::vector<uint32_t>> cw_bins;       // {wb_start, wb_end, bw} per CW band
     uint32_t      cw_fft_length{0};
     uint64_t      cw_buffer_number{0};
-
-    // A/B test alt composite (AB_TEST): per-band-norm FT8/JS8 composite from raw FFT.
-    bool          ab_test_{false};
-    gm::buffer::BufferPosition<std::complex<float>> altBufferPosition;
-    std::complex<float>* channelDataAlt_d{nullptr};  // fft_length packed+IFFT scratch
-    std::complex<float>* demodDataAlt_d{nullptr};     // BUFFERS × fft_length/2 ring
-    uint64_t      alt_buffer_number{0};
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
@@ -143,21 +129,6 @@ private:
     std::vector<std::complex<float>> norm_snap_h_;    // D2H workspace
     std::vector<float>               norm_ema_h_;     // EMA of linear |mag| per bin
     std::vector<float>               norm_logmag_h_;  // log10(ema) per bin for poly fit
-
-    // Wideband equalization (WIDEBAND_EQ=1): flatten the ENTIRE wideband FFT
-    // before any bin-selection, so CW and audio (tunable anywhere) get equalized
-    // too.  Mutually exclusive with the per-band norm above.  All GPU-side.
-    bool   wideband_eq_{false};
-    int    weq_nbins_{0};                   // R2C bins of the wideband FFT (NLARGE+1)
-    int    weq_half_win_{128};              // box-filter half window (WEQ_WIN)
-    float  weq_max_gain_{100.0f};           // gain clamp (WEQ_MAXGAIN)
-    int    weq_frame_{0};
-    int    weq_update_count_{0};
-    float* weq_ema_d_{nullptr};             // per-bin noise-floor EMA
-    float* weq_logema_d_{nullptr};          // log10(ema) scratch for the box filter
-    float* weq_gain_targ_d_{nullptr};       // latest computed per-bin gain (ramp end)
-    float* weq_gain_prev_d_{nullptr};       // gain at start of the current ramp
-    float* weq_sum_d_{nullptr};             // 1-float global-mean-log accumulator
 
 public:
     gm::buffer::BufferFileParams getBufferFileParams() const;
