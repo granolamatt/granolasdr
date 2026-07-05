@@ -1,6 +1,7 @@
 #include "gm/cuda/CWSkimmerCuda.h"
 #include "gm/hf/cw_bands.h"
 #include "gm/hf/cw_morse.h"
+#include "gm/hf/cw_track.h"
 #include "gm/hf/decode_stats.h"
 
 #include <algorithm>
@@ -8,32 +9,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <unordered_map>
 
 namespace gm {
 namespace cuda {
-
-// Amateur callsign shape check: prefix (1-3 alnum, letter first) + area digit +
-// letter suffix (1-4).  Rejects the "E E EE" junk and partial fragments that lack a
-// digit; a shape-valid misdecode is caught by the confirm-before-emit gate instead.
-static bool looksLikeCall(const std::string& s) {
-    const int n = (int)s.size();
-    if (n < 3 || n > 8) return false;
-    int lastDigit = -1;
-    for (int i = 0; i < n; ++i) {
-        char c = s[i];
-        bool up = (c >= 'A' && c <= 'Z'), dg = (c >= '0' && c <= '9');
-        if (!up && !dg) return false;
-        if (dg) lastDigit = i;
-    }
-    if (lastDigit < 1 || lastDigit > 3) return false;   // area digit after a 1-3 char prefix
-    if (!(s[0] >= 'A' && s[0] <= 'Z')) return false;     // callsigns start with a letter
-    const int suffix = n - 1 - lastDigit;                // letters after the last digit
-    if (suffix < 1 || suffix > 4) return false;
-    for (int i = lastDigit + 1; i < n; ++i)
-        if (!(s[i] >= 'A' && s[i] <= 'Z')) return false;
-    return true;
-}
 
 template<int N>
 CWSkimmerCuda<N>::CWSkimmerCuda(const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
@@ -90,15 +68,19 @@ void CWSkimmerCuda<N>::worker() {
     std::vector<float> col(WROWS);
     std::vector<float> dbuf_;                     // detrend scratch for decodeActive
     std::vector<float> snr(content_bins_, 0.0f);
-    // Confirm-before-emit: a real call decodes the same way across several sliding
-    // windows; transient garbage appears once.  Keyed by callsign (dedups across bins
-    // / carrier drift); expired after HEARD_TTL so a call can be re-reported later.
-    struct Heard { int count; uint64_t last_wi; double hz; float wpm; float snr; bool emitted; };
-    std::unordered_map<std::string, Heard> heard;
-    const uint64_t HEARD_TTL = 60 * 50;                  // ~60 s at 50 slots/s
-    const int      CONFIRM   = 2;                        // sightings before emitting
     gm::hf::CwMorse dec(5.0f, 20.0f);
     uint64_t last = 0;
+
+    // Per-signal tracker: keeps one Track per carrier across windows, following
+    // drift, suppressing sidebands, and confirming a callsign only when the SAME
+    // carrier decodes it in >=confirm windows.  This replaces the old global
+    // callsign-keyed Heard map, which cross-confirmed one-off misdecodes from
+    // unrelated bins on a crowded band (cwtest2.dat).
+    gm::hf::CwTracker::Config tcfg;
+    tcfg.snr_thresh = SNR_THRESH;
+    if (const char* d = std::getenv("CW_DRIFT")) tcfg.drift_bins = tcfg.merge_bins = std::atoi(d);
+    if (const char* c = std::getenv("CW_CONFIRM")) tcfg.confirm = std::atoi(c);
+    gm::hf::CwTracker tracker(tcfg);
 
     auto val = [&](int s, int row, int bin) -> uint8_t {
         return host_win_[(size_t)s * slot_elems + (size_t)row * NB + bin];
@@ -213,47 +195,19 @@ void CWSkimmerCuda<N>::worker() {
                     dec.wpm(), dtxt.c_str());
         }
 
-        // Expire stale heard entries so a call can be re-reported after HEARD_TTL.
-        for (auto it = heard.begin(); it != heard.end(); )
-            it = (wi - it->second.last_wi > HEARD_TTL) ? heard.erase(it) : std::next(it);
-
-        // Peak-pick: local maximum over ±2 bins (min ~200 Hz separation), SNR gate.
-        int emitted = 0;
-        for (int bin = 2; bin < content_bins_ - 2 && emitted < 64; ++bin) {
-            const float s = snr[bin];
-            if (s < SNR_THRESH) continue;
-            if (s < snr[bin-1] || s < snr[bin+1] || s < snr[bin-2] || s < snr[bin+2]) continue;
-
-            const double hz = binToHz(bin);
-            if (hz <= 0.0) continue;
-            const std::string txt = decodeActive(bin);
-            const float wpm = dec.wpm();
-
-            // Pull out validated callsign tokens; confirm (>=CONFIRM sightings) before
-            // emitting, and emit each once per TTL.  Skip a partial that is a strict
-            // prefix of a longer call we've also heard (WC6D vs WC6DX).
-            for (size_t p = 0; p < txt.size() && emitted < 64; ) {
-                size_t q = txt.find(' ', p);
-                std::string tok = txt.substr(p, (q == std::string::npos ? txt.size() : q) - p);
-                p = (q == std::string::npos) ? txt.size() : q + 1;
-                if (!looksLikeCall(tok)) continue;
-
-                bool is_prefix = false;
-                for (const auto& kv : heard)
-                    if (kv.first.size() > tok.size() &&
-                        kv.first.compare(0, tok.size(), tok) == 0) { is_prefix = true; break; }
-                if (is_prefix) continue;
-
-                Heard& h = heard[tok];
-                h.count++; h.last_wi = wi; h.hz = hz; h.wpm = wpm; h.snr = s;
-                if (h.count >= CONFIRM && !h.emitted) {
-                    h.emitted = true;
-                    printf("[%s] %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s\n",
-                           label_, hz / 1000.0, (double)wpm, (double)s, tok.c_str());
-                    gm::hf::decode_stats_count(label_);
-                    ++emitted;
-                }
-            }
+        // Advance the per-signal tracker over this window's detection metric.  It
+        // associates peaks to carriers, follows drift, and returns only the calls
+        // freshly confirmed (same carrier, >=confirm windows).  decodeActive sets
+        // dec's speed as a side effect, so wpm() is read right after decode(bin).
+        auto spots = tracker.step(
+            wi, snr.data(), content_bins_,
+            [&](int bin){ return decodeActive(bin); },
+            [&](int)    { return dec.wpm(); },
+            [&](int bin){ return binToHz(bin); });
+        for (const auto& sp : spots) {
+            printf("[%s] %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s\n",
+                   label_, sp.hz / 1000.0, (double)sp.wpm, (double)sp.snr, sp.call.c_str());
+            gm::hf::decode_stats_count(label_);
         }
     }
 }

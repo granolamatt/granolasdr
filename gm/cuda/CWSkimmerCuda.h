@@ -16,8 +16,10 @@ namespace cuda {
 // via kCWBands (bin k -> composite bin c = k/2 -> band offset -> Hz).
 //
 // Block contract: owns its own cudaStream_t and worker thread; reads the ring
-// via write_idx + ready (never blocks the writer).  Phase 1: detect + decode +
-// log.  ZMQ/wsdict publish, dedup/TTL, and the per-signal tracker are Phase 2/3.
+// via write_idx + ready (never blocks the writer).  Detection + decode feed a
+// CwTracker (gm/hf/cw_track) that keeps one Track per carrier across windows —
+// following drift, suppressing sidebands, confirming a callsign only when the
+// same carrier decodes it repeatedly.  Still Phase 2/3: ZMQ/wsdict publish, RBN.
 template<int N>
 class CWSkimmerCuda {
 public:
@@ -41,7 +43,7 @@ private:
     int                  content_bins_{0}; // 2·Σ CW bw: MagBlock bins carrying signal
 };
 
-extern template class CWSkimmerCuda<128>;
+extern template class CWSkimmerCuda<256>;
 
 } // namespace cuda
 } // namespace gm

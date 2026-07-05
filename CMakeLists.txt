@@ -74,6 +74,7 @@ set(GM_CUDA_SOURCES
     "gm/cuda/JS8Cuda.cc"
     "gm/cuda/CWSkimmerCuda.cc"
     "gm/hf/cw_morse.cc"
+    "gm/hf/cw_track.cc"
     "gm/hf/refine.cc"
     "ft8_lib/fft/kiss_fft.c"
     )
@@ -147,6 +148,9 @@ target_link_libraries(test_refine ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -
 
 add_executable(test_cw_morse test/test_cw_morse.cc gm/hf/cw_morse.cc)
 target_link_libraries(test_cw_morse -lm)
+
+add_executable(test_cw_track test/test_cw_track.cc gm/hf/cw_track.cc)
+target_link_libraries(test_cw_track -lm)
 
 # FT8 OSD test: links ft8_lib for the generator table, CRC-14 and ftx_decode_from_bits.
 add_executable(test_ft8_osd test/test_ft8_osd.cc gm/cuda/FT8Osd.cc gm/cuda/OsdCore.cc)
