@@ -74,7 +74,11 @@
 </div>
 
 <!-- wideband waterfall -->
-<h2>waterfall — HF bands composite (160m–6m packed)</h2>
+<h2>waterfall — <span id="wf-title">HF bands composite (160m–6m packed)</span></h2>
+<div id="wf-mode" style="margin-bottom:6px;font-size:0.88em;">
+  <label style="margin-right:14px;cursor:pointer;"><input type="radio" name="wfmode" value="ft8" checked onchange="setWfMode('ft8')"> FT8 / JS8</label>
+  <label style="cursor:pointer;"><input type="radio" name="wfmode" value="cw" onchange="setWfMode('cw')"> CW</label>
+</div>
 <div style="position:relative;display:block;">
   <canvas id="waterfall" width="2048" height="1200" style="width:100%;image-rendering:pixelated;display:block;border:1px solid #333;"></canvas>
   <div id="wf-separators" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
@@ -278,14 +282,17 @@ function connectBus() {
       return;
     }
 
-    if (key.startsWith('granolasdr:waterfall:')) {
+    if (key.startsWith(WF_KEY[wfMode])) {
+      // Only the active mode's waterfall family feeds the canvas.
       const rgba = b64ToBytes(val);
       if (!wfDebugDone && rgba.length > 0) {
         wfDebugDone = true;
         const rows = Math.round(rgba.length / (WF_OUT_BINS * 4));
-        console.log(`[Waterfall] first batch: len=${rgba.length} rows=${rows} (${WF_OUT_BINS}px × 4 RGBA)`);
+        console.log(`[Waterfall:${wfMode}] first batch: len=${rgba.length} rows=${rows} (${WF_OUT_BINS}px × 4 RGBA)`);
       }
       requestAnimationFrame(() => appendWaterfallBatch(rgba));
+    } else if (key.startsWith('granolasdr:waterfall:') || key.startsWith('granolasdr:cwwaterfall:')) {
+      // Inactive waterfall family (other mode) — ignore until selected.
     } else if (key.includes(':heard:')) {
       if (val && typeof val === 'object') addHeard(key, val);
     }
@@ -317,10 +324,43 @@ const WF_COMPOSITE_BANDS = [
 ];
 const WF_TOTAL_COMPOSITE_HZ = 211000;
 
+// CW composite layout: the 9 CW sub-bands (gm/hf/cw_bands.h) packed back-to-back,
+// in 100 Hz composite-bin units (Σ bw = 4700).  The CW waterfall renders these bins.
+// [composite_bin_start, composite_bin_end, label]
+const WF_CW_BANDS = [
+  [   0,  400, '160m'],  // bw=400  1.800–1.840
+  [ 400, 1000,  '80m'],  // bw=600  3.500–3.560
+  [1000, 1500,  '40m'],  // bw=500  7.000–7.050
+  [1500, 1800,  '30m'],  // bw=300  10.100–10.130
+  [1800, 2500,  '20m'],  // bw=700  14.000–14.070
+  [2500, 2800,  '17m'],  // bw=300  18.068–18.098
+  [2800, 3700,  '15m'],  // bw=900  21.000–21.090
+  [3700, 4000,  '12m'],  // bw=300  24.890–24.920
+  [4000, 4700,  '10m'],  // bw=700  28.000–28.070
+];
+const WF_TOTAL_CW = 4700;
+
+// Waterfall display mode: 'ft8' (FT8/JS8 composite) or 'cw' (CW composite).
+let wfMode = 'ft8';
+
+// Which wsdict waterfall key family feeds the canvas in each mode.
+const WF_KEY = { ft8: 'granolasdr:waterfall:', cw: 'granolasdr:cwwaterfall:' };
+const WF_TITLE = {
+  ft8: 'HF bands composite (160m–6m packed)',
+  cw:  'CW composite (819.2 kHz, 9 CW sub-bands, 160m–10m)',
+};
+
+function activeWfLayout() {
+  return wfMode === 'cw'
+    ? { bands: WF_CW_BANDS,        total: WF_TOTAL_CW }
+    : { bands: WF_COMPOSITE_BANDS, total: WF_TOTAL_COMPOSITE_HZ };
+}
+
 function renderWfBandLabels() {
+  const { bands, total } = activeWfLayout();
   const div = document.getElementById('wf-bands');
-  const spans = WF_COMPOSITE_BANDS.map(([start, end, name]) => {
-    const centerPx = (start + end) / 2 / WF_TOTAL_COMPOSITE_HZ * WF_OUT_BINS;
+  const spans = bands.map(([start, end, name]) => {
+    const centerPx = (start + end) / 2 / total * WF_OUT_BINS;
     const pct      = (centerPx / (WF_OUT_BINS - 1) * 100).toFixed(2);
     return `<span style="position:absolute;left:${pct}%;transform:translateX(-50%);color:#7ec8e3">${name}</span>`;
   });
@@ -328,10 +368,20 @@ function renderWfBandLabels() {
 
   // Vertical separator lines at each band boundary.
   const sep = document.getElementById('wf-separators');
-  sep.innerHTML = WF_COMPOSITE_BANDS.slice(1).map(([start]) => {
-    const pct = (start / WF_TOTAL_COMPOSITE_HZ * 100).toFixed(2);
+  sep.innerHTML = bands.slice(1).map(([start]) => {
+    const pct = (start / total * 100).toFixed(2);
     return `<div style="position:absolute;top:0;bottom:0;left:${pct}%;width:1px;background:rgba(120,120,180,0.45);"></div>`;
   }).join('');
+}
+
+// Switch waterfall source: relabel bands, retitle, and clear the canvas so the two
+// composites' rows never intermix on screen.
+function setWfMode(mode) {
+  if (mode !== 'ft8' && mode !== 'cw') return;
+  wfMode = mode;
+  document.getElementById('wf-title').textContent = WF_TITLE[mode];
+  renderWfBandLabels();
+  if (wfCtx) { wfCtx.fillStyle = '#000'; wfCtx.fillRect(0, 0, wfCanvas.width, wfCanvas.height); }
 }
 
 let wfCanvas, wfCtx, wfDebugDone = false;
@@ -345,27 +395,36 @@ function initWaterfall() {
 // Receive a pre-colored RGBA batch: rows × WF_OUT_BINS × 4 bytes.
 // Rows are in chronological order (row 0 = oldest, row N-1 = newest).
 // Scroll the canvas up by `rows` and paste the new rows at the bottom.
+//
+// Scrolling is done with a canvas self-blit (drawImage) rather than
+// getImageData/putImageData of the whole canvas.  The old approach allocated a
+// fresh ~10 MB ImageData every batch (~80 MB/s), whose GC pauses froze the
+// scroll every few seconds (the "blank every ~3s").  Here the only per-batch
+// allocation is a reused strip for the new rows.
+let wfRowImg = null;
 function appendWaterfallBatch(rgba) {
   const h    = wfCanvas.height;
   const w    = wfCanvas.width;
   const rows = Math.round(rgba.length / (WF_OUT_BINS * 4));
   if (rows < 1) return;
 
-  const frame = wfCtx.getImageData(0, 0, w, h);
-  // Scroll existing content up by `rows` lines.
-  frame.data.copyWithin(0, rows * w * 4, w * 4 * h);
-  // Paint new rows at the bottom (row 0 = canvas row h-rows, row N-1 = h-1).
+  // Scroll existing content up by `rows` lines (GPU/CPU blit, no JS allocation).
+  wfCtx.drawImage(wfCanvas, 0, rows, w, h - rows, 0, 0, w, h - rows);
+
+  // Paint just the new rows at the bottom via a reused strip ImageData.
+  if (!wfRowImg || wfRowImg.height !== rows) wfRowImg = wfCtx.createImageData(w, rows);
+  const d = wfRowImg.data;
   for (let row = 0; row < rows; row++) {
-    const canvasBase = (h - rows + row) * w * 4;
-    const srcBase    = row * WF_OUT_BINS * 4;
+    const dstBase = row * w * 4;
+    const srcBase = row * WF_OUT_BINS * 4;
     for (let col = 0; col < w && col < WF_OUT_BINS; col++) {
-      frame.data[canvasBase + col*4+0] = rgba[srcBase + col*4+0];
-      frame.data[canvasBase + col*4+1] = rgba[srcBase + col*4+1];
-      frame.data[canvasBase + col*4+2] = rgba[srcBase + col*4+2];
-      frame.data[canvasBase + col*4+3] = 255;
+      d[dstBase + col*4+0] = rgba[srcBase + col*4+0];
+      d[dstBase + col*4+1] = rgba[srcBase + col*4+1];
+      d[dstBase + col*4+2] = rgba[srcBase + col*4+2];
+      d[dstBase + col*4+3] = 255;
     }
   }
-  wfCtx.putImageData(frame, 0, 0);
+  wfCtx.putImageData(wfRowImg, 0, h - rows);
 }
 
 function init() {

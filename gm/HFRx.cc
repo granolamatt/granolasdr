@@ -17,6 +17,7 @@
 #include "gm/cuda/JS8ScanCuda.h"
 #include "gm/cuda/JS8FastScanCuda.h"
 #include "gm/cuda/WaterfallCuda.h"
+#include "gm/hf/cw_bands.h"
 #include "gm/hf/ft8.h"
 #include "gm/hf/js8.h"
 #include "gm/buffer/BufferFile.h"
@@ -105,9 +106,9 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort, kWsDictPort);
     ft8.start();
 
-    gm::cuda::WaterfallCuda waterfall(magblock.getRing(),
+    gm::cuda::WaterfallCuda<200> waterfall(magblock.getRing(),
                                       wf_bin_start, wf_bin_end,
-                                      gm::cuda::WaterfallCuda::DEFAULT_OUT_BINS,
+                                      gm::cuda::WaterfallCuda<200>::DEFAULT_OUT_BINS,
                                       kWsDictPort, wf_floor, wf_ceil);
     waterfall.start();
 
@@ -254,8 +255,9 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     // dedicated CW MagBlock at rfft=16384/osr4 -> 50 Hz/bin, 20 ms window, 5 ms
     // hop.  Phase -1: build the ring so CW signals are visible; CWSkimmerCuda +
     // gm::hf::CW decode land in Phase 1+.
-    std::unique_ptr<gm::cuda::MagBlock<128>>      magblock_cw;
-    std::unique_ptr<gm::cuda::CWSkimmerCuda<128>> cw_skimmer;
+    std::unique_ptr<gm::cuda::MagBlock<128>>       magblock_cw;
+    std::unique_ptr<gm::cuda::CWSkimmerCuda<128>>  cw_skimmer;
+    std::unique_ptr<gm::cuda::WaterfallCuda<128>>  cw_waterfall;
     if (cwbuf) {
         magblock_cw = std::make_unique<gm::cuda::MagBlock<128>>(
             cwbuf, /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
@@ -263,8 +265,24 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
         cw_skimmer = std::make_unique<gm::cuda::CWSkimmerCuda<128>>(
             magblock_cw->getRing(), "CW");
         cw_skimmer->start();
+
+        // CW waterfall: the 9 packed CW sub-bands occupy the lower 2·Σbw MagBlock
+        // bins (50 Hz/bin, 2 per 100 Hz composite bin).  Published on its own wsdict
+        // key family so the dashboard can select CW mode.  Floor/ceil tuned for the
+        // un-normalized CW composite (noise ≈168, carriers ≈196), not the FT8 scale.
+        uint32_t cw_total = 0;
+        for (int i = 0; i < kNumCWBands; ++i) cw_total += kCWBands[i].bw;
+        const int cw_content_bins = (int)(2 * cw_total);   // ~9400
+        cw_waterfall = std::make_unique<gm::cuda::WaterfallCuda<128>>(
+            magblock_cw->getRing(), /*bin_start=*/0, /*bin_end=*/cw_content_bins,
+            gm::cuda::WaterfallCuda<128>::DEFAULT_OUT_BINS, kWsDictPort,
+            /*wf_floor=*/160, /*wf_ceil=*/200,
+            "granolasdr:cwwaterfall:", /*full_rate_hz=*/819200.0f,
+            /*min_publish_ms=*/120);
+        cw_waterfall->start();
+
         printf("CW skimmer: ring up (16384-pt FFT @ 819.2 kHz -> 50 Hz/bin, 20 ms window); "
-               "decode active (CW_SNR to tune threshold)\n");
+               "decode active (CW_SNR to tune threshold); waterfall on cwwaterfall:*\n");
     }
 
     while (true) {
@@ -295,8 +313,21 @@ static void runCWPlayback(gm::buffer::BufferPosition<std::complex<float>>& cwbuf
     magblock_cw.start();
     gm::cuda::CWSkimmerCuda<128> cw_skimmer(magblock_cw.getRing(), "CW");
     cw_skimmer.start();
+
+    // CW waterfall over the replayed composite, so the dashboard (CW mode) confirms
+    // the capture actually holds signals.
+    uint32_t cw_total = 0;
+    for (int i = 0; i < kNumCWBands; ++i) cw_total += kCWBands[i].bw;
+    gm::cuda::WaterfallCuda<128> cw_waterfall(
+        magblock_cw.getRing(), /*bin_start=*/0, /*bin_end=*/(int)(2 * cw_total),
+        gm::cuda::WaterfallCuda<128>::DEFAULT_OUT_BINS, kWsDictPort,
+        /*wf_floor=*/160, /*wf_ceil=*/200,
+        "granolasdr:cwwaterfall:", /*full_rate_hz=*/819200.0f,
+        /*min_publish_ms=*/120);
+    cw_waterfall.start();
+
     printf("CW playback: ring up (16384-pt FFT @ 819.2 kHz -> 50 Hz/bin, 20 ms window); "
-           "decode active (CW_SNR / CW_DEBUG to tune)\n");
+           "decode active (CW_SNR / CW_DEBUG to tune); waterfall on cwwaterfall:*\n");
     while (true) {
         usleep(1000000);
     }

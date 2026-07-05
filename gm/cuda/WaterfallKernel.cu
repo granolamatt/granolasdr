@@ -25,15 +25,16 @@ __global__ static void waterfall_rgba_kernel(
     const uint8_t* __restrict__ slot,
     int bin_start, int src_bins,
     uint8_t* __restrict__ rgba_out, int out_bins,
-    int num_bins,
+    int num_bins, int row_stride,
     uint8_t wf_floor, uint8_t wf_ceil)
 {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int row = blockIdx.y;   // = time index t
     if (col >= out_bins) return;
 
-    // Base of this time sub-array (f=0).
-    const uint8_t* row_base = slot + (long long)row * FT8_FREQ_OSR * num_bins;
+    // Base of this time sub-array (f=0).  row_stride = freq_osr * num_bins from
+    // the ring's actual geometry (was hardcoded FT8_FREQ_OSR — wrong for CW).
+    const uint8_t* row_base = slot + (long long)row * row_stride;
 
     // Average-pool [lo, hi) input bins into one output pixel.
     int lo = bin_start + (int)((long long)col       * src_bins / out_bins);
@@ -66,7 +67,7 @@ void waterfall_rgba(
     const uint8_t* slot_base,
     int bin_start, int bin_end,
     uint8_t* rgba_out, int out_bins,
-    int num_bins,
+    int num_bins, int row_stride,
     uint8_t wf_floor, uint8_t wf_ceil,
     cudaStream_t stream)
 {
@@ -80,6 +81,6 @@ void waterfall_rgba(
     int blocks_x = (out_bins + threads - 1) / threads;
     dim3 grid(blocks_x, FT8_TIME_OSR);
     waterfall_rgba_kernel<<<grid, threads, 0, stream>>>(
-        slot_base, bin_start, src_bins, rgba_out, out_bins, num_bins,
+        slot_base, bin_start, src_bins, rgba_out, out_bins, num_bins, row_stride,
         wf_floor, wf_ceil);
 }
