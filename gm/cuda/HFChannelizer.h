@@ -65,6 +65,16 @@ private:
     uint32_t      cw_fft_length{0};
     uint64_t      cw_buffer_number{0};
 
+    // Per-band SpectrumNorm for the CW composite (same machinery as the FT8/JS8
+    // bands, applied to kCWBands).  Only used when cw_enabled_.
+    int    cw_norm_total_bins_{0};
+    int    cw_norm_update_count_{0};
+    float* cw_norm_gains_d_{nullptr};
+    std::vector<float>               cw_norm_gains_h_;
+    std::vector<std::complex<float>> cw_norm_snap_h_;
+    std::vector<float>               cw_norm_ema_h_;
+    std::vector<float>               cw_norm_logmag_h_;
+
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;
     int16_t* inData_d;
@@ -129,6 +139,17 @@ private:
     std::vector<std::complex<float>> norm_snap_h_;    // D2H workspace
     std::vector<float>               norm_ema_h_;     // EMA of linear |mag| per bin
     std::vector<float>               norm_logmag_h_;  // log10(ema) per bin for poly fit
+
+    // Update per-band equalization gains for one band set (FT8/JS8 or CW): D2H
+    // snapshot the raw band bins from fftData_d, EMA the noise floor, fit a per-band
+    // polynomial + cross-band level, and H2D the gains.  Caller syncs the FFT first.
+    void updateBandNorm(const std::vector<std::vector<uint32_t>>& band_list,
+                        int total_bins,
+                        std::vector<std::complex<float>>& snap,
+                        std::vector<float>& ema,
+                        std::vector<float>& logmag,
+                        std::vector<float>& gains_h,
+                        float* gains_d, int& update_count);
 
 public:
     gm::buffer::BufferFileParams getBufferFileParams() const;

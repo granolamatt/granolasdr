@@ -146,6 +146,17 @@ wsdict_port_(wsdict_port) {
                 cw_bins[i] = {kCWBands[i].wb_start, kCWBands[i].wb_end, kCWBands[i].bw};
                 cw_total += kCWBands[i].bw;
             }
+            // Per-band norm state for the CW composite (mirrors the FT8/JS8 norm).
+            cw_norm_total_bins_ = (int)cw_total;
+            cw_norm_gains_h_.assign(cw_norm_total_bins_, 1.0f);
+            cw_norm_snap_h_.resize(cw_norm_total_bins_);
+            cw_norm_ema_h_.assign(cw_norm_total_bins_, 0.0f);
+            cw_norm_logmag_h_.resize(cw_norm_total_bins_);
+            cuda_check_error(cudaMalloc((void**)&cw_norm_gains_d_,
+                                        cw_norm_total_bins_ * sizeof(float)));
+            cuda_check_error(cudaMemcpy(cw_norm_gains_d_, cw_norm_gains_h_.data(),
+                                        cw_norm_total_bins_ * sizeof(float),
+                                        cudaMemcpyHostToDevice));
             cuda_check_error(cudaMalloc((void**)&cwChannelData_d,
                 cw_fft_length * sizeof(std::complex<float>) + 1024));
             cuda_check_error(cudaMalloc((void**)&cwDemodData_d,
@@ -180,11 +191,78 @@ HFChannelizer::~HFChannelizer() {
     if (demodData_d) cudaFree(demodData_d);
     if (cwChannelData_d) cudaFree(cwChannelData_d);
     if (cwDemodData_d) cudaFree(cwDemodData_d);
+    if (cw_norm_gains_d_) cudaFree(cw_norm_gains_d_);
     cufftDestroy(plan);
     cufftDestroy(iplan);
     cufftDestroy(audio_plan);
     if (cw_iplan) cufftDestroy(cw_iplan);
     cudaStreamDestroy(stream);
+}
+
+// Per-band SpectrumNorm for one band set.  Caller must cudaStreamSynchronize first
+// (the D2H snapshots read the just-computed fftData_d).  Shared by FT8/JS8 and CW.
+void HFChannelizer::updateBandNorm(
+    const std::vector<std::vector<uint32_t>>& band_list, int total_bins,
+    std::vector<std::complex<float>>& snap, std::vector<float>& ema,
+    std::vector<float>& logmag, std::vector<float>& gains_h,
+    float* gains_d, int& update_count)
+{
+    // D2H: collect complex band bins from the wideband FFT output.
+    int snap_off = 0;
+    for (const auto& b : band_list) {
+        int bw = (int)b[2];
+        cudaMemcpy(&snap[snap_off], &fftData_d[b[0]],
+                   bw * sizeof(std::complex<float>), cudaMemcpyDeviceToHost);
+        snap_off += bw;
+    }
+
+    // Asymmetric EMA: track noise floor down fast (signals drop away), up very slow.
+    bool warm = (update_count < 5);
+    float a_down = warm ? 0.30f : 0.10f;
+    float a_up   = warm ? 0.10f : 0.005f;
+    for (int i = 0; i < total_bins; i++) {
+        float re = snap[i].real(), im = snap[i].imag();
+        float mag = std::sqrt(re*re + im*im);
+        if (update_count == 0) ema[i] = mag;                       // cold-start seed
+        else {
+            float a = (mag < ema[i]) ? a_down : a_up;
+            ema[i] = (1.0f - a) * ema[i] + a * mag;
+        }
+    }
+    update_count++;
+
+    // Per-band Legendre fit of log10(EMA) → intra-band flattening gains.
+    int comp_off = 0;
+    for (const auto& b : band_list) {
+        int bw = (int)b[2];
+        for (int i = 0; i < bw; i++)
+            logmag[comp_off + i] = std::log10(ema[comp_off + i] + 1e-30f);
+        norm_fit_gains(logmag.data() + comp_off, bw, NORM_POLY_DEG,
+                       gains_h.data() + comp_off);
+        comp_off += bw;
+    }
+
+    // Cross-band leveling: bring every band's center level to the geometric mean.
+    double global_log = 0.0;
+    int off = 0;
+    for (const auto& b : band_list) {
+        int bw = (int)b[2];
+        global_log += std::log10(ema[off + bw / 2] + 1e-30f);
+        off += bw;
+    }
+    global_log /= (double)band_list.size();
+    off = 0;
+    for (const auto& b : band_list) {
+        int bw = (int)b[2];
+        double band_log = std::log10(ema[off + bw / 2] + 1e-30f);
+        float scale = (float)std::pow(10.0, global_log - band_log);
+        for (int i = 0; i < bw; i++) gains_h[off + i] *= scale;
+        off += bw;
+    }
+
+    // H2D the updated gains (async — ordered before the apply kernel).
+    cudaMemcpyAsync(gains_d, gains_h.data(),
+                    total_bins * sizeof(float), cudaMemcpyHostToDevice, stream);
 }
 
 int HFChannelizer::doCopy(uint64_t now) {
@@ -249,73 +327,12 @@ int HFChannelizer::doCopy(uint64_t now) {
         // so both the waterfall and the decoders receive a spectrally flattened signal.
         if (++norm_frame_ % NORM_INTERVAL == 0) {
             cudaStreamSynchronize(stream);  // wait for R2C FFT to finish
-
-            // D2H: collect complex band bins from the wideband FFT output.
-            int snap_off = 0;
-            for (const auto& b : bins) {
-                int bw = (int)b[2];
-                cudaMemcpy(&norm_snap_h_[snap_off], &fftData_d[b[0]],
-                           bw * sizeof(std::complex<float>), cudaMemcpyDeviceToHost);
-                snap_off += bw;
-            }
-
-            // Asymmetric EMA: track noise floor downward quickly (signals drop away),
-            // drift upward very slowly (genuine band noise increase takes ~30 min).
-            // Warm-up phase uses faster rates for both directions to seed the estimate.
-            bool warm = (norm_update_count_ < 5);
-            float a_down = warm ? 0.30f : 0.10f;
-            float a_up   = warm ? 0.10f : 0.005f;
-            for (int i = 0; i < norm_total_bins_; i++) {
-                float re = norm_snap_h_[i].real(), im = norm_snap_h_[i].imag();
-                float mag = std::sqrt(re*re + im*im);
-                if (norm_update_count_ == 0) {
-                    norm_ema_h_[i] = mag;  // cold-start: seed directly
-                } else {
-                    float a = (mag < norm_ema_h_[i]) ? a_down : a_up;
-                    norm_ema_h_[i] = (1.0f - a) * norm_ema_h_[i] + a * mag;
-                }
-            }
-            norm_update_count_++;
-
-            // Fit polynomial to log10(EMA) per band; compute equalization gains.
-            int comp_off = 0;
-            for (const auto& b : bins) {
-                int bw = (int)b[2];
-                for (int i = 0; i < bw; i++)
-                    norm_logmag_h_[comp_off + i] = std::log10(norm_ema_h_[comp_off + i] + 1e-30f);
-                norm_fit_gains(norm_logmag_h_.data() + comp_off, bw, NORM_POLY_DEG,
-                               norm_gains_h_.data() + comp_off);
-                comp_off += bw;
-            }
-
-            // Cross-band leveling: compute the geometric mean of all band-center EMA
-            // magnitudes and add a per-band scalar so every band arrives at the same
-            // brightness.  Without this, active bands (more signals → higher EMA) remain
-            // brighter than quiet bands even after intra-band flattening.
-            {
-                double global_log = 0.0;
-                int off = 0;
-                for (const auto& b : bins) {
-                    int bw = (int)b[2];
-                    global_log += std::log10(norm_ema_h_[off + bw / 2] + 1e-30f);
-                    off += bw;
-                }
-                global_log /= (double)bins.size();
-
-                off = 0;
-                for (const auto& b : bins) {
-                    int bw = (int)b[2];
-                    double band_log = std::log10(norm_ema_h_[off + bw / 2] + 1e-30f);
-                    float scale = (float)std::pow(10.0, global_log - band_log);
-                    for (int i = 0; i < bw; i++)
-                        norm_gains_h_[off + i] *= scale;
-                    off += bw;
-                }
-            }
-
-            // H2D the updated gains (async — ordered before apply_gains_kernel below).
-            cudaMemcpyAsync(norm_gains_d_, norm_gains_h_.data(),
-                            norm_total_bins_ * sizeof(float), cudaMemcpyHostToDevice, stream);
+            updateBandNorm(bins, norm_total_bins_, norm_snap_h_, norm_ema_h_,
+                           norm_logmag_h_, norm_gains_h_, norm_gains_d_, norm_update_count_);
+            if (cw_enabled_)
+                updateBandNorm(cw_bins, cw_norm_total_bins_, cw_norm_snap_h_,
+                               cw_norm_ema_h_, cw_norm_logmag_h_, cw_norm_gains_h_,
+                               cw_norm_gains_d_, cw_norm_update_count_);
         }
 
         // Composite assembly: pack all band bins into channelData_d[0..total_bw-1].
@@ -354,8 +371,8 @@ int HFChannelizer::doCopy(uint64_t now) {
 
         // CW skimmer second composite: pack kCWBands from the same wideband FFT
         // (fftData_d, already computed above) into the 8192-pt CW IFFT and emit
-        // on cwBufferPosition.  No SpectrumNorm gains (CW bands are outside the
-        // FT8/JS8 norm windows; raw |FFT| is fine for a narrowband tone scan).
+        // on cwBufferPosition.  Per-band SpectrumNorm (cw_norm_gains_d_) flattens
+        // the CW sub-bands' noise floors just like the FT8/JS8 composite.
         if (cw_enabled_) {
             uint32_t cwoff = 0;
             cuda_check_error(cudaMemsetAsync(cwChannelData_d, 0,
@@ -366,6 +383,8 @@ int HFChannelizer::doCopy(uint64_t now) {
                     b[2] * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
                 cwoff += b[2];
             }
+            norm_apply_gains((cufftComplex*)cwChannelData_d, cw_norm_gains_d_,
+                             cw_norm_total_bins_, stream);
             cufftResult_t cwval = cufftExecC2C(cw_iplan, (cufftComplex*)cwChannelData_d,
                 (cufftComplex*)cwChannelData_d, CUFFT_INVERSE);
             if (cwval) printf("Error in CW composite IFFT\n");
