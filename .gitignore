@@ -17,6 +17,8 @@ ft8_timing.csv
 # LLR training captures and run logs (regenerable, large)
 *.jsonl
 out.txt
+# stdout/debug capture logs from playback + A/B runs
+*.log
 # --record complex composite captures (GNLH format, large binary)
 *.dat
 *.gnlh
