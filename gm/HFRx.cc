@@ -5,6 +5,7 @@
 #include <string>
 #include <complex>
 #include <thread>
+#include <chrono>
 #include <zmq.hpp>
 
 #include "gm/rx888/rx888.h"
@@ -87,15 +88,18 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         bool enable_js8_slow, bool enable_js8_turbo, bool enable_js8_ultra,
                         int wf_bin_start, int wf_bin_end,
                         bool legacy_costas, uint8_t wf_floor, uint8_t wf_ceil,
+                        gm::buffer::BufferFile<std::complex<float>>* playback = nullptr,
                         gm::buffer::BufferPosition<std::complex<float>>* cwbuf = nullptr) {
 
     // RAII order: MagBlocks own ring memory; all readers hold const refs.
     // C++ destroys in reverse declaration order (readers before rings).
     gm::cuda::MagBlock<200> magblock(&buf,
-        kNormalRfftLen, kNormalTimeOsr, kNormalFreqOsr, kProxyXSubPort);
+        kNormalRfftLen, kNormalTimeOsr, kNormalFreqOsr, kProxyXSubPort,
+        /*retain_complex=*/true);   // FT8/JS8 Normal refine reads the complex ring
     magblock.start();
 
-    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, legacy_costas);
+    gm::cuda::FT8Cuda ft8channel(magblock.getRing(), min_score, "EPOCH", kProxyXSubPort, legacy_costas,
+                                 &magblock.getComplexRing(), magblock.getSlotCplxIdx());
     ft8channel.start();
 
     gm::hf::FT8 ft8(&ft8channel, kProxyXSubPort, kWsDictPort);
@@ -133,11 +137,24 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     ft8.setOsdConfig(ft8_osd.enable, /*order=*/2, ft8_osd.floor, ft8_osd.max);
     log_osd("FT8", ft8_osd);
 
+    // Per-candidate freq/time refine fallback (reads MagBlock's complex ring).
+    // OFF by default; FT8_REFINE=1 enables. Runs only after BP+OSD both fail.
+    const bool ft8_refine = std::getenv("FT8_REFINE") &&
+                            std::string(std::getenv("FT8_REFINE")) != "0";
+    ft8.setRefineEnabled(ft8_refine);
+    printf("FT8 refine fallback: %s\n", ft8_refine ? "ENABLED (FT8_REFINE=1)"
+                                                    : "disabled (set FT8_REFINE=1)");
+
     const OsdEnv js8_osd = read_osd_env("JS8_OSD", "JS8_OSD_SCORE_FLOOR", "JS8_OSD_MAX");
     auto apply_osd = [&](gm::hf::JS8* j) {
         if (j) j->setOsdConfig(js8_osd.enable, /*order=*/2, js8_osd.floor, js8_osd.max);
     };
     log_osd("JS8", js8_osd);
+
+    // JS8 Normal shares MagBlock<200> with FT8, so it refines from the same
+    // complex ring.  OFF by default; JS8_REFINE=1 enables (Normal only).
+    const bool js8_refine = std::getenv("JS8_REFINE") &&
+                            std::string(std::getenv("JS8_REFINE")) != "0";
 
     std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
     std::unique_ptr<gm::hf::JS8>            js8_obj;
@@ -145,11 +162,14 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
         js8channel = std::make_unique<gm::cuda::JS8Cuda<200>>(
             magblock.getRing(), min_score, kProxyXSubPort,
             js8_gpu_scan, kNormalTimeOsr, kNormalFreqOsr, kNormalCapBlks, "JS8",
-            legacy_costas);
+            legacy_costas, &magblock.getComplexRing(), magblock.getSlotCplxIdx());
         js8_obj = std::make_unique<gm::hf::JS8>(
             js8channel.get(), kProxyXSubPort,
             kNormalSymPer, kNormalCycleSec, kNormalTimeOsr, kNormalRfftLen,
             "JS8", kWsDictPort);
+        js8_obj->setRefineEnabled(js8_refine);
+        printf("JS8 refine fallback: %s\n", js8_refine ? "ENABLED (JS8_REFINE=1)"
+                                                       : "disabled (set JS8_REFINE=1)");
     }
 
     std::unique_ptr<gm::cuda::MagBlock<128>>  magblock_fast;
@@ -248,14 +268,27 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     }
 
     while (true) {
-        usleep(1000000);
+        // --playback-once: when the file is fully fed, let the pipeline drain the
+        // trailing frames, flush captures/stdout, and exit cleanly.  (Blocks stay
+        // parked on getPosition once the feed stops, so we exit rather than join.)
+        if (playback && playback->finished()) {
+            const int kDrainSec = 3;
+            printf("Playback finished; draining %d s then exiting.\n", kDrainSec);
+            fflush(stdout);
+            std::this_thread::sleep_for(std::chrono::seconds(kDrainSec));
+            fflush(stdout);
+            fflush(stderr);
+            std::exit(0);
+        }
+        usleep(200000);
     }
 }
 
 // CW-only playback: replay a --record-cw capture (819.2 kHz CW composite) through
 // the CW MagBlock -> CWSkimmerCuda, with no FT8/JS8 chain.  This closes the offline
 // iteration loop for the CW detector/decoder: capture live with --record-cw, then
-// replay here under CW_SNR / CW_DEBUG to tune without the radio.
+// replay here under CW_SNR / CW_DEBUG to tune without the radio.  The capture loops
+// at EOF (BufferFile default), so this runs until interrupted.
 static void runCWPlayback(gm::buffer::BufferPosition<std::complex<float>>& cwbuf) {
     gm::cuda::MagBlock<128> magblock_cw(&cwbuf,
         /*rfft=*/16384, /*time_osr=*/4, /*freq_osr=*/1, /*zmq=*/0);
@@ -267,6 +300,54 @@ static void runCWPlayback(gm::buffer::BufferPosition<std::complex<float>>& cwbuf
     while (true) {
         usleep(1000000);
     }
+}
+
+static void printUsage(const char* prog) {
+    fprintf(stderr,
+"Usage: %s [options]\n"
+"\n"
+"Input (default: live RX888):\n"
+"  --playback <file>          Replay a --record capture, looping at EOF\n"
+"  --playback-once <file>     Replay a capture once, then exit cleanly\n"
+"  --playback-cw <file>       Replay a --record-cw capture into the CW skimmer only\n"
+"  --record <file>            Record the FT8/JS8 composite (complex float) to <file>\n"
+"  --record-cw <file>         Record the CW composite (819.2 kHz) to <file> (implies --cw)\n"
+"\n"
+"Decoders (FT8 always on):\n"
+"  --js8                      Enable JS8 Normal\n"
+"  --js8-fast                 Enable JS8 Fast\n"
+"  --js8-slow                 Enable JS8 Slow\n"
+"  --js8-turbo                Enable JS8 Turbo\n"
+"  --js8-ultra                Enable JS8 Ultra\n"
+"  --cw                       Enable the CW skimmer (9 CW sub-bands)\n"
+"\n"
+"Decode tuning:\n"
+"  --min-score <f>            Costas sync threshold (default 5.0 legacy / 3.0 max-log)\n"
+"  --max-log-costas           Use the max-log 8-FSK Costas metric (default: legacy)\n"
+"\n"
+"Waterfall:\n"
+"  --waterfall-center-hz <f>  Composite center to display (default 45000)\n"
+"  --waterfall-bw-hz <f>      Composite bandwidth to display (default 211000)\n"
+"  --zoom-band <start> <end>  Zoom the waterfall to an HF band index range\n"
+"  --wf-floor <0-255>         Waterfall floor (default 170)\n"
+"  --wf-ceil <0-255>          Waterfall ceiling (default 210)\n"
+"\n"
+"TCI (WSJT-X / JTDX / N1MM audio):\n"
+"  --tci-port <n>             TCI server port, 0 = disabled (default 40001)\n"
+"  --tci-gain <f>             TCI INT16 gain (default 1.0)\n"
+"\n"
+"  -h, --help                 Show this help and exit\n",
+        prog);
+}
+
+// Consume the value that must follow a value-taking flag; usage+exit if absent.
+static const char* argValue(int& i, int argc, char** argv) {
+    if (i + 1 >= argc) {
+        fprintf(stderr, "Error: %s requires a value\n\n", argv[i]);
+        printUsage(argv[0]);
+        std::exit(1);
+    }
+    return argv[++i];
 }
 
 int main(int argc, char* argv[]) {
@@ -292,25 +373,33 @@ int main(int argc, char* argv[]) {
     std::string record_cw_file;
     std::string playback_file;
     std::string playback_cw_file;
+    bool        playback_loop   = true;   // --playback loops; --playback-once does not
     int         zoom_band_start = -1;
     int         zoom_band_end   = -1;
 
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--min-score") == 0 && i + 1 < argc) {
-            min_score = std::stof(argv[++i]);
-        } else if (strcmp(argv[i], "--waterfall-center-hz") == 0 && i + 1 < argc) {
-            wf_center_hz = std::stof(argv[++i]);
-        } else if (strcmp(argv[i], "--waterfall-bw-hz") == 0 && i + 1 < argc) {
-            wf_bw_hz = std::stof(argv[++i]);
-        } else if (strcmp(argv[i], "--record") == 0 && i + 1 < argc) {
-            record_file = argv[++i];
-        } else if (strcmp(argv[i], "--record-cw") == 0 && i + 1 < argc) {
-            record_cw_file = argv[++i];
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printUsage(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "--min-score") == 0) {
+            min_score = std::stof(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--waterfall-center-hz") == 0) {
+            wf_center_hz = std::stof(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--waterfall-bw-hz") == 0) {
+            wf_bw_hz = std::stof(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--record") == 0) {
+            record_file = argValue(i, argc, argv);
+        } else if (strcmp(argv[i], "--record-cw") == 0) {
+            record_cw_file = argValue(i, argc, argv);
             enable_cw = true;   // the CW composite only exists when --cw is on
-        } else if (strcmp(argv[i], "--playback") == 0 && i + 1 < argc) {
-            playback_file = argv[++i];
-        } else if (strcmp(argv[i], "--playback-cw") == 0 && i + 1 < argc) {
-            playback_cw_file = argv[++i];
+        } else if (strcmp(argv[i], "--playback") == 0) {
+            playback_file = argValue(i, argc, argv);
+            playback_loop = true;
+        } else if (strcmp(argv[i], "--playback-once") == 0) {
+            playback_file = argValue(i, argc, argv);
+            playback_loop = false;
+        } else if (strcmp(argv[i], "--playback-cw") == 0) {
+            playback_cw_file = argValue(i, argc, argv);
         } else if (strcmp(argv[i], "--js8") == 0) {
             enable_js8 = true;
         } else if (strcmp(argv[i], "--js8-fast") == 0) {
@@ -325,17 +414,21 @@ int main(int argc, char* argv[]) {
             enable_js8_ultra = true;
         } else if (strcmp(argv[i], "--max-log-costas") == 0) {
             legacy_costas = false;
-        } else if (strcmp(argv[i], "--zoom-band") == 0 && i + 2 < argc) {
-            zoom_band_start = std::stoi(argv[++i]);
-            zoom_band_end   = std::stoi(argv[++i]);
-        } else if (strcmp(argv[i], "--wf-floor") == 0 && i + 1 < argc) {
-            wf_floor = (uint8_t)std::stoi(argv[++i]);
-        } else if (strcmp(argv[i], "--wf-ceil") == 0 && i + 1 < argc) {
-            wf_ceil  = (uint8_t)std::stoi(argv[++i]);
-        } else if (strcmp(argv[i], "--tci-port") == 0 && i + 1 < argc) {
-            tci_port = std::stoi(argv[++i]);
-        } else if (strcmp(argv[i], "--tci-gain") == 0 && i + 1 < argc) {
-            tci_gain = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--zoom-band") == 0) {
+            zoom_band_start = std::stoi(argValue(i, argc, argv));
+            zoom_band_end   = std::stoi(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--wf-floor") == 0) {
+            wf_floor = (uint8_t)std::stoi(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--wf-ceil") == 0) {
+            wf_ceil  = (uint8_t)std::stoi(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--tci-port") == 0) {
+            tci_port = std::stoi(argValue(i, argc, argv));
+        } else if (strcmp(argv[i], "--tci-gain") == 0) {
+            tci_gain = std::stof(argValue(i, argc, argv));
+        } else {
+            fprintf(stderr, "Error: unknown argument '%s'\n\n", argv[i]);
+            printUsage(argv[0]);
+            return 1;
         }
     }
 
@@ -401,11 +494,14 @@ int main(int argc, char* argv[]) {
         playback.start();
         runCWPlayback(*playback.getBuffer());
     } else if (!playback_file.empty()) {
-        gm::buffer::BufferFile<std::complex<float>> playback(playback_file);
+        gm::buffer::BufferFile<std::complex<float>> playback(playback_file, playback_loop);
         playback.start();
+        printf("Playback: %s (%s)\n", playback_file.c_str(),
+               playback_loop ? "looping at EOF" : "once, then exit");
         runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
-                    wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil);
+                    wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil,
+                    &playback);
     } else {
         gm::rx888::rx888 mydsp;
         mydsp.start_card();
@@ -433,6 +529,7 @@ int main(int argc, char* argv[]) {
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
                     wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil,
+                    /*playback=*/nullptr,
                     enable_cw ? channelizer.getCWBuffer() : nullptr);
 
         // TC5/TC6 shutdown order: stop channelizer workers before TCI server

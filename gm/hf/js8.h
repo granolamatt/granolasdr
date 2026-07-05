@@ -1,8 +1,13 @@
 #pragma once
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <zmq.hpp>
 #include "wsdict.h"
@@ -27,7 +32,7 @@ public:
         int time_osr = 4, int rfft_size = 32768,
         const char* mode_name = "JS8",
         int wsdict_port = 0);
-    ~JS8() = default;
+    ~JS8();
 
     void publishDecoded(const char* text, const char* from_call, float freq_hz,
                         float snr, double unix_time, float time_offset);
@@ -41,6 +46,17 @@ public:
     void setOsdConfig(bool enable, int order, float score_floor,
                       int max_per_cycle, float soft_thresh = 0.0f);
 
+    // Enable the per-candidate refine fallback (needs the complex retention ring;
+    // Normal only). Refine runs on its own worker thread (off the scan callback's
+    // critical path), so this also spins that thread up on first enable.
+    void setRefineEnabled(bool enable) {
+        refine_enable_ = enable;
+        if (enable && !refine_thread_.joinable()) {
+            refine_run_.store(true);
+            refine_thread_ = std::thread([this] { refineWorker(); });
+        }
+    }
+
 private:
     // CRC-12 + dedup + publish for one candidate; `info` is the 87-bit message
     // (codeword + 87).  Shared by the SP-converged ("pass") and OSD ("osd") paths.
@@ -49,7 +65,13 @@ private:
     bool publishCandidate(gm::cuda::ContScanResult& r, uint32_t i,
                           const uint8_t* info, const float* llr, double unix_now,
                           const char* status, const float* osd_dist);
+    // Same as publishCandidate but with candidate fields passed explicitly, so the
+    // refine worker (which has no live ContScanResult) can reuse the publish path.
+    bool publishCandidateCore(const uint8_t* info, const float* llr, int32_t fo,
+                              int to, int ts, int16_t score, double unix_now,
+                              const char* status, const float* osd_dist);
 
+    gm::cuda::JS8CudaBase* js8cuda_;   // for the refine fallback
     int         zmq_port_;
     float       symbol_period_;
     float       cycle_secs_;
@@ -76,6 +98,33 @@ private:
     float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
     int   osd_max_per_cycle_ = 64;
     float osd_soft_thresh_   = 0.0f;   // 0 = gate on CRC-12 only
+
+    // Per-candidate refine fallback (see setRefineEnabled). When OSD fails on a
+    // strong candidate, the scan callback enqueues a job; the refine worker thread
+    // re-extracts LLRs from the retained complex frame and retries OSD — fully off
+    // the scan worker's critical path. Off by default.
+    bool  refine_enable_ = false;
+
+    struct RefineJob {
+        int32_t  fo;
+        int      to;
+        int      ts;
+        uint64_t snap_start;
+        int16_t  score;
+        double   unix_now;
+    };
+    std::deque<RefineJob>   refine_q_;
+    std::mutex              refine_mu_;
+    std::condition_variable refine_cv_;
+    std::thread             refine_thread_;
+    std::atomic<bool>       refine_run_{false};
+    static constexpr size_t kRefineQueueMax = 32;   // drop-oldest safety valve
+
+    // Guards publish-side shared state (seen_this_epoch_, llr_capture_) across the
+    // scan callback and the refine worker.
+    std::mutex pub_mu_;
+
+    void refineWorker();
 };
 
 } // namespace hf

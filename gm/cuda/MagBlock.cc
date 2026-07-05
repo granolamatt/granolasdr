@@ -12,8 +12,10 @@ namespace cuda {
 
 template<int N>
 MagBlock<N>::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP,
-                      int rfft_len, int time_osr, int freq_osr, int zmq_port)
-    : inPos_(inP), zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
+                      int rfft_len, int time_osr, int freq_osr, int zmq_port,
+                      bool retain_complex)
+    : inPos_(inP), retain_complex_(retain_complex),
+      zmq_ctx_(1), zmq_pub_(zmq_ctx_, ZMQ_PUB)
 {
     if (zmq_port > 0)
         zmq_pub_.connect("tcp://localhost:" + std::to_string(zmq_port));
@@ -57,6 +59,22 @@ MagBlock<N>::MagBlock(gm::buffer::BufferPosition<std::complex<float>>* inP,
     if (fftRes) { fprintf(stderr, "MagBlock: cufftPlan1d failed\n"); exit(1); }
     fftRes = cufftSetStream(rplan_, stream_);
     if (fftRes) { fprintf(stderr, "MagBlock: cufftSetStream failed\n"); exit(1); }
+
+    // Complex-composite retention ring: one slot per input block (inShape_[1]
+    // samples), kComplexBlocks deep.  Consumers re-read a full frame with phase.
+    if (retain_complex_) {
+        const size_t block_len  = inShape_[1];
+        const size_t slot_bytes = block_len * sizeof(std::complex<float>);
+        const size_t bytes      = (size_t)kComplexBlocks * slot_bytes;
+        cuda_check_error(cudaMalloc((void**)&complex_ring_.base_d, bytes));
+        cuda_check_error(cudaMemset(complex_ring_.base_d, 0, bytes));
+        complex_ring_.slot_bytes = slot_bytes;
+        complex_ring_.num_bins   = block_len;
+        cuda_check_error(cudaEventCreateWithFlags(&complex_ring_.ready, cudaEventDisableTiming));
+        printf("GPU complex ring: %.1f MB  (%d blocks x %zu samples, ~%.1f s)\n",
+               (double)bytes / 1e6, kComplexBlocks, block_len,
+               (double)kComplexBlocks * block_len / 409600.0);
+    }
 }
 
 template<int N>
@@ -67,6 +85,10 @@ MagBlock<N>::~MagBlock()
     if (demodShift_d_) cudaFree(demodShift_d_);
     if (magFT8_d_)     cudaFree(magFT8_d_);
     if (ring_.base_d)  cudaFree(ring_.base_d);
+    if (retain_complex_) {
+        if (complex_ring_.base_d) cudaFree(complex_ring_.base_d);
+        cudaEventDestroy(complex_ring_.ready);
+    }
     cufftDestroy(rplan_);
     cudaEventDestroy(ring_.ready);
     cudaStreamDestroy(stream_);
@@ -92,7 +114,22 @@ int MagBlock<N>::doCopy(uint64_t now)
                     cudaMemcpyDeviceToDevice, stream_);
     buff_pos_ += (uint32_t)length;
 
+    // Complex retention: keep this raw input block (phase intact) for the refine.
+    if (retain_complex_) {
+        cudaMemcpyAsync(complex_ring_.slot(cplx_wi_),
+                        &inData_d_[length * (now % inShape_[0])],
+                        length * sizeof(std::complex<float>),
+                        cudaMemcpyDeviceToDevice, stream_);
+        cuda_check_error(cudaEventRecord(complex_ring_.ready, stream_));
+        ++cplx_wi_;
+        complex_ring_.write_idx.store(cplx_wi_, std::memory_order_release);
+    }
+
     if (buff_pos_ > 2 * rfft_length_) {
+        // Complex block of demodData_d_[0] (this mag slot's window start), before
+        // the buff_pos_ shift below.  length divides buff_pos_ and rfft exactly.
+        const uint64_t cplx_start = retain_complex_
+            ? cplx_wi_ - buff_pos_ / (uint64_t)length : 0;
         for (int t = 0; t < time_osr_; ++t) {
             for (int f = 0; f < freq_osr_; ++f) {
                 std::complex<float>* input = &demodData_d_[t * rfft_length_ / time_osr_];
@@ -127,6 +164,8 @@ int MagBlock<N>::doCopy(uint64_t now)
             &magFT8_d_[0],
             ring_.slot_bytes,
             cudaMemcpyDeviceToDevice, stream_));
+
+        if (retain_complex_) slot_cplx_idx_[wi % N] = cplx_start;
 
         cuda_check_error(cudaEventRecord(ring_.ready, stream_));
         ring_.write_idx.fetch_add(1, std::memory_order_release);

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <string>
@@ -54,7 +55,12 @@ public:
     // Valid only in playback mode.
     gm::buffer::BufferPosition<T>* getBuffer() { return &buf_pos_; }
 
+    // Playback, non-looping: true once the whole file has been fed and EOF hit.
+    bool finished() const { return finished_.load(std::memory_order_acquire); }
+
 private:
+    std::atomic<bool> finished_{false};
+
     enum class Mode { Playback, Record };
     Mode        mode_;
     std::string path_;

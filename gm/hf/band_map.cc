@@ -36,11 +36,20 @@ static int band_map_ifft_bin(int freq_offset, int rfft_size) {
 
 float composite_bin_to_rf_hz(int freq_offset, int rfft_size) {
     init_band_map();
-    int ifft_bin = band_map_ifft_bin(freq_offset, rfft_size);
+    // Keep the FRACTIONAL composite-bin position: rounding to the integer 100 Hz
+    // composite grid (band_map_ifft_bin) threw away the ~6.25 Hz FFT-bin
+    // resolution.  PSKReporter nulls a spot's frequency when it disagrees with the
+    // cross-receiver consensus; JS8Call reporters set a ~1 Hz-tight JS8 consensus,
+    // so our 100 Hz-quantized frequency read as an outlier and got dropped (FT8's
+    // consensus is loose enough that 100 Hz was fine).  Fractional position gives
+    // ~6.25 Hz resolution, well inside the JS8 tolerance.
+    double ifft_pos = (double)freq_offset * kIfftSize / (double)rfft_size;
+    int    ifft_bin = (int)std::floor(ifft_pos);
+    if (ifft_bin < 0) { ifft_bin += kIfftSize; ifft_pos += kIfftSize; }
     for (int i = 0; i < kBandMapSize; ++i) {
         if (ifft_bin >= kBandMap[i].ifft_start && ifft_bin < kBandMap[i].ifft_end) {
-            int wb_bin = kBandMap[i].wb_start + (ifft_bin - kBandMap[i].ifft_start);
-            return (float)wb_bin * kWbSampleRate / kWidebandFftSize;
+            double wb_pos = kBandMap[i].wb_start + (ifft_pos - kBandMap[i].ifft_start);
+            return (float)(wb_pos * (double)kWbSampleRate / kWidebandFftSize);
         }
     }
     return (float)freq_offset;

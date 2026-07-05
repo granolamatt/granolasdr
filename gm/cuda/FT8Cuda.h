@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <functional>
 #include <fstream>
 #include <iostream>
@@ -52,11 +53,17 @@ struct ContScanResult {
 
 class FT8Cuda : public Thread {
 public:
+    // cplx_ring + slot_cplx_idx (optional): MagBlock's complex-composite retention
+    // ring and its per-mag-slot map, for the per-candidate refine fallback. Null
+    // disables refine (decode path unchanged).
     FT8Cuda(const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring,
             float min_score = 5.0f,
             const std::string& tag = "EPOCH",
             int zmq_port = 0,
-            bool legacy_costas = false);
+            bool legacy_costas = false,
+            const gm::buffer::DeviceRingBuffer<std::complex<float>,
+                  gm::buffer::kComplexCompositeBlocks>* cplx_ring = nullptr,
+            const uint64_t* slot_cplx_idx = nullptr);
     ~FT8Cuda();
 
     void run();
@@ -65,11 +72,25 @@ public:
     void setDecodeCallback(std::function<void(ContScanResult&)> cb);
     void startContinuousScan();
 
+    // Per-candidate refine (fallback): D2H the candidate's complex frame from the
+    // retention ring, downconvert+decimate, fine freq/time align, re-extract LLRs.
+    // Fills log174[FTX_LDPC_N]. Returns false if refine is disabled or the frame
+    // has aged out of the retention window. Caller runs LDPC/CRC on the LLRs.
+    bool refineCandidate(int32_t fo, int to, uint64_t snap_start, float* log174);
+
 private:
     const gm::buffer::DeviceRingBuffer<uint8_t, 200>& ring_;
     std::string tag_;
     float       min_score_;
     bool        legacy_costas_;
+
+    // Complex-composite retention for the refine fallback (null = disabled).
+    const gm::buffer::DeviceRingBuffer<std::complex<float>,
+          gm::buffer::kComplexCompositeBlocks>* cplx_ring_{nullptr};
+    const uint64_t* slot_cplx_idx_{nullptr};
+    std::vector<std::complex<float>> refine_host_;   // D2H raw frame (~41 MB)
+    std::vector<std::complex<float>> refine_decim_;  // decimated baseband frame
+    cudaStream_t refine_stream_{};                   // refine D2H (off the scan stream)
 
     static constexpr int CONTINUOUS_SLOTS = 8;
     int cont_stride_{6};
