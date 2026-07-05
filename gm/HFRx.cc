@@ -88,7 +88,7 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
                         float min_score, bool enable_js8, bool enable_js8_fast,
                         bool enable_js8_slow, bool enable_js8_turbo, bool enable_js8_ultra,
                         int wf_bin_start, int wf_bin_end,
-                        bool legacy_costas, uint8_t wf_floor, uint8_t wf_ceil,
+                        bool legacy_costas,
                         gm::buffer::BufferFile<std::complex<float>>* playback = nullptr,
                         gm::buffer::BufferPosition<std::complex<float>>* cwbuf = nullptr) {
 
@@ -109,7 +109,7 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     gm::cuda::WaterfallCuda<200> waterfall(magblock.getRing(),
                                       wf_bin_start, wf_bin_end,
                                       gm::cuda::WaterfallCuda<200>::DEFAULT_OUT_BINS,
-                                      kWsDictPort, wf_floor, wf_ceil);
+                                      kWsDictPort);
     waterfall.start();
 
     // OSD LDPC fallback, ON by default (score_floor 6).  FT8 and JS8 are
@@ -139,12 +139,13 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     log_osd("FT8", ft8_osd);
 
     // Per-candidate freq/time refine fallback (reads MagBlock's complex ring).
-    // OFF by default; FT8_REFINE=1 enables. Runs only after BP+OSD both fail.
-    const bool ft8_refine = std::getenv("FT8_REFINE") &&
-                            std::string(std::getenv("FT8_REFINE")) != "0";
+    // ON by default; set FT8_REFINE=0 to disable. Runs only after BP+OSD both fail.
+    const char* ft8_refine_env = std::getenv("FT8_REFINE");
+    const bool ft8_refine = (ft8_refine_env == nullptr) ||
+                            (std::string(ft8_refine_env) != "0");
     ft8.setRefineEnabled(ft8_refine);
-    printf("FT8 refine fallback: %s\n", ft8_refine ? "ENABLED (FT8_REFINE=1)"
-                                                    : "disabled (set FT8_REFINE=1)");
+    printf("FT8 refine fallback: %s\n", ft8_refine ? "ENABLED"
+                                                    : "disabled (FT8_REFINE=0)");
 
     const OsdEnv js8_osd = read_osd_env("JS8_OSD", "JS8_OSD_SCORE_FLOOR", "JS8_OSD_MAX");
     auto apply_osd = [&](gm::hf::JS8* j) {
@@ -153,9 +154,10 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
     log_osd("JS8", js8_osd);
 
     // JS8 Normal shares MagBlock<200> with FT8, so it refines from the same
-    // complex ring.  OFF by default; JS8_REFINE=1 enables (Normal only).
-    const bool js8_refine = std::getenv("JS8_REFINE") &&
-                            std::string(std::getenv("JS8_REFINE")) != "0";
+    // complex ring.  ON by default; set JS8_REFINE=0 to disable (Normal only).
+    const char* js8_refine_env = std::getenv("JS8_REFINE");
+    const bool js8_refine = (js8_refine_env == nullptr) ||
+                            (std::string(js8_refine_env) != "0");
 
     std::unique_ptr<gm::cuda::JS8Cuda<200>> js8channel;
     std::unique_ptr<gm::hf::JS8>            js8_obj;
@@ -169,8 +171,8 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
             kNormalSymPer, kNormalCycleSec, kNormalTimeOsr, kNormalRfftLen,
             "JS8", kWsDictPort);
         js8_obj->setRefineEnabled(js8_refine);
-        printf("JS8 refine fallback: %s\n", js8_refine ? "ENABLED (JS8_REFINE=1)"
-                                                       : "disabled (set JS8_REFINE=1)");
+        printf("JS8 refine fallback: %s\n", js8_refine ? "ENABLED"
+                                                       : "disabled (JS8_REFINE=0)");
     }
 
     std::unique_ptr<gm::cuda::MagBlock<128>>  magblock_fast;
@@ -276,7 +278,6 @@ static void runPipeline(gm::buffer::BufferPosition<std::complex<float>>& buf,
         cw_waterfall = std::make_unique<gm::cuda::WaterfallCuda<128>>(
             magblock_cw->getRing(), /*bin_start=*/0, /*bin_end=*/cw_content_bins,
             gm::cuda::WaterfallCuda<128>::DEFAULT_OUT_BINS, kWsDictPort,
-            /*wf_floor=*/160, /*wf_ceil=*/200,
             "granolasdr:cwwaterfall:", /*full_rate_hz=*/819200.0f,
             /*min_publish_ms=*/120);
         cw_waterfall->start();
@@ -321,7 +322,6 @@ static void runCWPlayback(gm::buffer::BufferPosition<std::complex<float>>& cwbuf
     gm::cuda::WaterfallCuda<128> cw_waterfall(
         magblock_cw.getRing(), /*bin_start=*/0, /*bin_end=*/(int)(2 * cw_total),
         gm::cuda::WaterfallCuda<128>::DEFAULT_OUT_BINS, kWsDictPort,
-        /*wf_floor=*/160, /*wf_ceil=*/200,
         "granolasdr:cwwaterfall:", /*full_rate_hz=*/819200.0f,
         /*min_publish_ms=*/120);
     cw_waterfall.start();
@@ -344,24 +344,26 @@ static void printUsage(const char* prog) {
 "  --record <file>            Record the FT8/JS8 composite (complex float) to <file>\n"
 "  --record-cw <file>         Record the CW composite (819.2 kHz) to <file> (implies --cw)\n"
 "\n"
-"Decoders (FT8 always on):\n"
-"  --js8                      Enable JS8 Normal\n"
-"  --js8-fast                 Enable JS8 Fast\n"
-"  --js8-slow                 Enable JS8 Slow\n"
-"  --js8-turbo                Enable JS8 Turbo\n"
-"  --js8-ultra                Enable JS8 Ultra\n"
-"  --cw                       Enable the CW skimmer (9 CW sub-bands)\n"
+"Decoders (FT8 always on; JS8 Normal/Fast/Slow + CW on by default):\n"
+"  --no-js8                   Disable JS8 Normal\n"
+"  --no-js8-fast              Disable JS8 Fast\n"
+"  --no-js8-slow              Disable JS8 Slow\n"
+"  --no-cw                    Disable the CW skimmer\n"
+"  --js8-turbo                Enable JS8 Turbo (opt-in)\n"
+"  --js8-ultra                Enable JS8 Ultra (opt-in)\n"
 "\n"
 "Decode tuning:\n"
 "  --min-score <f>            Costas sync threshold (default 5.0 legacy / 3.0 max-log)\n"
 "  --max-log-costas           Use the max-log 8-FSK Costas metric (default: legacy)\n"
+"  env FT8_REFINE=0/JS8_REFINE=0     disable per-candidate refine (on by default)\n"
+"  env WIDEBAND_EQ=0                 disable whole-spectrum equalization (on by default)\n"
 "\n"
 "Waterfall:\n"
 "  --waterfall-center-hz <f>  Composite center to display (default 45000)\n"
 "  --waterfall-bw-hz <f>      Composite bandwidth to display (default 211000)\n"
 "  --zoom-band <start> <end>  Zoom the waterfall to an HF band index range\n"
-"  --wf-floor <0-255>         Waterfall floor (default 170)\n"
-"  --wf-ceil <0-255>          Waterfall ceiling (default 210)\n"
+"  env WF_GAIN=<f>            Waterfall contrast (default 6)\n"
+"  env WF_OFFSET=<n>          Waterfall noise-floor lift, may be negative (default 0)\n"
 "\n"
 "TCI (WSJT-X / JTDX / N1MM audio):\n"
 "  --tci-port <n>             TCI server port, 0 = disabled (default 40001)\n"
@@ -383,17 +385,17 @@ static const char* argValue(int& i, int argc, char** argv) {
 
 int main(int argc, char* argv[]) {
 
-    bool        enable_js8       = false;
-    bool        enable_js8_fast  = false;
-    bool        enable_js8_slow  = false;
+    // FT8 always on; JS8 Normal/Fast/Slow + CW on by default (--no-* to disable).
+    // Turbo/Ultra remain opt-in.
+    bool        enable_js8       = true;
+    bool        enable_js8_fast  = true;
+    bool        enable_js8_slow  = true;
     bool        enable_js8_turbo = false;
     bool        enable_js8_ultra = false;
-    bool        enable_cw        = false;
+    bool        enable_cw        = true;
     bool        legacy_costas   = true;
     int         tci_port        = 40001;  // 0 = disabled
     float       tci_gain        = 1.0f;
-    uint8_t     wf_floor        = 170;   // tune: raise to darken noise floor
-    uint8_t     wf_ceil         = 210;   // tune: lower to saturate signals sooner
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
     // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–211 kHz;
     // bins above that are zero-filled.  Show only the live content region.
@@ -432,7 +434,7 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--playback-cw") == 0) {
             playback_cw_file = argValue(i, argc, argv);
         } else if (strcmp(argv[i], "--js8") == 0) {
-            enable_js8 = true;
+            enable_js8 = true;          // (on by default; kept for compatibility)
         } else if (strcmp(argv[i], "--js8-fast") == 0) {
             enable_js8_fast = true;
         } else if (strcmp(argv[i], "--js8-slow") == 0) {
@@ -443,15 +445,19 @@ int main(int argc, char* argv[]) {
             enable_cw = true;
         } else if (strcmp(argv[i], "--js8-ultra") == 0) {
             enable_js8_ultra = true;
+        } else if (strcmp(argv[i], "--no-js8") == 0) {
+            enable_js8 = false;
+        } else if (strcmp(argv[i], "--no-js8-fast") == 0) {
+            enable_js8_fast = false;
+        } else if (strcmp(argv[i], "--no-js8-slow") == 0) {
+            enable_js8_slow = false;
+        } else if (strcmp(argv[i], "--no-cw") == 0) {
+            enable_cw = false;
         } else if (strcmp(argv[i], "--max-log-costas") == 0) {
             legacy_costas = false;
         } else if (strcmp(argv[i], "--zoom-band") == 0) {
             zoom_band_start = std::stoi(argValue(i, argc, argv));
             zoom_band_end   = std::stoi(argValue(i, argc, argv));
-        } else if (strcmp(argv[i], "--wf-floor") == 0) {
-            wf_floor = (uint8_t)std::stoi(argValue(i, argc, argv));
-        } else if (strcmp(argv[i], "--wf-ceil") == 0) {
-            wf_ceil  = (uint8_t)std::stoi(argValue(i, argc, argv));
         } else if (strcmp(argv[i], "--tci-port") == 0) {
             tci_port = std::stoi(argValue(i, argc, argv));
         } else if (strcmp(argv[i], "--tci-gain") == 0) {
@@ -531,7 +537,7 @@ int main(int argc, char* argv[]) {
                playback_loop ? "looping at EOF" : "once, then exit");
         runPipeline(*playback.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
-                    wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil,
+                    wf_bin_start, wf_bin_end, legacy_costas,
                     &playback);
     } else {
         gm::rx888::rx888 mydsp;
@@ -559,7 +565,7 @@ int main(int argc, char* argv[]) {
 
         runPipeline(*channelizer.getBuffer(), min_score, enable_js8, enable_js8_fast,
                     enable_js8_slow, enable_js8_turbo, enable_js8_ultra,
-                    wf_bin_start, wf_bin_end, legacy_costas, wf_floor, wf_ceil,
+                    wf_bin_start, wf_bin_end, legacy_costas,
                     /*playback=*/nullptr,
                     enable_cw ? channelizer.getCWBuffer() : nullptr);
 

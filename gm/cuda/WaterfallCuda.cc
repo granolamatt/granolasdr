@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 #include <thread>
 #include "gm/cuda/WaterfallCuda.h"
@@ -14,15 +15,12 @@ template<int N>
 WaterfallCuda<N>::WaterfallCuda(
     const gm::buffer::DeviceRingBuffer<uint8_t, N>& ring,
     int bin_start, int bin_end, int out_bins, int ws_port,
-    uint8_t wf_floor, uint8_t wf_ceil,
     const char* key_prefix, float full_rate_hz, int min_publish_ms)
     : ring_(ring)
     , bin_start_(bin_start)
     , bin_end_(bin_end)
     , out_bins_(out_bins)
     , ws_port_(ws_port)
-    , wf_floor_(wf_floor)
-    , wf_ceil_(wf_ceil)
     , key_prefix_(key_prefix)
     , full_rate_hz_(full_rate_hz)
     , min_publish_ms_(min_publish_ms)
@@ -30,9 +28,23 @@ WaterfallCuda<N>::WaterfallCuda(
     cuda_check_error(cudaStreamCreate(&stream_));
     cuda_check_error(cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming));
 
+    // Shared render controls (all waterfalls): contrast, noise-floor lift, and the
+    // percentile used to auto-track the noise floor.
+    if (const char* g = std::getenv("WF_GAIN")) {
+        wf_gain_ = (float)std::atof(g);
+        if (wf_gain_ <= 0.0f) wf_gain_ = 1.0f;
+    }
+    if (const char* o = std::getenv("WF_OFFSET")) wf_offset_ = std::atoi(o);
+    if (const char* p = std::getenv("WF_NOISE_PCT")) {
+        noise_pct_ = std::atoi(p);
+        if (noise_pct_ < 1)  noise_pct_ = 1;
+        if (noise_pct_ > 99) noise_pct_ = 99;
+    }
+
     size_t rgba_bytes = (size_t)ROWS_PER_SLOT * out_bins_ * 4;
     cuda_check_error(cudaMalloc((void**)&rgba_d_, rgba_bytes));
     cuda_check_error(cudaHostAlloc((void**)&rgba_h_, rgba_bytes, cudaHostAllocDefault));
+    cuda_check_error(cudaMalloc((void**)&hist_d_, 256 * sizeof(unsigned int)));
 
     float hz_per_bin = full_rate_hz_ / (float)ring_.num_bins;
     printf("Waterfall[%s]: bins [%d, %d) = %.0f–%.0f Hz, %d pixels × %d rows (%.1f Hz/px)\n",
@@ -47,6 +59,7 @@ WaterfallCuda<N>::~WaterfallCuda()
 {
     if (rgba_d_) cudaFree(rgba_d_);
     if (rgba_h_) cudaFreeHost(rgba_h_);
+    if (hist_d_) cudaFree(hist_d_);
     cudaEventDestroy(ready_);
     cudaStreamDestroy(stream_);
 }
@@ -89,16 +102,24 @@ void WaterfallCuda<N>::run()
                 key_idx = (key_idx + 1) % RING_KEYS;
             }
 
+            // Auto noise-floor: the noise_pct-th percentile of this frame's magnitude
+            // histogram, EMA-smoothed.  Each waterfall tracks its own floor, so the
+            // shared WF_GAIN/WF_OFFSET behave identically on CW and FT8.
+            uint64_t total = 0;
+            for (int i = 0; i < 256; ++i) total += hist_h_[i];
+            if (total > 0) {
+                uint64_t target = total * (uint64_t)noise_pct_ / 100;
+                uint64_t cum = 0; int pctl = 0;
+                for (int i = 0; i < 256; ++i) { cum += hist_h_[i]; if (cum >= target) { pctl = i; break; } }
+                float est = (float)pctl;
+                if (!noise_init_) { noise_ref_ = est; noise_init_ = true; }
+                else              { noise_ref_ = 0.9f * noise_ref_ + 0.1f * est; }
+            }
+
             row_count += ROWS_PER_SLOT;
             if (row_count % 100 < ROWS_PER_SLOT) {
-                uint8_t vmin = 255, vmax = 0;
-                for (size_t i = 0; i < rgba_bytes; i += 4) {
-                    // Recover approximate magnitude from R channel as a sanity check.
-                    if (rgba_h_[i] < vmin) vmin = rgba_h_[i];
-                    if (rgba_h_[i] > vmax) vmax = rgba_h_[i];
-                }
-                printf("[Waterfall] row %llu: R min=%u max=%u bin=[%d,%d)\n",
-                       (unsigned long long)row_count, vmin, vmax, bin_start_, bin_end_);
+                printf("[Waterfall %s] noise_ref=%.1f gain=%.1f offset=%d\n",
+                       key_prefix_.c_str(), (double)noise_ref_, (double)wf_gain_, wf_offset_);
                 fflush(stdout);
             }
             pending = false;
@@ -134,9 +155,17 @@ void WaterfallCuda<N>::run()
         // smaller for the CW ring (freq_osr=1) than the FT8 ring (freq_osr=4);
         // the kernel previously hardcoded the FT8 value and over-strode CW rows.
         const int row_stride = (int)(ring_.slot_bytes / ROWS_PER_SLOT);
+
+        // Histogram this slot for the noise-floor estimate (consumed at next publish,
+        // so noise_ref lags one frame — fine for a slow-adapting floor).
+        cudaMemsetAsync(hist_d_, 0, 256 * sizeof(unsigned int), stream_);
+        waterfall_histogram(slot_base, bin_start_, bin_end_, row_stride, hist_d_, stream_);
+        cudaMemcpyAsync(hist_h_, hist_d_, 256 * sizeof(unsigned int),
+                        cudaMemcpyDeviceToHost, stream_);
+
         waterfall_rgba(slot_base, bin_start_, bin_end_,
                        rgba_d_, out_bins_, (int)ring_.num_bins, row_stride,
-                       wf_floor_, wf_ceil_, stream_);
+                       noise_ref_, wf_gain_, wf_offset_, stream_);
 
         cudaError_t kerr = cudaGetLastError();
         if (kerr != cudaSuccess)

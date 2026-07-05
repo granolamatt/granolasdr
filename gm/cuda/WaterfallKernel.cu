@@ -21,12 +21,45 @@ __device__ static void heat_color(uint8_t vi, uint8_t& r, uint8_t& g, uint8_t& b
 // Each time sub-array strides by FT8_FREQ_OSR sub-arrays (f=0..3); we use f=0.
 // Sub-array layout in slot: index (t * FT8_FREQ_OSR + f) at byte offset
 //   (t * FT8_FREQ_OSR + f) * num_bins.
+// 256-bin histogram of the slot magnitudes (one thread per (row, bin)).
+__global__ static void waterfall_hist_kernel(
+    const uint8_t* __restrict__ slot,
+    int bin_start, int bin_end, int row_stride,
+    unsigned int* __restrict__ hist)
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y;
+    int bin = bin_start + col;
+    if (bin >= bin_end) return;
+    const uint8_t* row_base = slot + (long long)row * row_stride;
+    atomicAdd(&hist[row_base[bin]], 1u);
+}
+
+void waterfall_histogram(
+    const uint8_t* slot_base,
+    int bin_start, int bin_end,
+    int row_stride,
+    unsigned int* hist_out,
+    cudaStream_t stream)
+{
+    int src_bins = bin_end - bin_start;
+    if (src_bins <= 0) return;
+    int threads = 256;
+    dim3 grid((src_bins + threads - 1) / threads, FT8_TIME_OSR);
+    waterfall_hist_kernel<<<grid, threads, 0, stream>>>(
+        slot_base, bin_start, bin_end, row_stride, hist_out);
+}
+
+// One thread per output pixel.  blockIdx.y = time sub-array row (0..FT8_TIME_OSR-1).
+// Pixel = (mag - noise_ref + wf_offset) * wf_gain, colormapped.  noise_ref is the
+// auto-tracked noise floor, so this maps "dB above noise" to brightness — identical
+// behaviour on CW and FT8 despite their different absolute magnitude scales.
 __global__ static void waterfall_rgba_kernel(
     const uint8_t* __restrict__ slot,
     int bin_start, int src_bins,
     uint8_t* __restrict__ rgba_out, int out_bins,
     int num_bins, int row_stride,
-    uint8_t wf_floor, uint8_t wf_ceil)
+    float noise_ref, float wf_gain, int wf_offset)
 {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int row = blockIdx.y;   // = time index t
@@ -44,12 +77,9 @@ __global__ static void waterfall_rgba_kernel(
     uint32_t sum = 0;
     for (int b = lo; b < hi; ++b)
         sum += row_base[b];
-    uint8_t mag = (uint8_t)(sum / (uint32_t)(hi - lo));
+    float mag = (float)sum / (float)(hi - lo);
 
-    // Scale to [0, 255] using floor/ceil window.
-    int range = (int)wf_ceil - (int)wf_floor;
-    if (range <= 0) range = 1;
-    int v = ((int)mag - (int)wf_floor) * 255 / range;
+    int v = (int)((mag - noise_ref + (float)wf_offset) * wf_gain);
     if (v < 0)   v = 0;
     if (v > 255) v = 255;
 
@@ -68,7 +98,7 @@ void waterfall_rgba(
     int bin_start, int bin_end,
     uint8_t* rgba_out, int out_bins,
     int num_bins, int row_stride,
-    uint8_t wf_floor, uint8_t wf_ceil,
+    float noise_ref, float wf_gain, int wf_offset,
     cudaStream_t stream)
 {
     int src_bins = bin_end - bin_start;
@@ -82,5 +112,5 @@ void waterfall_rgba(
     dim3 grid(blocks_x, FT8_TIME_OSR);
     waterfall_rgba_kernel<<<grid, threads, 0, stream>>>(
         slot_base, bin_start, src_bins, rgba_out, out_bins, num_bins, row_stride,
-        wf_floor, wf_ceil);
+        noise_ref, wf_gain, wf_offset);
 }
