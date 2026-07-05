@@ -39,6 +39,13 @@ public:
     gm::buffer::BufferPosition<std::complex<float>>* getCWBuffer() {
         return &cwBufferPosition;
     }
+    // A/B test (AB_TEST=1): a second FT8/JS8 composite built from the RAW wideband
+    // FFT with the per-band SpectrumNorm, in parallel with the primary (wideband-EQ)
+    // composite.  A second FT8 chain decodes it so wideband-vs-per-band decode rate
+    // can be compared on identical input.  null unless ab_test_.
+    gm::buffer::BufferPosition<std::complex<float>>* getAltBuffer() {
+        return ab_test_ ? &altBufferPosition : nullptr;
+    }
 
 
 private:
@@ -64,6 +71,13 @@ private:
     std::vector<std::vector<uint32_t>> cw_bins;       // {wb_start, wb_end, bw} per CW band
     uint32_t      cw_fft_length{0};
     uint64_t      cw_buffer_number{0};
+
+    // A/B test alt composite (AB_TEST): per-band-norm FT8/JS8 composite from raw FFT.
+    bool          ab_test_{false};
+    gm::buffer::BufferPosition<std::complex<float>> altBufferPosition;
+    std::complex<float>* channelDataAlt_d{nullptr};  // fft_length packed+IFFT scratch
+    std::complex<float>* demodDataAlt_d{nullptr};     // BUFFERS × fft_length/2 ring
+    uint64_t      alt_buffer_number{0};
 
     gm::cuda::device::HostCuda cuda_h;
     std::vector<size_t> inShape;

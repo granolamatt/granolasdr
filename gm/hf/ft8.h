@@ -27,7 +27,9 @@ class FT8 : public Thread {
 public:
     FT8(gm::cuda::FT8Cuda* ft8cuda,
         int zmq_port = 5580,
-        int wsdict_port = 0);
+        int wsdict_port = 0,
+        const char* label = "FT8",   // decode-stats tag (e.g. AB-test "FT8-NORM")
+        bool log_timing = true);     // false for a parallel/test chain (no CSV)
     ~FT8();
     void run();
     void stop() { setRunning(false); }
@@ -57,6 +59,7 @@ public:
 private:
     gm::cuda::FT8Cuda* ft8cuda_;
     int zmq_port_;
+    std::string label_{"FT8"};   // decode-stats tag
 
     zmq::context_t zmq_ctx_;
     zmq::socket_t  zmq_pub_;

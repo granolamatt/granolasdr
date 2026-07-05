@@ -107,12 +107,20 @@ wsdict_port_(wsdict_port) {
         cuda_check_error(cudaMalloc((void**)&channelData_d, fft_length*sizeof(std::complex<float>) + 1024));
         printf("Total fft length is %u\n", fft_length);
 
+        // A/B test: a parallel per-band-norm composite for a controlled wideband-
+        // vs-per-band decode comparison.  Read first — it forces wideband on for
+        // the primary path so both equalizations run on the same input frame.
+        {
+            const char* ab = std::getenv("AB_TEST");
+            ab_test_ = ab && std::string(ab) != "0";
+        }
+
         // Wideband equalization: flatten the entire wideband FFT before any
         // bin-selection.  ON by default (mutually exclusive with the per-band
         // norm); set WIDEBAND_EQ=0 to fall back to per-band normalization.
         {
             const char* we = std::getenv("WIDEBAND_EQ");
-            wideband_eq_ = (we == nullptr) || (std::string(we) != "0");
+            wideband_eq_ = ab_test_ || (we == nullptr) || (std::string(we) != "0");
         }
         if (wideband_eq_) {
             weq_nbins_ = gm::rx888::rx888::NLARGE + 1;   // R2C bins of the 2*NLARGE FFT
@@ -126,6 +134,16 @@ wsdict_port_(wsdict_port) {
             printf("Wideband EQ: ENABLED  nbins=%d  half_win=%d (%.1f kHz)  max_gain=%.0f  "
                    "(whole-spectrum, pre-composite; per-band norm disabled)\n",
                    weq_nbins_, weq_half_win_, weq_half_win_ * 2 * 0.1, (double)weq_max_gain_);
+        }
+
+        if (ab_test_) {
+            cuda_check_error(cudaMalloc((void**)&channelDataAlt_d,
+                fft_length * sizeof(std::complex<float>) + 1024));
+            cuda_check_error(cudaMalloc((void**)&demodDataAlt_d,
+                BUFFERS * fft_length / 2 * sizeof(std::complex<float>) + 1024));
+            altBufferPosition.setBuffer(demodDataAlt_d, {BUFFERS, fft_length / 2});
+            printf("A/B test: ENABLED — parallel per-band-norm composite "
+                   "(primary=wideband EQ, alt=per-band norm)\n");
         }
 
         fftRes = cufftPlan1d(&iplan, fft_length, CUFFT_C2C, 1);
@@ -201,6 +219,8 @@ HFChannelizer::~HFChannelizer() {
     if (demodData_d) cudaFree(demodData_d);
     if (cwChannelData_d) cudaFree(cwChannelData_d);
     if (cwDemodData_d) cudaFree(cwDemodData_d);
+    if (channelDataAlt_d) cudaFree(channelDataAlt_d);
+    if (demodDataAlt_d) cudaFree(demodDataAlt_d);
     if (weq_ema_d_) cudaFree(weq_ema_d_);
     if (weq_logema_d_) cudaFree(weq_logema_d_);
     if (weq_gain_targ_d_) cudaFree(weq_gain_targ_d_);
@@ -217,6 +237,7 @@ int HFChannelizer::doCopy(uint64_t now) {
     try {
         static gm::buffer::BufferPosition<std::complex<float>>* bpos = &hfBufferPosition;
         static gm::buffer::BufferPosition<std::complex<float>>* cw_bpos = &cwBufferPosition;
+        static gm::buffer::BufferPosition<std::complex<float>>* alt_bpos = &altBufferPosition;
         size_t length = inShape[1];
         int in_position = (now % inShape[0]) * length;
 
@@ -236,6 +257,20 @@ int HFChannelizer::doCopy(uint64_t now) {
         if (rval) {
             printf("Error in R2C FFT\n");
             return 0;
+        }
+
+        // A/B test: capture the RAW FT8/JS8 band bins (packed, contiguous) into the
+        // alt composite scratch BEFORE the wideband EQ modifies fftData_d in place.
+        // The per-band norm below reads these; the alt IFFT runs after gains update.
+        if (ab_test_) {
+            uint32_t aoff = 0;
+            cuda_check_error(cudaMemsetAsync(channelDataAlt_d, 0,
+                fft_length * sizeof(std::complex<float>), stream));
+            for (const std::vector<uint32_t>& b : bins) {
+                cuda_check_error(cudaMemcpyAsync(&channelDataAlt_d[aoff], &fftData_d[b[0]],
+                    b[2] * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
+                aoff += b[2];
+            }
         }
 
         // Wideband equalization: flatten the whole FFT HERE, before audio
@@ -308,17 +343,24 @@ int HFChannelizer::doCopy(uint64_t now) {
         // constant at 10 s/update), fit a per-band polynomial, and recompute gains.
         // Gains are applied to channelData_d after composite assembly, before the IFFT,
         // so both the waterfall and the decoders receive a spectrally flattened signal.
-        // Skipped entirely under wideband EQ (fftData_d is already flat above).
-        if (!wideband_eq_ && ++norm_frame_ % NORM_INTERVAL == 0) {
-            cudaStreamSynchronize(stream);  // wait for R2C FFT to finish
+        // Skipped under wideband EQ unless AB_TEST (then it feeds the alt composite).
+        if ((ab_test_ || !wideband_eq_) && ++norm_frame_ % NORM_INTERVAL == 0) {
+            cudaStreamSynchronize(stream);  // wait for R2C FFT / raw-band pack to finish
 
-            // D2H: collect complex band bins from the wideband FFT output.
-            int snap_off = 0;
-            for (const auto& b : bins) {
-                int bw = (int)b[2];
-                cudaMemcpy(&norm_snap_h_[snap_off], &fftData_d[b[0]],
-                           bw * sizeof(std::complex<float>), cudaMemcpyDeviceToHost);
-                snap_off += bw;
+            // D2H the raw band bins.  In AB mode they were packed into the alt scratch
+            // before the wideband apply (contiguous); otherwise read per-band from fftData.
+            if (ab_test_) {
+                cudaMemcpy(norm_snap_h_.data(), channelDataAlt_d,
+                           norm_total_bins_ * sizeof(std::complex<float>),
+                           cudaMemcpyDeviceToHost);
+            } else {
+                int snap_off = 0;
+                for (const auto& b : bins) {
+                    int bw = (int)b[2];
+                    cudaMemcpy(&norm_snap_h_[snap_off], &fftData_d[b[0]],
+                               bw * sizeof(std::complex<float>), cudaMemcpyDeviceToHost);
+                    snap_off += bw;
+                }
             }
 
             // Asymmetric EMA: track noise floor downward quickly (signals drop away),
@@ -378,6 +420,28 @@ int HFChannelizer::doCopy(uint64_t now) {
             // H2D the updated gains (async — ordered before apply_gains_kernel below).
             cudaMemcpyAsync(norm_gains_d_, norm_gains_h_.data(),
                             norm_total_bins_ * sizeof(float), cudaMemcpyHostToDevice, stream);
+        }
+
+        // A/B test: finish the per-band-norm alt composite (raw bands already packed
+        // into channelDataAlt_d above): apply per-band gains, IFFT, publish on
+        // altBufferPosition for the parallel FT8 chain.
+        if (ab_test_) {
+            norm_apply_gains((cufftComplex*)channelDataAlt_d, norm_gains_d_,
+                             norm_total_bins_, stream);
+            cufftResult_t arv = cufftExecC2C(iplan, (cufftComplex*)channelDataAlt_d,
+                (cufftComplex*)channelDataAlt_d, CUFFT_INVERSE);
+            if (arv) printf("Error in AB alt composite IFFT\n");
+            cuda_check_error(cudaMemcpyAsync(
+                &demodDataAlt_d[(alt_buffer_number % BUFFERS) * (fft_length / 2)],
+                &channelDataAlt_d[fft_length / 4],
+                fft_length / 2 * sizeof(std::complex<float>), cudaMemcpyDeviceToDevice, stream));
+            cudaStreamAddCallback(stream,
+            [](cudaStream_t, cudaError_t, void *data) {
+                uint64_t* pos = (uint64_t*)data;
+                alt_bpos->setPosition(*pos, 1);
+                *pos += 1;
+            }
+            , (void *)&alt_buffer_number, 0);
         }
 
         // Composite assembly: pack all band bins into channelData_d[0..total_bw-1].
