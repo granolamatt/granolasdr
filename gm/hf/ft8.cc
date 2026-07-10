@@ -28,6 +28,15 @@
 
 const int kLDPC_iterations = 25;
 
+// Continuous-scan host-decode cap.  The GPU Costas scan can emit tens of
+// thousands of candidates under heavy QRN / crowded low bands, most of them
+// noise.  BP-decoding all of them serially in the scan callback made the
+// consumer fall behind, filling the slot ring and dropping blocks ("[CONT]
+// slots full").  We host-decode only the top-K candidates by sync score — real
+// signals score highest, so this keeps essentially every true decode while
+// bounding per-slot work.  Inert whenever the candidate count is below the cap.
+const uint32_t kContTopKCandidates = 4096;
+
 // Refine is ~50 ms/candidate (coordinate-descent FFT search + D2H); the scan
 // runs every ~1 s on top of BP+OSD, so cap refines per scan to keep the decode
 // callback well under budget.  A transmission reappears across ~12 scans, so the
@@ -274,9 +283,25 @@ namespace hf {
         // kept out of the "fail" set and used to dedup captures by bin.
         std::unordered_set<int32_t> decoded_bins;
 
-        // Pass 1: BP-decode every candidate; collect BP failures for OSD.
+        // Bound per-slot work: host-decode only the top-K candidates by sync
+        // score.  Under QRN the GPU can hand us tens of thousands of (mostly
+        // noise) candidates; decoding all of them stalls the continuous-scan
+        // consumer and drops blocks.  Real signals score highest, so the cap
+        // costs no real decodes and only engages when the count is pathological.
+        std::vector<uint32_t> order(n);
+        for (uint32_t i = 0; i < n; ++i) order[i] = i;
+        if (n > kContTopKCandidates) {
+            std::nth_element(order.begin(), order.begin() + kContTopKCandidates,
+                             order.end(),
+                             [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
+            order.resize(kContTopKCandidates);
+            fprintf(stderr, "[CONT] FT8 candidates %u > cap %u; host-decoding top-K by score\n",
+                    n, kContTopKCandidates);
+        }
+
+        // Pass 1: BP-decode every selected candidate; collect BP failures for OSD.
         std::vector<uint32_t> osd_fail;
-        for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t i : order) {
             const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
             ftx_message_t msg;
             ftx_decode_status_t st;
