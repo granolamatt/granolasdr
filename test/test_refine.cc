@@ -10,6 +10,7 @@
 #include <complex>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #include "gm/hf/refine.h"
 
@@ -111,7 +112,53 @@ static void test_extract(const char* msg_text, float f_comp, float snr_db) {
     if (!ok) g_fail++;
 }
 
-int main() {
+// Time the two CPU stages of one refine candidate: extract_frame (FIR decimate)
+// and refine_llr (FFT search). Run with: ./test_refine bench [drift_hz_s]
+static void bench(float drift_hz_s) {
+    ftx_message_t msg;
+    ftx_message_encode(&msg, nullptr, "CQ KF0RRR EM48");
+    uint8_t tones[FT8_NN];
+    ft8_encode(msg.payload, tones);
+    const int SR_IN = 409600;
+    const int NSPS_IN = SR_IN * 16 / 100;                  // 65536
+    const int n_in = kRefineNsym * NSPS_IN + NSPS_IN;
+    std::vector<std::complex<float>> raw(n_in, {0,0});
+    const float f_comp = 141234.5f;
+    double phase = 0.0;
+    for (int p = 0; p < kRefineNsym; ++p) {
+        for (int i = 0; i < NSPS_IN; ++i) {
+            int sn = p*NSPS_IN + i;
+            double f = f_comp + tones[p]*6.25 + drift_hz_s*(sn/(double)SR_IN);
+            phase += 2*M_PI*f/SR_IN;
+            raw[p*NSPS_IN + i] = std::complex<float>(std::cos(phase), std::sin(phase));
+        }
+    }
+    std::vector<std::complex<float>> frame(gm::hf::kRefineFrame);
+    float log174[174];
+    auto ms = [](auto a, auto b, int n) {
+        return std::chrono::duration<double, std::milli>(b - a).count() / n; };
+
+    const int N = 30;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < N; ++k)
+        gm::hf::extract_frame(raw.data(), n_in, f_comp, SR_IN, frame.data(), gm::hf::kRefineFrame);
+    auto t1 = std::chrono::steady_clock::now();
+    for (int k = 0; k < N; ++k)
+        refine_llr(frame.data(), gm::hf::kRefineFrame, kFT8Refine, log174);
+    auto t2 = std::chrono::steady_clock::now();
+
+    printf("bench (drift=%.1f Hz/s, %d iters):\n", drift_hz_s, N);
+    printf("  extract_frame : %6.2f ms/call\n", ms(t0, t1, N));
+    printf("  refine_llr    : %6.2f ms/call\n", ms(t1, t2, N));
+    printf("  CPU total     : %6.2f ms/candidate (+ ~3 ms D2H of 41 MB)\n",
+           ms(t0, t1, N) + ms(t1, t2, N));
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "bench") {
+        bench(argc > 2 ? std::atof(argv[2]) : 0.0f);
+        return 0;
+    }
     const char* MSG = "CQ KF0RRR EM48";
     printf("FT8 refine round-trip\n");
     test_one(MSG,  0.0f,   0, 30.0f);   // clean, aligned
