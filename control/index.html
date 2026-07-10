@@ -302,27 +302,29 @@ function connectBus() {
 
 // Waterfall: scrolling canvas, 2048 pixels wide, newest row at bottom.
 // X-axis is composite frequency (HFChannelizer packs HF bands back-to-back).
-// Total composite content: 0–3.83 MHz (38300 bands × 100 Hz/bin).
-// Matches default --waterfall-center-hz / --waterfall-bw-hz in hf_rx.
+// Total composite content: 0–218 kHz (2180 wideband bins × 100 Hz), the packed
+// span of all kHFBands.  Matches default --waterfall-bw-hz (kCompositeContentHz).
 const WF_OUT_BINS = 2048;
 
 // Composite frequency layout derived from hf_bands.h kHFBands[].bw * 100 Hz.
-// Each band occupies bw*100 Hz in the packed composite (0–211 kHz total).
+// Each band occupies bw*100 Hz in the packed composite (0–218 kHz total).
+// Must stay in lockstep with kHFBands (all 12 bands, back-to-back).
 // [composite_start_hz, composite_end_hz, label]
 const WF_COMPOSITE_BANDS = [
   [      0,   7000, '160m'],  // bw=70
   [   7000,  17000,  '80m'],  // bw=100
   [  17000,  35000,  '60m'],  // bw=180
   [  35000,  49000,  '40m'],  // bw=140
-  [  49000,  62000,  '30m'],  // bw=130
-  [  62000,  92000,  '20m'],  // bw=300
-  [  92000, 135000,  '17m'],  // bw=430
-  [ 135000, 158000,  '15m'],  // bw=230
-  [ 158000, 175000,  '12m'],  // bw=170
-  [ 175000, 202000,  '10m'],  // bw=270
-  [ 202000, 211000,   '6m'],  // bw=90
+  [  49000,  56000, '40m-2'], // bw=70
+  [  56000,  69000,  '30m'],  // bw=130
+  [  69000,  99000,  '20m'],  // bw=300
+  [  99000, 142000,  '17m'],  // bw=430
+  [ 142000, 165000,  '15m'],  // bw=230
+  [ 165000, 182000,  '12m'],  // bw=170
+  [ 182000, 209000,  '10m'],  // bw=270
+  [ 209000, 218000,   '6m'],  // bw=90
 ];
-const WF_TOTAL_COMPOSITE_HZ = 211000;
+const WF_TOTAL_COMPOSITE_HZ = 218000;
 
 // CW composite layout: the 9 CW sub-bands (gm/hf/cw_bands.h) packed back-to-back,
 // in 100 Hz composite-bin units (Σ bw = 4700).  The CW waterfall renders these bins.

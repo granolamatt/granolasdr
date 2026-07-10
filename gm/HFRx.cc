@@ -396,11 +396,12 @@ int main(int argc, char* argv[]) {
     int         tci_port        = 40001;  // 0 = disabled
     float       tci_gain        = 1.0f;
     float       min_score       = -1.0f;  // sentinel: resolved after flag parsing
-    // HFChannelizer packs FT8/JS8 sub-band windows into composite 0–211 kHz;
-    // bins above that are zero-filled.  Show only the live content region.
-    static constexpr float kCompositeContentHz = 211000.0f;  // 2110 bins × 100 Hz
-    float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 45000 Hz
-    float       wf_bw_hz      = kCompositeContentHz;          // 90000 Hz
+    // HFChannelizer packs all kHFBands sub-band windows back-to-back into the
+    // composite; bins above the packed content are zero-filled.  Show only the
+    // live content region.  Σ kHFBands[].bw = 2180 wideband bins × 100 Hz.
+    static constexpr float kCompositeContentHz = 218000.0f;  // 2180 bins × 100 Hz
+    float       wf_center_hz  = kCompositeContentHz / 2.0f;  // 109000 Hz
+    float       wf_bw_hz      = kCompositeContentHz;          // 218000 Hz
     std::string record_file;
     std::string record_cw_file;
     std::string playback_file;
