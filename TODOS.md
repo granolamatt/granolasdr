@@ -1,6 +1,6 @@
 # TODOS
 
-Updated 2026-06-27.
+Updated 2026-07-10.
 
 ## TCI Server (WSJT-X audio interface) — ✅ COMPLETE (active 2026-06-27)
 
@@ -91,3 +91,31 @@ LDPC decode (QP-ADMM, BP, OSD fallback) has moved out of granolasdr to the
 `../qp-admm` repo. granolasdr's role is now **LLR capture only**: it produces
 labeled LLRs (pass/osd/fail) and hands them off. Decoder convergence work,
 the QP-ADMM vs BP baseline, and any decoder tuning now live in `../qp-admm`.
+
+## CW Skimmer — DEFERRED (disabled by default 2026-07-10, opt-in via --cw)
+
+Phase-1 only and off by default (`enable_cw=false`, HFRx.cc). Two blocking problems
+keep it there. Do NOT re-enable by default until CW1 and CW2 are fixed.
+
+**CW1 — Crash on CW-like input (BLOCKING; robustness bug, NOT ML).**
+Some inputs that look like CW take the process down. No detected signal — real or
+spurious — may ever crash the pipeline. Harden `gm/cuda/CWSkimmerCuda.cc` and
+`gm/hf/cw_track.cc`: bounds-check every buffer index derived from a detected carrier
+(freq bin, envelope window, Morse-timing spans), validate counts before alloc/loop,
+and add a playback regression from the crashing capture (`--playback-cw`). Table
+stakes, independent of any detection rework.
+
+**CW2 — Detection quality is poor.**
+The peak-mean carrier metric picks QRN spikes and QRM as CW (project memory).
+Classical thresholding is the wrong tool for a mode with no FEC. Cheap interim cut:
+CFAR + a Morse-timing plausibility gate before emit. Real fix is CW3.
+
+**CW3 — ML CW reader (real fix; deferred behind the de-chirp track).**
+CNN/RNN over the CW composite spectrogram: detect carriers as dashed-line objects,
+read dot/dash timing, emit callsign. Train on `cwtest*.dat` + confirmed CW decodes
+via the `--record-cw`/`--playback-cw` harness; crash inputs become labeled
+robustness cases. This is one class of the larger "waterfall track detector" vision
+(see the FT8/JS8 de-chirp exploration — same YOLO/CNN detector, CW is one label).
+
+**Sequencing:** CW1 (crash) anytime — it's a bug. CW2/CW3 wait until the de-chirp
+track (active) proves the free-label training loop on FT8/JS8.
