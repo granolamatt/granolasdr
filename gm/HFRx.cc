@@ -344,11 +344,11 @@ static void printUsage(const char* prog) {
 "  --record <file>            Record the FT8/JS8 composite (complex float) to <file>\n"
 "  --record-cw <file>         Record the CW composite (819.2 kHz) to <file> (implies --cw)\n"
 "\n"
-"Decoders (FT8 always on; JS8 Normal/Fast/Slow + CW on by default):\n"
+"Decoders (FT8 always on; JS8 Normal/Fast/Slow on by default):\n"
 "  --no-js8                   Disable JS8 Normal\n"
 "  --no-js8-fast              Disable JS8 Fast\n"
 "  --no-js8-slow              Disable JS8 Slow\n"
-"  --no-cw                    Disable the CW skimmer\n"
+"  --cw                       Enable the CW skimmer (experimental, opt-in)\n"
 "  --js8-turbo                Enable JS8 Turbo (opt-in)\n"
 "  --js8-ultra                Enable JS8 Ultra (opt-in)\n"
 "\n"
@@ -391,7 +391,7 @@ int main(int argc, char* argv[]) {
     bool        enable_js8_slow  = true;
     bool        enable_js8_turbo = false;
     bool        enable_js8_ultra = false;
-    bool        enable_cw        = true;
+    bool        enable_cw        = false;  // opt-in via --cw; skimmer is experimental/not yet stable
     bool        legacy_costas   = true;
     int         tci_port        = 40001;  // 0 = disabled
     float       tci_gain        = 1.0f;
