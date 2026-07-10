@@ -34,7 +34,8 @@ static float gauss() {
 
 static int g_fail = 0;
 
-static void test_one(const char* msg_text, float f_off, int t_off, float snr_db) {
+static void test_one(const char* msg_text, float f_off, int t_off, float snr_db,
+                     float drift_hz_s = 0.0f) {
     ftx_message_t msg;
     if (ftx_message_encode(&msg, nullptr, msg_text) != FTX_MESSAGE_RC_OK) {
         printf("  [FAIL] encode %s\n", msg_text); g_fail++; return;
@@ -42,16 +43,18 @@ static void test_one(const char* msg_text, float f_off, int t_off, float snr_db)
     uint8_t tones[FT8_NN];
     ft8_encode(msg.payload, tones);
 
-    // Modulate to complex baseband @ 12.8 kHz, continuous phase, with offsets+noise.
+    // Modulate to complex baseband @ 12.8 kHz, continuous phase, with offsets,
+    // a linear frequency drift (Hz/s), and noise.
     const int flen = kRefineNsym * kRefineNsps + 2048;
     std::vector<std::complex<float>> frame(flen, {0,0});
     const float nstd = std::pow(10.0f, -snr_db/20.0f) * 0.7071f;
     double phase = 0.0;
     for (int p = 0; p < kRefineNsym; ++p) {
-        double f = tones[p] * 6.25 + f_off;               // baseband tone freq
         for (int i = 0; i < kRefineNsps; ++i) {
+            int sn = p*kRefineNsps + i;                    // signal sample index
+            double f = tones[p]*6.25 + f_off + drift_hz_s*(sn/(double)kRefineSr);
             phase += 2*M_PI*f/kRefineSr;
-            int idx = t_off + p*kRefineNsps + i;
+            int idx = t_off + sn;
             if (idx >= 0 && idx < flen)
                 frame[idx] = std::complex<float>(std::cos(phase) + nstd*gauss(),
                                                  std::sin(phase) + nstd*gauss());
@@ -66,8 +69,8 @@ static void test_one(const char* msg_text, float f_off, int t_off, float snr_db)
     bool ok = ftx_decode_from_llr(log174, 30, &out, &st)
               && ftx_message_decode(&out, nullptr, text) == FTX_MESSAGE_RC_OK
               && std::string(text) == msg_text;
-    printf("  [%s] f_off=%+.1fHz t_off=%+d snr=%.0fdB -> \"%s\"\n",
-           ok ? "PASS" : "FAIL", f_off, t_off, snr_db, text);
+    printf("  [%s] f_off=%+.1fHz t_off=%+d drift=%+.1fHz/s snr=%.0fdB -> \"%s\"\n",
+           ok ? "PASS" : "FAIL", f_off, t_off, drift_hz_s, snr_db, text);
     if (!ok) g_fail++;
 }
 
@@ -115,6 +118,11 @@ int main() {
     test_one(MSG,  1.5f, 200, 30.0f);   // freq + time offset (refine must align)
     test_one(MSG, -2.0f,-300, 30.0f);   // negative offsets
     test_one(MSG,  1.0f, 150, 10.0f);   // + noise
+    printf("de-chirp (linear frequency drift — old fixed-df fails at >=1 Hz/s):\n");
+    test_one(MSG,  0.0f,   0, 30.0f, 0.3f);   // below the ~0.5 Hz/s budget — still fine
+    test_one(MSG,  0.0f,   0, 30.0f, 1.0f);   // 2x budget — needs de-chirp
+    test_one(MSG,  0.5f, 100, 20.0f, 2.0f);   // strong drift + offsets + noise
+    test_one(MSG, -1.0f,-150, 15.0f,-1.5f);   // negative drift + noise
     printf("extract + refine (409.6 kHz composite -> 12.8 kHz -> decode):\n");
     test_extract(MSG,  73000.0f, 30.0f);  // 20m-like composite freq
     test_extract(MSG, 141234.5f, 15.0f);  // off-bin freq + noise

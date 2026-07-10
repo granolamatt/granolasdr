@@ -20,13 +20,22 @@ static const int COS_POS[3]    = {0, 36, 72};
 // Data-symbol frame positions (skip the 3 Costas blocks): k + (k<29?7:14).
 static int data_pos(int k) { return k + (k < 29 ? 7 : 14); }
 
+// De-chirp: search a linear frequency drift (slope, Hz/s) alongside dt/df so a
+// signal that walks in frequency across the 12.6 s frame stays in its tone bin.
+// A fixed-df align tolerates only ~half a bin end-to-end (~0.5 Hz/s); past that
+// the end symbols fall into the wrong tone and the decode fails outright. Grid
+// and margin match the offline proof (coherent/dechirp_test.py: baseline 0/24 vs
+// de-chirp 24/24 at 1–3 Hz/s, no loss below the budget).
+static constexpr float kSlopeMaxHz  = 5.0f;   // Hz/s search bound
+static constexpr int   kSlopeSteps  = 21;     // 0.5 Hz/s resolution (< half the budget)
+static constexpr float kSlopeAccept = 1.05f;  // keep a slope only if it beats flat by 5%
+
 // FFT each symbol of `frame` (shifted by dt, mixed by df Hz) -> tone bins [79][8].
 // Returns Costas sync energy = Σ over the 21 pilots of |z[pos, costas_tone]|.
 static float sym_tones(const std::complex<float>* frame, int flen,
-                       int dt, float df, const RefineMode& mode,
+                       int dt, float df, float slope, const RefineMode& mode,
                        kiss_fft_cfg cfg, std::complex<float>* Z /*[NSYM*8] or null*/) {
     std::vector<kiss_fft_cpx> in(NSPS), out(NSPS);
-    const float w = -2.0f * (float)M_PI * df / kRefineSr;
     float energy = 0.0f;
     for (int p = 0; p < NSYM; ++p) {
         // During the fine-alignment search (Z == null) only the 21 Costas pilots
@@ -39,7 +48,14 @@ static float sym_tones(const std::complex<float>* frame, int flen,
         for (int i = 0; i < NSPS; ++i) {
             int idx = base + i;
             std::complex<float> s = (idx >= 0 && idx < flen) ? frame[idx] : std::complex<float>(0, 0);
-            if (df != 0.0f) { float ph = w * idx; s *= std::complex<float>(std::cos(ph), std::sin(ph)); }
+            // De-rotate by the instantaneous correction freq f(t) = df + slope*t,
+            // so the applied phase is -2π(df*t + 0.5*slope*t²), t = idx/sr. Double
+            // precision: idx² overflows int, and float loses the frame-scale t² term.
+            if (df != 0.0f || slope != 0.0f) {
+                double t  = (double)idx / kRefineSr;
+                double ph = -2.0 * M_PI * ((double)df * t + 0.5 * (double)slope * t * t);
+                s *= std::complex<float>((float)std::cos(ph), (float)std::sin(ph));
+            }
             in[i].r = s.real(); in[i].i = s.imag();
         }
         kiss_fft(cfg, in.data(), out.data());
@@ -70,28 +86,47 @@ float refine_llr(const std::complex<float>* frame, int frame_len,
     // coordinate descent (dt, then df, then dt again to catch interaction) finds
     // the same optimum as the full 17x13 joint grid in 17+13+17 evals — ~4.7x
     // cheaper, which is what keeps refine off the scan worker's critical path.
-    auto sweep_dt = [&](float df, int& best_dt, float& best_e) {
+    // A gated slope pass then de-chirps linearly drifting signals (see above).
+    auto sweep_dt = [&](float df, float slope, int& best_dt, float& best_e) {
         for (int dt = -512; dt <= 512; dt += 64) {
-            float e = sym_tones(frame, frame_len, dt, df, mode, cfg, nullptr);
+            float e = sym_tones(frame, frame_len, dt, df, slope, mode, cfg, nullptr);
             if (e > best_e) { best_e = e; best_dt = dt; }
         }
     };
-    auto sweep_df = [&](int dt, float& best_df, float& best_e) {
+    auto sweep_df = [&](int dt, float slope, float& best_df, float& best_e) {
         for (int fi = 0; fi < 13; ++fi) {
             float df = -3.5f + 7.0f * fi / 12.0f;
-            float e = sym_tones(frame, frame_len, dt, df, mode, cfg, nullptr);
+            float e = sym_tones(frame, frame_len, dt, df, slope, mode, cfg, nullptr);
             if (e > best_e) { best_e = e; best_df = df; }
         }
     };
+    auto sweep_slope = [&](int dt, float df, float& best_slope, float& best_e) {
+        for (int si = 0; si < kSlopeSteps; ++si) {
+            float slope = -kSlopeMaxHz + 2.0f * kSlopeMaxHz * si / (kSlopeSteps - 1);
+            float e = sym_tones(frame, frame_len, dt, df, slope, mode, cfg, nullptr);
+            if (e > best_e) { best_e = e; best_slope = slope; }
+        }
+    };
     int   best_dt = 0;
-    float best_df = 0.0f, best_e = -1.0f;
-    sweep_dt(0.0f, best_dt, best_e);               // dt at df=0
-    best_e = -1.0f; sweep_df(best_dt, best_df, best_e);   // df at best dt (grid incl. df=0)
-    best_e = -1.0f; sweep_dt(best_df, best_dt, best_e);   // dt at best df
+    float best_df = 0.0f, best_slope = 0.0f, best_e = -1.0f;
+    sweep_dt(0.0f, 0.0f, best_dt, best_e);                     // dt at df=0
+    best_e = -1.0f; sweep_df(best_dt, 0.0f, best_df, best_e);  // df at best dt (incl. df=0)
+    best_e = -1.0f; sweep_dt(best_df, 0.0f, best_dt, best_e);  // dt at best df
+    float e_flat = best_e;                                     // best energy with no drift
+
+    // De-chirp: search a linear frequency slope, then keep it only if it beats the
+    // flat alignment by a clear margin — noise/QRM must not false-lock a tilt.
+    float cand_slope = 0.0f, e_slope = -1.0f;
+    sweep_slope(best_dt, best_df, cand_slope, e_slope);
+    if (cand_slope != 0.0f && e_slope > e_flat * kSlopeAccept) {
+        best_slope = cand_slope;
+        best_e = -1.0f;
+        sweep_df(best_dt, best_slope, best_df, best_e);        // re-fit df at the drift
+    }
 
     // Re-run at the best alignment, keep the tone bins, extract LLRs.
     std::vector<std::complex<float>> Z(NSYM * 8);
-    sym_tones(frame, frame_len, best_dt, best_df, mode, cfg, Z.data());
+    sym_tones(frame, frame_len, best_dt, best_df, best_slope, mode, cfg, Z.data());
     kiss_fft_free(cfg);
 
     for (int k = 0; k < 58; ++k) {
