@@ -25,8 +25,12 @@ find_package(Python COMPONENTS Interpreter Development)
 find_package(PythonLibs)
 find_package(pybind11 REQUIRED)
 
-set (CMAKE_BUILD_TYPE Debug)
-#set (CMAKE_BUILD_TYPE RelWithDebInfo)
+# Default to an optimized build (the whole host DSP path — refine, extract_frame,
+# channelizer — is O0 and ~10-50x too slow under Debug). Override with
+# -DCMAKE_BUILD_TYPE=RelWithDebInfo (or Debug) at configure time when debugging.
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/third_party ${PYTHON_INCLUDE_DIRS} "/opt/cuda/include" "/opt/cuda/targets/x86_64-linux/include/cccl")
 
 # wsserver — Rust WebSocket dict server, built as a static library
