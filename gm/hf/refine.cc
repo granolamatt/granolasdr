@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 extern "C" {
@@ -14,18 +15,28 @@ namespace hf {
 const RefineMode kFT8Refine = {{3, 1, 4, 0, 6, 5, 2}, {0, 1, 3, 2, 5, 6, 4, 7}};
 const RefineMode kJS8Refine = {{4, 2, 5, 6, 1, 3, 0}, {0, 1, 2, 3, 4, 5, 6, 7}};
 
+// Experimental de-chirp toggle (OFF by default). Read once. To remove the whole
+// de-chirp feature, delete this function, its declaration, the DE-CHIRP block in
+// refine_llr, the kSlope* constants, and the callers' dechirp argument.
+bool dechirp_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("REFINE_DECHIRP");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
 static constexpr int   NSPS   = kRefineNsps;
 static constexpr int   NSYM   = kRefineNsym;
 static const int COS_POS[3]    = {0, 36, 72};
 // Data-symbol frame positions (skip the 3 Costas blocks): k + (k<29?7:14).
 static int data_pos(int k) { return k + (k < 29 ? 7 : 14); }
 
-// De-chirp: search a linear frequency drift (slope, Hz/s) alongside dt/df so a
-// signal that walks in frequency across the 12.6 s frame stays in its tone bin.
-// A fixed-df align tolerates only ~half a bin end-to-end (~0.5 Hz/s); past that
-// the end symbols fall into the wrong tone and the decode fails outright. Grid
-// and margin match the offline proof (coherent/dechirp_test.py: baseline 0/24 vs
-// de-chirp 24/24 at 1–3 Hz/s, no loss below the budget).
+// De-chirp constants (EXPERIMENTAL, OFF by default — see the DE-CHIRP block in
+// refine_llr). Search a linear frequency drift (slope, Hz/s) so a signal that
+// walks across the 12.6 s frame stays in its tone bin. A fixed-df align tolerates
+// only ~half a bin end-to-end (~0.5 Hz/s). Grid/margin match the offline proof
+// (coherent/dechirp_test.py: baseline 0/24 vs de-chirp 24/24 at 1–3 Hz/s).
 static constexpr float kSlopeMaxHz  = 5.0f;   // Hz/s search bound
 static constexpr int   kSlopeSteps  = 21;     // 0.5 Hz/s resolution (< half the budget)
 static constexpr float kSlopeAccept = 1.05f;  // keep a slope only if it beats flat by 5%
@@ -77,7 +88,7 @@ static float max4(float a, float b, float c, float d) {
 }
 
 float refine_llr(const std::complex<float>* frame, int frame_len,
-                 const RefineMode& mode, float* log174) {
+                 const RefineMode& mode, float* log174, bool dechirp) {
     kiss_fft_cfg cfg = kiss_fft_alloc(NSPS, 0, nullptr, nullptr);
 
     // Fine time+freq alignment maximizing Costas energy (continuous, absorbs the
@@ -86,7 +97,6 @@ float refine_llr(const std::complex<float>* frame, int frame_len,
     // coordinate descent (dt, then df, then dt again to catch interaction) finds
     // the same optimum as the full 17x13 joint grid in 17+13+17 evals — ~4.7x
     // cheaper, which is what keeps refine off the scan worker's critical path.
-    // A gated slope pass then de-chirps linearly drifting signals (see above).
     auto sweep_dt = [&](float df, float slope, int& best_dt, float& best_e) {
         for (int dt = -512; dt <= 512; dt += 64) {
             float e = sym_tones(frame, frame_len, dt, df, slope, mode, cfg, nullptr);
@@ -100,29 +110,38 @@ float refine_llr(const std::complex<float>* frame, int frame_len,
             if (e > best_e) { best_e = e; best_df = df; }
         }
     };
-    auto sweep_slope = [&](int dt, float df, float& best_slope, float& best_e) {
-        for (int si = 0; si < kSlopeSteps; ++si) {
-            float slope = -kSlopeMaxHz + 2.0f * kSlopeMaxHz * si / (kSlopeSteps - 1);
-            float e = sym_tones(frame, frame_len, dt, df, slope, mode, cfg, nullptr);
-            if (e > best_e) { best_e = e; best_slope = slope; }
-        }
-    };
     int   best_dt = 0;
     float best_df = 0.0f, best_slope = 0.0f, best_e = -1.0f;
     sweep_dt(0.0f, 0.0f, best_dt, best_e);                     // dt at df=0
     best_e = -1.0f; sweep_df(best_dt, 0.0f, best_df, best_e);  // df at best dt (incl. df=0)
     best_e = -1.0f; sweep_dt(best_df, 0.0f, best_dt, best_e);  // dt at best df
-    float e_flat = best_e;                                     // best energy with no drift
 
-    // De-chirp: search a linear frequency slope, then keep it only if it beats the
-    // flat alignment by a clear margin — noise/QRM must not false-lock a tilt.
-    float cand_slope = 0.0f, e_slope = -1.0f;
-    sweep_slope(best_dt, best_df, cand_slope, e_slope);
-    if (cand_slope != 0.0f && e_slope > e_flat * kSlopeAccept) {
-        best_slope = cand_slope;
-        best_e = -1.0f;
-        sweep_df(best_dt, best_slope, best_df, best_e);        // re-fit df at the drift
+    // ================= DE-CHIRP (experimental; OFF by default) =================
+    // Corrects a linearly drifting signal by searching a frequency slope. Runs
+    // only when the caller passes dechirp=true (REFINE_DECHIRP=1 at the call
+    // site). Proven in synthesis (coherent/dechirp_test.py) but NOT yet shown to
+    // help on a real capture — no drifters found, and it can cost a marginal
+    // decode by over-fitting the pilots — so it stays opt-in until we need it.
+    // SELF-CONTAINED / EASY TO REMOVE: delete this block, the kSlope* constants,
+    // the `slope` arg to sym_tones/sweep_*, and the `dechirp` parameter.
+    if (dechirp) {
+        auto sweep_slope = [&](int dt, float df, float& best_slope, float& best_e) {
+            for (int si = 0; si < kSlopeSteps; ++si) {
+                float slope = -kSlopeMaxHz + 2.0f * kSlopeMaxHz * si / (kSlopeSteps - 1);
+                float e = sym_tones(frame, frame_len, dt, df, slope, mode, cfg, nullptr);
+                if (e > best_e) { best_e = e; best_slope = slope; }
+            }
+        };
+        float e_flat = best_e;                                 // best energy with no drift
+        float cand_slope = 0.0f, e_slope = -1.0f;
+        sweep_slope(best_dt, best_df, cand_slope, e_slope);
+        if (cand_slope != 0.0f && e_slope > e_flat * kSlopeAccept) {
+            best_slope = cand_slope;
+            best_e = -1.0f;
+            sweep_df(best_dt, best_slope, best_df, best_e);    // re-fit df at the drift
+        }
     }
+    // =============================== END DE-CHIRP ==============================
 
     // Re-run at the best alignment, keep the tone bins, extract LLRs.
     std::vector<std::complex<float>> Z(NSYM * 8);

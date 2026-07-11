@@ -99,7 +99,7 @@ bool FT8Cuda::refineCandidate(int32_t fo, int to, uint64_t snap_start, float* lo
     gm::hf::extract_frame(refine_host_.data(), n_in, freq_hz, 409600,
                           refine_decim_.data(), gm::hf::kRefineFrame);
     gm::hf::refine_llr(refine_decim_.data(), gm::hf::kRefineFrame,
-                       gm::hf::kFT8Refine, log174);
+                       gm::hf::kFT8Refine, log174, gm::hf::dechirp_enabled());
     return true;
 }
 

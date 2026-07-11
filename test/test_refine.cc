@@ -36,7 +36,7 @@ static float gauss() {
 static int g_fail = 0;
 
 static void test_one(const char* msg_text, float f_off, int t_off, float snr_db,
-                     float drift_hz_s = 0.0f) {
+                     float drift_hz_s = 0.0f, bool dechirp = false) {
     ftx_message_t msg;
     if (ftx_message_encode(&msg, nullptr, msg_text) != FTX_MESSAGE_RC_OK) {
         printf("  [FAIL] encode %s\n", msg_text); g_fail++; return;
@@ -63,15 +63,15 @@ static void test_one(const char* msg_text, float f_off, int t_off, float snr_db,
     }
 
     float log174[174];
-    refine_llr(frame.data(), flen, kFT8Refine, log174);
+    refine_llr(frame.data(), flen, kFT8Refine, log174, dechirp);
 
     ftx_message_t out; ftx_decode_status_t st;
     char text[64] = {0};
     bool ok = ftx_decode_from_llr(log174, 30, &out, &st)
               && ftx_message_decode(&out, nullptr, text) == FTX_MESSAGE_RC_OK
               && std::string(text) == msg_text;
-    printf("  [%s] f_off=%+.1fHz t_off=%+d drift=%+.1fHz/s snr=%.0fdB -> \"%s\"\n",
-           ok ? "PASS" : "FAIL", f_off, t_off, drift_hz_s, snr_db, text);
+    printf("  [%s] f_off=%+.1fHz t_off=%+d drift=%+.1fHz/s dc=%d snr=%.0fdB -> \"%s\"\n",
+           ok ? "PASS" : "FAIL", f_off, t_off, drift_hz_s, dechirp, snr_db, text);
     if (!ok) g_fail++;
 }
 
@@ -144,7 +144,7 @@ static void bench(float drift_hz_s) {
         gm::hf::extract_frame(raw.data(), n_in, f_comp, SR_IN, frame.data(), gm::hf::kRefineFrame);
     auto t1 = std::chrono::steady_clock::now();
     for (int k = 0; k < N; ++k)
-        refine_llr(frame.data(), gm::hf::kRefineFrame, kFT8Refine, log174);
+        refine_llr(frame.data(), gm::hf::kRefineFrame, kFT8Refine, log174, drift_hz_s != 0.0f);
     auto t2 = std::chrono::steady_clock::now();
 
     printf("bench (drift=%.1f Hz/s, %d iters):\n", drift_hz_s, N);
@@ -165,11 +165,11 @@ int main(int argc, char** argv) {
     test_one(MSG,  1.5f, 200, 30.0f);   // freq + time offset (refine must align)
     test_one(MSG, -2.0f,-300, 30.0f);   // negative offsets
     test_one(MSG,  1.0f, 150, 10.0f);   // + noise
-    printf("de-chirp (linear frequency drift — old fixed-df fails at >=1 Hz/s):\n");
-    test_one(MSG,  0.0f,   0, 30.0f, 0.3f);   // below the ~0.5 Hz/s budget — still fine
-    test_one(MSG,  0.0f,   0, 30.0f, 1.0f);   // 2x budget — needs de-chirp
-    test_one(MSG,  0.5f, 100, 20.0f, 2.0f);   // strong drift + offsets + noise
-    test_one(MSG, -1.0f,-150, 15.0f,-1.5f);   // negative drift + noise
+    printf("de-chirp ENABLED (dc=1) — recovers drifters old fixed-df misses:\n");
+    test_one(MSG,  0.0f,   0, 30.0f, 0.3f, true);   // below the ~0.5 Hz/s budget — still fine
+    test_one(MSG,  0.0f,   0, 30.0f, 1.0f, true);   // 2x budget — needs de-chirp
+    test_one(MSG,  0.5f, 100, 20.0f, 2.0f, true);   // strong drift + offsets + noise
+    test_one(MSG, -1.0f,-150, 15.0f,-1.5f, true);   // negative drift + noise
     printf("extract + refine (409.6 kHz composite -> 12.8 kHz -> decode):\n");
     test_extract(MSG,  73000.0f, 30.0f);  // 20m-like composite freq
     test_extract(MSG, 141234.5f, 15.0f);  // off-bin freq + noise

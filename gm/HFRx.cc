@@ -356,6 +356,7 @@ static void printUsage(const char* prog) {
 "  --min-score <f>            Costas sync threshold (default 5.0 legacy / 3.0 max-log)\n"
 "  --max-log-costas           Use the max-log 8-FSK Costas metric (default: legacy)\n"
 "  env FT8_REFINE=0/JS8_REFINE=0     disable per-candidate refine (on by default)\n"
+"  env REFINE_DECHIRP=1              enable experimental drift de-chirp in refine (off by default)\n"
 "\n"
 "Waterfall:\n"
 "  --waterfall-center-hz <f>  Composite center to display (default 45000)\n"

@@ -30,8 +30,14 @@ constexpr int kRefineFrame = kRefineNsym * kRefineNsps;
 
 // frame: kRefineFrame complex samples. Fills log174[174] (un-normalized; the
 // LDPC layer normalizes). Returns the best Costas sync energy (higher = better).
+// dechirp (default off): also search a linear frequency drift — experimental,
+// opt-in via REFINE_DECHIRP=1 at the call site (see the DE-CHIRP block in .cc).
 float refine_llr(const std::complex<float>* frame, int frame_len,
-                 const RefineMode& mode, float* log174);
+                 const RefineMode& mode, float* log174, bool dechirp = false);
+
+// Reads the REFINE_DECHIRP env toggle once (default off). Production call sites
+// pass this into refine_llr's `dechirp`; tests pass an explicit bool.
+bool dechirp_enabled();
 
 // Downconvert (mix by -freq_hz) + decimate a raw composite frame at sr_in to the
 // kRefineSr baseband frame refine_llr expects. Windowed-sinc FIR lowpass. `out`
