@@ -24,6 +24,26 @@ bool looksLikeCall(const std::string& s) {
     return true;
 }
 
+// Recover a callsign from a token that the decoder ran a procedural signal into,
+// e.g. "CQK4RO" -> "K4RO" (a missed word gap after CQ). Only strips prefixes that
+// are never a real callsign start, so a valid call is never mangled. Returns the
+// call, or "" if the token isn't (or doesn't contain) a valid call.
+static std::string extractCall(const std::string& tok) {
+    // Strip a procedural prefix FIRST: "CQK4RO" spuriously passes looksLikeCall
+    // as-is (fake 3-char prefix "CQK"), so we must prefer the stripped real call.
+    // Only strips when the remainder is itself a valid call, so a genuine call is
+    // never mangled (e.g. "DX1ABC" -> "1ABC" is invalid, so DX1ABC is kept).
+    for (const std::string& p : {std::string("CQ"), std::string("QRZ"),
+                                 std::string("TEST"), std::string("DX")}) {
+        if (tok.size() > p.size() && tok.compare(0, p.size(), p) == 0) {
+            std::string rest = tok.substr(p.size());
+            if (looksLikeCall(rest)) return rest;
+        }
+    }
+    if (looksLikeCall(tok)) return tok;
+    return "";
+}
+
 // True if a and b are within Levenshtein distance 1 (equal, one substitution,
 // or one insertion/deletion).  Used to fold misdecode variants of one carrier's
 // callsign together: a strong signal decodes WC6DX / TC6DX / WC6DD across windows.
@@ -119,16 +139,25 @@ std::vector<CwSpot> CwTracker::step(uint64_t wi, const float* snr, int nbins,
         // Unique valid calls in THIS window's decode (a call repeated within one
         // window is one sighting, not proof — confirmation must span windows).
         std::unordered_set<std::string> seen_now;
-        for (const std::string& tok : tokens(txt))
-            if (looksLikeCall(tok)) seen_now.insert(tok);
+        for (const std::string& tok : tokens(txt)) {
+            const std::string call = extractCall(tok);
+            if (!call.empty()) seen_now.insert(call);
+        }
         for (const std::string& call : seen_now) ++t.call_cnt[call];
 
-        // Emit newly-confirmed calls, folding misdecode variants of one carrier's
-        // callsign: suppress a candidate within edit-distance 1 of one already
-        // emitted here, and defer to a not-yet-emitted variant with more sightings
-        // so the most-decoded (usually correct) spelling wins.
+        // Emit newly-confirmed calls with RELATIVE-DOMINANCE suppression: a QSB/
+        // noise misread decodes to a DIFFERENT string on the same carrier only a
+        // few times, far less than the true call (7036.8: KJ9C dominates, NF8M/
+        // EM9C are sparse) — edit-distance folding can't catch those. So suppress
+        // a call decoded < half as often as the carrier's dominant call. A real
+        // QSO (two stations alternating on one freq, each ~half the windows) has
+        // comparable counts, so both still spot.
         for (const std::string& call : seen_now) {
             if (t.call_cnt[call] < cfg_.confirm || t.emitted.count(call)) continue;
+
+            int mine = t.call_cnt[call], best = 0;
+            for (const auto& kv : t.call_cnt) best = std::max(best, kv.second);
+            if (mine * 2 < best) continue;               // sparse vs dominant -> misread
 
             bool is_variant = false;
             for (const std::string& e : t.emitted) {
@@ -137,12 +166,6 @@ std::vector<CwSpot> CwTracker::step(uint64_t wi, const float* snr, int nbins,
                     editDistLE1(e, call)) { is_variant = true; break; }
             }
             if (is_variant) continue;
-
-            bool defer = false;                          // a stronger sibling not yet out?
-            for (const auto& kv : t.call_cnt)
-                if (kv.first != call && kv.second > t.call_cnt[call] &&
-                    !t.emitted.count(kv.first) && editDistLE1(kv.first, call)) { defer = true; break; }
-            if (defer) continue;
 
             t.emitted.insert(call);
             spots.push_back(CwSpot{hz, wpm(t.bin), t.snr_ema, call});

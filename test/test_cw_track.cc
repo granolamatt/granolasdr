@@ -185,6 +185,36 @@ int main() {
               std::to_string(calls.size()) + " spots");
     }
 
+    // ---- CQ run into the call is stripped: "CQK4RO" -> spot "K4RO" -----------
+    {
+        CwTracker tr;
+        auto snr = snrWith({{100, 30.0f}});
+        auto calls = runWindows(tr, 3, snr, [](int){ return std::string("CQK4RO"); });
+        check(calls.size() == 1 && calls[0] == "K4RO", "CQ prefix stripped to real call",
+              calls.empty() ? "(none)" : calls[0]);
+    }
+
+    // ---- sparse misread on a carrier is suppressed; the dominant call spots ---
+    {
+        CwTracker tr;
+        auto snr = snrWith({{100, 30.0f}});
+        int w = 0;
+        // KJ9C dominates; NF8M is an occasional QSB misread (reaches confirm but
+        // stays < half KJ9C's count) -> relative-dominance must drop only NF8M.
+        std::function<std::string(int)> dec = [&](int) -> std::string {
+            return (w == 6 || w == 9) ? std::string("NF8M") : std::string("KJ9C");
+        };
+        std::vector<std::string> calls;
+        for (w = 0; w < 10; ++w) {
+            auto sp = tr.step((uint64_t)(w+1)*25, snr.data(), NB, dec, wpm20, binHz);
+            for (auto& s : sp) calls.push_back(s.call);
+        }
+        bool kj = false, nf = false;
+        for (auto& c : calls) { if (c == "KJ9C") kj = true; if (c == "NF8M") nf = true; }
+        check(kj && !nf && calls.size() == 1, "sparse misread suppressed (KJ9C, not NF8M)",
+              std::to_string(calls.size()) + " spots");
+    }
+
     // ---- crowded band: 20 carriers, all distinct, each once ------------------
     {
         CwTracker tr;
