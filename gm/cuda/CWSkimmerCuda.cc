@@ -61,7 +61,14 @@ void CWSkimmerCuda<N>::worker() {
     const int    WSLOTS     = std::min(250, N - 2);      // window depth (~5 s @ 20ms/slot)
     const int    WROWS      = WSLOTS * TOSR;             // envelope length
     const size_t slot_elems = ring_.slot_bytes;         // bytes == elems (uint8)
-    const float  SNR_THRESH = std::getenv("CW_SNR") ? std::stof(std::getenv("CW_SNR")) : 12.0f;
+    // strtof (not stof) so a non-numeric CW_SNR falls back to the default instead
+    // of throwing std::invalid_argument -> uncaught -> std::terminate.
+    const float  SNR_THRESH = [] {
+        const char* e = std::getenv("CW_SNR");
+        char* end = nullptr;
+        float v = e ? std::strtof(e, &end) : 0.0f;
+        return (e && end != e) ? v : 12.0f;
+    }();
     const int    STRIDE     = 25;                        // every ~0.5 s (20 ms/slot)
 
     host_win_.resize((size_t)WSLOTS * slot_elems);
@@ -78,8 +85,8 @@ void CWSkimmerCuda<N>::worker() {
     // unrelated bins on a crowded band (cwtest2.dat).
     gm::hf::CwTracker::Config tcfg;
     tcfg.snr_thresh = SNR_THRESH;
-    if (const char* d = std::getenv("CW_DRIFT")) tcfg.drift_bins = tcfg.merge_bins = std::atoi(d);
-    if (const char* c = std::getenv("CW_CONFIRM")) tcfg.confirm = std::atoi(c);
+    if (const char* d = std::getenv("CW_DRIFT")) tcfg.drift_bins = tcfg.merge_bins = std::max(0, std::atoi(d));
+    if (const char* c = std::getenv("CW_CONFIRM")) tcfg.confirm = std::max(1, std::atoi(c));
     gm::hf::CwTracker tracker(tcfg);
 
     auto val = [&](int s, int row, int bin) -> uint8_t {
@@ -116,7 +123,9 @@ void CWSkimmerCuda<N>::worker() {
         std::vector<float> tmp(dbuf_);
         std::nth_element(tmp.begin(), tmp.begin() + wlen / 2, tmp.end());
         const float floor = tmp[wlen / 2];
-        for (float& v : dbuf_) { v -= floor; if (v < 0.0f) v = 0.0f; }
+        bool any = false;
+        for (float& v : dbuf_) { v -= floor; if (v < 0.0f) v = 0.0f; else if (v > 0.0f) any = true; }
+        if (!any) return "";                     // detrended to silence (median==peak): skip
         return dec.decode(dbuf_.data(), wlen);
     };
 

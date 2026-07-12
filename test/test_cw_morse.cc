@@ -152,6 +152,28 @@ int main() {
         check(charAcc(got, MSG) >= 0.85f, "QSB fade (workable)", got, MSG);
     }
 
+    // 7: crash-safety (CW1). Adversarial envelopes that previously drove the
+    //    all-zero / degenerate path into cw_morse's 0/0 AGC -> NaN -> otsu
+    //    hist[(int)NaN] out-of-bounds write. Each must RETURN (empty is fine);
+    //    reaching the line after decode() is the assertion — a crash aborts.
+    {
+        printf("crash-safety (must not crash; empty output OK):\n");
+        CwMorse dec(HOP, 20.0f);
+        auto survives = [&](const char* nm, std::vector<float> v) {
+            std::string got = dec.decode(v.data(), (int)v.size());
+            printf("  [PASS] %-24s -> \"%s\"\n", nm, got.c_str());
+        };
+        survives("all zeros",    std::vector<float>(400, 0.0f));
+        survives("flat mid",     std::vector<float>(400, 128.0f));
+        survives("saturated",    std::vector<float>(400, 255.0f));
+        std::vector<float> spike(400, 0.0f); spike[200] = 255.0f;
+        survives("single spike", spike);
+        survives("all NaN",      std::vector<float>(400, std::nanf("")));
+        survives("all +inf",     std::vector<float>(400, INFINITY));
+        survives("length 1",     std::vector<float>(1, 0.0f));
+        survives("length 0",     std::vector<float>());
+    }
+
     printf("\nPhase 0 gate: clean 18/26/36 WPM exact + adaptive lock + 12 dB noise + QSB.\n");
     printf("Known limit (escalation trigger): dense pileups <80 Hz spacing and\n");
     printf("signals that fade below the noise need the per-signal Viterbi path.\n");

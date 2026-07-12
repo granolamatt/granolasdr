@@ -125,11 +125,17 @@ std::string CwMorse::take() {
 static float otsu(const float* x, int n) {
     float lo = x[0], hi = x[0];
     for (int i = 1; i < n; ++i) { if (x[i] < lo) lo = x[i]; if (x[i] > hi) hi = x[i]; }
-    if (hi - lo < 1e-9f) return hi + 1.0f;     // flat: never keys
+    // !(>=) not (<) so NaN (all comparisons false) also takes the early-out —
+    // otherwise scale=NaN and (int)NaN below is an out-of-bounds hist[] write.
+    if (!(hi - lo >= 1e-9f)) return hi + 1.0f;  // flat or NaN: never keys
     const int B = 256;
     long hist[B] = {0};
     const float scale = (B - 1) / (hi - lo);
-    for (int i = 0; i < n; ++i) hist[(int)((x[i] - lo) * scale)]++;
+    for (int i = 0; i < n; ++i) {
+        int idx = (int)((x[i] - lo) * scale);
+        if (idx < 0) idx = 0; else if (idx >= B) idx = B - 1;   // clamp: never index OOB
+        hist[idx]++;
+    }
     long total = n;
     double sum = 0; for (int b = 0; b < B; ++b) sum += (double)b * hist[b];
     double sumB = 0; long wB = 0; double best = -1; int thrB = 0;
@@ -175,6 +181,8 @@ std::string CwMorse::decode(const float* env, int n) {
     {
         float gmax = s[0];
         for (int i = 1; i < n; ++i) if (s[i] > gmax) gmax = s[i];
+        if (!(gmax > 0.0f)) return "";        // all-silence input: nothing to decode,
+                                              // and avoids the 0/max(0,0)=0/0=NaN AGC below
         const float floor = 0.15f * gmax;
         std::vector<float> pf(n);
         float p = s[0];
