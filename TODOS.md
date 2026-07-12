@@ -97,13 +97,12 @@ the QP-ADMM vs BP baseline, and any decoder tuning now live in `../qp-admm`.
 Phase-1 only and off by default (`enable_cw=false`, HFRx.cc). Two blocking problems
 keep it there. Do NOT re-enable by default until CW1 and CW2 are fixed.
 
-**CW1 — Crash on CW-like input (BLOCKING; robustness bug, NOT ML).**
-Some inputs that look like CW take the process down. No detected signal — real or
-spurious — may ever crash the pipeline. Harden `gm/cuda/CWSkimmerCuda.cc` and
-`gm/hf/cw_track.cc`: bounds-check every buffer index derived from a detected carrier
-(freq bin, envelope window, Morse-timing spans), validate counts before alloc/loop,
-and add a playback regression from the crashing capture (`--playback-cw`). Table
-stakes, independent of any detection rework.
+**CW1 — Crash on CW-like input — ✅ FIXED (3924a15).**
+Root cause was a concrete OOB write: an all-zero/degenerate envelope → cw_morse
+AGC 0/0=NaN → otsu `hist[(int)NaN]` out of bounds (SIGSEGV). Fixed in depth
+(NaN-safe otsu + clamped index, all-silence bail in cw_morse decode, all-zero
+skip in CWSkimmerCuda decodeActive, strtof/clamped CW_SNR/CW_DRIFT/CW_CONFIRM).
+test_cw_morse now has a crash-safety block (negative control segfaulted pre-fix).
 
 **CW2 — Detection quality is poor.**
 The peak-mean carrier metric picks QRN spikes and QRM as CW (project memory).
