@@ -156,6 +156,11 @@ target_link_libraries(test_cw_morse -lm)
 add_executable(test_cw_track test/test_cw_track.cc gm/hf/cw_track.cc)
 target_link_libraries(test_cw_track -lm)
 
+# Offline CW skimmer harness: CPU MagBlock front end + the real CwTracker/CwMorse,
+# replaying a --record-cw capture for detection tuning without CUDA. See test/cw_offline.cc.
+add_executable(cw_offline test/cw_offline.cc gm/hf/cw_track.cc gm/hf/cw_morse.cc ft8_lib/fft/kiss_fft.c)
+target_link_libraries(cw_offline -lm)
+
 # FT8 OSD test: links ft8_lib for the generator table, CRC-14 and ftx_decode_from_bits.
 add_executable(test_ft8_osd test/test_ft8_osd.cc gm/cuda/FT8Osd.cc gm/cuda/OsdCore.cc)
 target_link_libraries(test_ft8_osd ${CMAKE_CURRENT_SOURCE_DIR}/ft8_lib/libft8.a -lm)
