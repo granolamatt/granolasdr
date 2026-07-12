@@ -104,10 +104,20 @@ AGC 0/0=NaN → otsu `hist[(int)NaN]` out of bounds (SIGSEGV). Fixed in depth
 skip in CWSkimmerCuda decodeActive, strtof/clamped CW_SNR/CW_DRIFT/CW_CONFIRM).
 test_cw_morse now has a crash-safety block (negative control segfaulted pre-fix).
 
-**CW2 — Detection quality is poor.**
-The peak-mean carrier metric picks QRN spikes and QRM as CW (project memory).
-Classical thresholding is the wrong tool for a mode with no FEC. Cheap interim cut:
-CFAR + a Morse-timing plausibility gate before emit. Real fix is CW3.
+**CW2 — Detection quality — IN PROGRESS (adaptive gate + validation shipped).**
+Metric is ALREADY percentile (p80-p50), not peak-mean (that's long fixed). Built
+`cw_offline` (test/cw_offline.cc): CPU MagBlock front end + real CwTracker/CwMorse,
+replays any window of a --record-cw capture for tuning without CUDA/radio. Against
+cwtest.dat (11h overnight capture):
+- Adaptive gate (3132221): gate = max(floor, k×median-of-metric), default k=2.7
+  floor=6, on by default. Median is the stable noise floor so the gate floats.
+  Fixed 12→49 unique / sweet-spot ~10→63 / default→53 evening. CW_ADAPT_K/CW_SNR tune.
+- Validation quality (3fe5d3f): strip CQ/QRZ/TEST/DX prefix (CQK4RO→K4RO), and
+  relative-dominance suppression of sparse QSB misreads (one carrier's dominant
+  call wins; real alternating QSO still spots both). 74→64 unique.
+REMAINING: decode-quality misreads that validation can't touch (odd-prefix D3WU/
+R5HMT, merged-call M9MR≈W9MR on adjacent bins, 1×1 partials). Needs cw_morse timing
+work or CW3. Also: still verify all this on-air / wire ZMQ+RBN publish (Phase 3).
 
 **CW3 — ML CW reader (real fix; deferred behind the de-chirp track).**
 CNN/RNN over the CW composite spectrogram: detect carriers as dashed-line objects,
