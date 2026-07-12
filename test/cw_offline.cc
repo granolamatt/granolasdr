@@ -116,10 +116,12 @@ int main(int argc, char** argv) {
     // --- detection + tracker + decode, mirroring CWSkimmerCuda::worker ----------
     auto env_f = [](const char* n, float d) { const char* e = std::getenv(n); char* p = nullptr;
         float v = e ? std::strtof(e, &p) : 0; return (e && p != e) ? v : d; };
-    const float SNR_THRESH = env_f("CW_SNR", 12.0f);
+    const float SNR_THRESH = env_f("CW_SNR", 6.0f);   // floor; adaptive gate rules above it
     gm::hf::CwTracker::Config tcfg; tcfg.snr_thresh = SNR_THRESH;
+    tcfg.adapt_k = 2.7f;                               // adaptive gate default (matches CWSkimmerCuda)
     if (const char* d = std::getenv("CW_DRIFT"))   tcfg.drift_bins = tcfg.merge_bins = std::max(0, atoi(d));
     if (const char* c = std::getenv("CW_CONFIRM")) tcfg.confirm = std::max(1, atoi(c));
+    if (const char* k = std::getenv("CW_ADAPT_K")) tcfg.adapt_k = std::max(0.0f, std::strtof(k, nullptr));
     gm::hf::CwTracker tracker(tcfg);
     gm::hf::CwMorse dec(5.0f, 20.0f);
 
@@ -189,7 +191,7 @@ int main(int argc, char** argv) {
 
     std::sort(all_calls.begin(), all_calls.end());
     int uniq = (int)(std::unique(all_calls.begin(), all_calls.end()) - all_calls.begin());
-    printf("\n%d detection windows, CW_SNR=%.0f -> %d spots, %d unique calls\n",
-           windows, SNR_THRESH, (int)all_calls.size(), uniq);
+    printf("\n%d detection windows, gate floor=%.0f adapt_k=%.1f -> %d spots, %d unique calls\n",
+           windows, SNR_THRESH, tcfg.adapt_k, (int)all_calls.size(), uniq);
     return 0;
 }

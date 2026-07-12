@@ -67,7 +67,7 @@ void CWSkimmerCuda<N>::worker() {
         const char* e = std::getenv("CW_SNR");
         char* end = nullptr;
         float v = e ? std::strtof(e, &end) : 0.0f;
-        return (e && end != e) ? v : 12.0f;
+        return (e && end != e) ? v : 6.0f;      // absolute floor (adaptive gate rules above it)
     }();
     const int    STRIDE     = 25;                        // every ~0.5 s (20 ms/slot)
 
@@ -87,6 +87,8 @@ void CWSkimmerCuda<N>::worker() {
     tcfg.snr_thresh = SNR_THRESH;
     if (const char* d = std::getenv("CW_DRIFT")) tcfg.drift_bins = tcfg.merge_bins = std::max(0, std::atoi(d));
     if (const char* c = std::getenv("CW_CONFIRM")) tcfg.confirm = std::max(1, std::atoi(c));
+    tcfg.adapt_k = 2.7f;   // adaptive gate on by default (median-relative); CW_ADAPT_K=0 for fixed
+    if (const char* k = std::getenv("CW_ADAPT_K")) tcfg.adapt_k = std::max(0.0f, std::strtof(k, nullptr));
     gm::hf::CwTracker tracker(tcfg);
 
     auto val = [&](int s, int row, int bin) -> uint8_t {

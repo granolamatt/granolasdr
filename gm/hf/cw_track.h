@@ -34,7 +34,9 @@ struct CwSpot {
 class CwTracker {
 public:
     struct Config {
-        float    snr_thresh = 12.0f;  // per-bin detection gate
+        float    snr_thresh = 12.0f;  // per-bin detection gate (absolute floor)
+        float    adapt_k    = 0.0f;   // >0: gate = max(snr_thresh, median + k·MAD of the
+                                      //     per-window metric) so it floats with band noise
         int      drift_bins = 2;      // ± bins a track may wander between windows (~100 Hz)
         int      merge_bins = 2;      // don't birth a track within this of an existing one
         int      confirm    = 2;      // windows a call must repeat on a track before emit

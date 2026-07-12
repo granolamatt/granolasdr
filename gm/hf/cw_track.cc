@@ -1,6 +1,8 @@
 #include "gm/hf/cw_track.h"
 
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 namespace gm {
 namespace hf {
@@ -81,13 +83,29 @@ std::vector<CwSpot> CwTracker::step(uint64_t wi, const float* snr, int nbins,
                                     const std::function<std::string(int)>& decode,
                                     const std::function<float(int)>& wpm,
                                     const std::function<double(int)>& binToHz) {
+    // Effective gate: the absolute floor (snr_thresh), optionally floated to a
+    // noise-relative level (adapt_k × median of the per-bin metric) when adapt_k>0.
+    // The median IS the noise floor (>99% of bins are noise; a handful of carriers
+    // don't move it), so k·median tracks band conditions: it drops in a quiet band
+    // (catching weak CW that a fixed 12 misses) and rises under QRN. A median-
+    // MULTIPLE, not median+MAD — the p80-p50 metric is integer-valued so MAD is
+    // often 0 and would collapse to the floor. On cwtest.dat (median≈3.7) k≈2.7
+    // gives ≈10, the measured sweet spot before garbage climbs.
+    float gate = cfg_.snr_thresh;
+    if (cfg_.adapt_k > 0.0f && nbins > 8) {
+        std::vector<float> m(snr, snr + nbins);
+        const size_t mid = m.size() / 2;
+        std::nth_element(m.begin(), m.begin() + mid, m.end());
+        gate = std::max(gate, cfg_.adapt_k * m[mid]);
+    }
+
     // 1. Detection peaks: local maxima over ±2 bins above the gate.  A carrier's
     //    spectral shoulders don't out-peak its center, so one carrier => one peak.
     struct Peak { int bin; float s; };
     std::vector<Peak> peaks;
     for (int bin = 2; bin < nbins - 2; ++bin) {
         const float s = snr[bin];
-        if (s < cfg_.snr_thresh) continue;
+        if (s < gate) continue;
         if (s < snr[bin-1] || s < snr[bin+1] || s < snr[bin-2] || s < snr[bin+2]) continue;
         peaks.push_back({bin, s});
     }

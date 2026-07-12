@@ -215,6 +215,26 @@ int main() {
               std::to_string(calls.size()) + " spots");
     }
 
+    // ---- adaptive gate: k×median floats above the noise floor ----------------
+    {
+        CwTracker::Config cfg; cfg.snr_thresh = 0.0f; cfg.adapt_k = 2.5f;  // gate = 2.5×median
+        CwTracker tr(cfg);
+        std::vector<float> s(NB, 4.0f);                 // noise floor 4 -> median 4 -> gate 10
+        auto put = [&](int b, float v){ s[b]=v; s[b-1]=s[b+1]=v*0.6f; s[b-2]=s[b+2]=v*0.3f; };
+        put(100, 11.0f);                                // above gate 10 -> detected
+        put(200,  9.0f);                                // below gate 10 -> rejected
+        std::function<std::string(int)> dec = [&](int b){ return std::string(b < 150 ? "K1AAA" : "K2BBB"); };
+        std::vector<std::string> calls;
+        for (int w = 0; w < 3; ++w) {
+            auto sp = tr.step((uint64_t)(w+1)*25, s.data(), NB, dec, wpm20, binHz);
+            for (auto& x : sp) calls.push_back(x.call);
+        }
+        bool got1 = false, got2 = false;
+        for (auto& c : calls) { if (c == "K1AAA") got1 = true; if (c == "K2BBB") got2 = true; }
+        check(got1 && !got2, "adaptive gate passes >k*median, rejects below",
+              std::to_string(calls.size()) + " spots");
+    }
+
     // ---- crowded band: 20 carriers, all distinct, each once ------------------
     {
         CwTracker tr;
