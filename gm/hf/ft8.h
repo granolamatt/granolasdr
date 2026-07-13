@@ -82,6 +82,7 @@ private:
     int   osd_order_         = 2;
     float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
     int   osd_max_per_cycle_ = 64;
+    int   decode_threads_    = 1;   // parallel BP/OSD workers for the continuous scan
     float osd_soft_thresh_   = 0.0f;   // 0 = gate on CRC-14 only
 
     // Per-candidate freq/time refine fallback (see setRefineEnabled). When BP+OSD

@@ -6,6 +6,8 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <atomic>
+#include <cstdlib>
 #include <vector>
 #include <zmq.hpp>
 
@@ -27,6 +29,28 @@
 #include "ft8_lib/ft8/debug.h"
 
 const int kLDPC_iterations = 25;
+
+// Run body(i) for i in [0,count) across up to `nthreads` workers with dynamic
+// (atomic-counter) scheduling, so uneven per-item costs (OSD) self-balance. body
+// must be reentrant and write only per-index state; the caller serializes the
+// shared publish/dedup work afterward, in order, so output stays deterministic.
+namespace {
+template <typename Fn>
+void parallel_for(size_t count, int nthreads, Fn&& body) {
+    if (count == 0) return;
+    nthreads = std::max(1, std::min(nthreads, (int)count));
+    if (nthreads == 1) { for (size_t i = 0; i < count; ++i) body(i); return; }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    for (int t = 0; t < nthreads; ++t)
+        pool.emplace_back([&] {
+            for (size_t j; (j = next.fetch_add(1, std::memory_order_relaxed)) < count; )
+                body(j);
+        });
+    for (auto& th : pool) th.join();
+}
+}  // namespace
 
 // Continuous-scan host-decode cap.  The GPU Costas scan can emit tens of
 // thousands of candidates under heavy QRN / crowded low bands, most of them
@@ -132,6 +156,17 @@ namespace hf {
       , timing_log_(nullptr) {
 
         hashtable_init();
+
+        // Parallel decode workers for the continuous-scan Pass-1 BP / Pass-2 OSD
+        // (the per-slot CPU bottleneck a strong antenna exposes). Default leaves
+        // headroom for the GPU/CW/ZMQ threads; FT8_DECODE_THREADS overrides.
+        {
+            unsigned hw = std::thread::hardware_concurrency();
+            int def = hw > 4 ? std::min(16, (int)hw - 2) : 1;
+            const char* e = std::getenv("FT8_DECODE_THREADS");
+            decode_threads_ = e ? std::max(1, atoi(e)) : std::max(1, def);
+            printf("FT8 continuous-scan decode threads: %d\n", decode_threads_);
+        }
 
         ft8cuda_->setDecodeCallback([this](gm::cuda::ContScanResult& r) {
             decodeAndPublishContinuous(r);
@@ -299,15 +334,26 @@ namespace hf {
                     n, kContTopKCandidates);
         }
 
-        // Pass 1: BP-decode every selected candidate; collect BP failures for OSD.
-        std::vector<uint32_t> osd_fail;
-        for (uint32_t i : order) {
-            const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
-            ftx_message_t msg;
+        // Pass 1: BP-decode every selected candidate. The BP is the per-slot CPU
+        // bottleneck under a strong antenna and is independent per candidate, so
+        // run it across the decode-thread pool; the shared publish/dedup work then
+        // runs serially and IN ORDER below (output is identical to the serial
+        // version regardless of thread timing). vector<uint8_t>, not vector<bool>,
+        // so concurrent writes don't race on a shared bitset.
+        std::vector<uint8_t>       bp_ok(order.size(), 0);
+        std::vector<ftx_message_t> bp_msg(order.size());
+        parallel_for(order.size(), decode_threads_, [&](size_t j) {
+            const float* llr = r.log174 + (size_t)order[j] * FTX_LDPC_N;
             ftx_decode_status_t st;
-            if (ftx_decode_from_llr(llr, kLDPC_iterations, &msg, &st)) {
+            bp_ok[j] = ftx_decode_from_llr(llr, kLDPC_iterations, &bp_msg[j], &st) ? 1 : 0;
+        });
+
+        std::vector<uint32_t> osd_fail;
+        for (size_t j = 0; j < order.size(); ++j) {
+            const uint32_t i = order[j];
+            if (bp_ok[j]) {
                 char text[FTX_MAX_MESSAGE_LENGTH];
-                if (decode_msg(msg, text)) {
+                if (decode_msg(bp_msg[j], text)) {
                     publish_spot(i, text);
                     if (!decoded_bins.count(r.fo[i])) capture(i, "pass", text, nullptr);
                     decoded_bins.insert(r.fo[i]);
@@ -335,17 +381,26 @@ namespace hf {
                   [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
         if ((int)cands.size() > osd_max_per_cycle_) cands.resize(osd_max_per_cycle_);
 
-        uint8_t plain174[FTX_LDPC_N];
+        // Parallel OSD compute (order-2 OSD is the other per-slot hot spot), then
+        // serial in-order CRC / publish / refine-enqueue below.
+        struct OsdOut { uint8_t ok; float dist; uint8_t plain174[FTX_LDPC_N]; };
+        std::vector<OsdOut> osd(cands.size());
+        parallel_for(cands.size(), decode_threads_, [&](size_t k) {
+            const float* llr = r.log174 + (size_t)cands[k] * FTX_LDPC_N;
+            osd[k].dist = 0.0f;
+            osd[k].ok = (ft8_osd_decode(llr, osd_order_, osd[k].plain174, &osd[k].dist) &&
+                         (osd_soft_thresh_ <= 0.0f || osd[k].dist <= osd_soft_thresh_)) ? 1 : 0;
+        });
+
         int refine_used = 0;
-        for (uint32_t i : cands) {
-            const float* llr = r.log174 + (size_t)i * FTX_LDPC_N;
-            float dist = 0.0f;
+        for (size_t k = 0; k < cands.size(); ++k) {
+            const uint32_t i = cands[k];
+            float dist = osd[k].dist;
             bool decoded = false;
-            if (ft8_osd_decode(llr, osd_order_, plain174, &dist) &&
-                (osd_soft_thresh_ <= 0.0f || dist <= osd_soft_thresh_)) {
+            if (osd[k].ok) {
                 ftx_message_t msg;
                 ftx_decode_status_t st;
-                if (ftx_decode_from_bits(plain174, &msg, &st)) {        // CRC-14 gate
+                if (ftx_decode_from_bits(osd[k].plain174, &msg, &st)) {  // CRC-14 gate
                     char text[FTX_MAX_MESSAGE_LENGTH];
                     if (decode_msg(msg, text)) {
                         publish_spot(i, text);
