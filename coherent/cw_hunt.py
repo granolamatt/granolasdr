@@ -65,6 +65,10 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
+    # Key on (call, 0.5 kHz freq cluster): a signal is a callsign AT a frequency.
+    # Keying on call alone merges a real station with same-call misreads on other
+    # carriers, inflating its count. A high in-cluster drift then flags a genuine
+    # carrier's small bin-wander vs a call scattered across the band (misreads).
     agg = defaultdict(lambda: {"count": 0, "snr": 0, "freq": 0.0, "t": 0, "wpm": 0,
                                "fmin": 1e9, "fmax": 0.0})
     nwin = int(args.span // args.win)
@@ -74,12 +78,12 @@ def main():
         st = args.start + w * args.win
         spots = scan_window(args.capture, st, args.win)
         for (t, freq, wpm, snr, call) in spots:
-            a = agg[call]
+            a = agg[(call, round(freq * 2) / 2)]        # 0.5 kHz cluster
             a["count"] += 1
             a["fmin"] = min(a["fmin"], freq); a["fmax"] = max(a["fmax"], freq)
             if snr > a["snr"]:
                 a["snr"], a["freq"], a["t"], a["wpm"] = snr, freq, st + t, wpm
-        print(f"  {st:.0f}s: {len(spots)} spots, {len(agg)} unique so far")
+        print(f"  {st:.0f}s: {len(spots)} spots, {len(agg)} signals so far")
 
     ranked = sorted(agg.items(), key=lambda kv: (kv[1]["count"], kv[1]["snr"]), reverse=True)
     if not ranked:
@@ -94,7 +98,7 @@ def main():
     with open(idx_path, "w") as idx:
         idx.write(hdr + "\n" + "-" * len(hdr) + "\n")
         print(hdr); print("-" * len(hdr))
-        for i, (call, a) in enumerate(ranked, 1):
+        for i, ((call, _bucket), a) in enumerate(ranked, 1):
             conf = confidence(a["count"], a["snr"])
             drift = a["fmax"] - a["fmin"]                 # kHz spread across windows
             wav = ""
