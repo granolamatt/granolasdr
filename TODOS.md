@@ -117,7 +117,29 @@ cwtest.dat (11h overnight capture):
   call wins; real alternating QSO still spots both). 74→64 unique.
 REMAINING: decode-quality misreads that validation can't touch (odd-prefix D3WU/
 R5HMT, merged-call M9MR≈W9MR on adjacent bins, 1×1 partials). Needs cw_morse timing
-work or CW3. Also: still verify all this on-air / wire ZMQ+RBN publish (Phase 3).
+work or CW3. Also: still verify all this on-air / wire ZMQ+wsdict publish so spots
+reach the dashboard (Phase 3). RBN publish is optional/deferred — see CW-RBN below.
+
+**CW3 — ML CW reader (real fix; deferred behind the de-chirp track).**
+CNN/RNN over the CW composite spectrogram: detect carriers as dashed-line objects,
+read dot/dash timing, emit callsign. Train on `cwtest*.dat` + confirmed CW decodes
+via the `--record-cw`/`--playback-cw` harness; crash inputs become labeled
+robustness cases. This is one class of the larger "waterfall track detector" vision
+(see the FT8/JS8 de-chirp exploration — same YOLO/CNN detector, CW is one label).
+
+**CW-RBN — publish to Reverse Beacon Network — DEFERRED / OPTIONAL, NOT the direction.**
+RBN is deliberately restrictive and its mission (spot stations *calling CQ* for DX/
+contest use) is NARROWER than granolasdr's goal of finding + decoding ALL CW. To be
+RBN-compliant a skimmer must: (1) only spot a call in a **CQ/TEST calling context**
+(not mid-QSO) — the OPPOSITE of our current "strip CQ, spot any confirmed call";
+(2) validate the call against **MASTER.SCP** + the RBN pattern file (patt3ch.lst) at a
+chosen validation level; (3) expose a **telnet spot server** in CW Skimmer Server line
+format that the RBN **Aggregator** connects to (the Aggregator does the actual upload).
+Decision: keep the decode-ALL core unrestricted. If we ever want RBN, add it as a
+separate OUTPUT ADAPTER that applies the CQ-context + MASTER.SCP filter only to the RBN
+feed — the restriction lives in the adapter, never in the decoder. The one crossover
+worth cherry-picking regardless: an OPTIONAL MASTER.SCP validity check would cut the
+CW2 garbage (D3WU/R5HMT phantoms) even in decode-all mode, as a toggle, not a default.
 
 **CW3 — ML CW reader (real fix; deferred behind the de-chirp track).**
 CNN/RNN over the CW composite spectrogram: detect carriers as dashed-line objects,
@@ -127,4 +149,5 @@ robustness cases. This is one class of the larger "waterfall track detector" vis
 (see the FT8/JS8 de-chirp exploration — same YOLO/CNN detector, CW is one label).
 
 **Sequencing:** CW1 (crash) anytime — it's a bug. CW2/CW3 wait until the de-chirp
-track (active) proves the free-label training loop on FT8/JS8.
+track (active) proves the free-label training loop on FT8/JS8. RBN is optional and
+off the critical path — a publish target, not a decoder constraint.
