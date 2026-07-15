@@ -284,7 +284,27 @@ namespace hf {
     }
 
     void FT8::decodeAndPublishContinuous(gm::cuda::ContScanResult& r) {
-        uint32_t n = std::min(*r.count, gm::cuda::CONT_CAND_MAX);
+        const uint32_t raw = *r.count;
+        uint32_t n = std::min(raw, gm::cuda::CONT_CAND_MAX);
+
+        // Candidate-load readout: accumulate per-scan Costas-candidate counts and
+        // print a summary every ~15 s, so --min-score can be tuned against how hard
+        // the scan is actually pushed (avg/peak vs the top-K cap and the 100000 max).
+        ++cand_scans_;
+        cand_sum_ += raw;
+        if (raw > cand_peak_) cand_peak_ = raw;
+        if (raw >= gm::cuda::CONT_CAND_MAX) ++cand_sat_;
+        if (cand_report_t0_ == 0.0) cand_report_t0_ = r.timestamp;
+        if (r.timestamp - cand_report_t0_ >= 15.0) {
+            printf("[CONT] FT8 candidates/scan avg=%llu peak=%u  (top-K %u, max %u; "
+                   "%d scans/%.0fs, %d hit max)\n",
+                   (unsigned long long)(cand_sum_ / (unsigned)std::max(1, cand_scans_)),
+                   cand_peak_, kContTopKCandidates, gm::cuda::CONT_CAND_MAX,
+                   cand_scans_, r.timestamp - cand_report_t0_, cand_sat_);
+            cand_report_t0_ = r.timestamp;
+            cand_sum_ = 0; cand_peak_ = 0; cand_scans_ = 0; cand_sat_ = 0;
+        }
+
         if (n == 0) return;
 
         // Initialise window start on first call.
@@ -329,9 +349,7 @@ namespace hf {
             std::nth_element(order.begin(), order.begin() + kContTopKCandidates,
                              order.end(),
                              [&](uint32_t a, uint32_t b) { return r.score[a] > r.score[b]; });
-            order.resize(kContTopKCandidates);
-            fprintf(stderr, "[CONT] FT8 candidates %u > cap %u; host-decoding top-K by score\n",
-                    n, kContTopKCandidates);
+            order.resize(kContTopKCandidates);   // load reported by the periodic readout above
         }
 
         // Pass 1: BP-decode every selected candidate. The BP is the per-slot CPU
