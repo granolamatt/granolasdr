@@ -149,7 +149,8 @@ void WaterfallCuda<N>::run()
         uint64_t slot_idx = (wi - 1) % N;
         const uint8_t* slot_base = ring_.base_d + slot_idx * ring_.slot_bytes;
 
-        cudaStreamWaitEvent(stream_, ring_.ready, 0);
+        { std::lock_guard<std::mutex> lk(ring_.ready_mu);
+          cudaStreamWaitEvent(stream_, ring_.ready, 0); }
         // Row stride = elements per time sub-array = freq_osr * num_bins, taken
         // from the ring's real geometry (slot_bytes / ROWS_PER_SLOT).  This is 4x
         // smaller for the CW ring (freq_osr=1) than the FT8 ring (freq_osr=4);

@@ -141,7 +141,8 @@ void CWSkimmerCuda<N>::worker() {
 
         // Snapshot the last WSLOTS slots [wi-WSLOTS, wi) to host.
         const uint64_t start = wi - WSLOTS;
-        cudaStreamWaitEvent(stream_, ring_.ready, 0);
+        { std::lock_guard<std::mutex> lk(ring_.ready_mu);
+          cudaStreamWaitEvent(stream_, ring_.ready, 0); }
         for (int s = 0; s < WSLOTS; ++s) {
             cudaMemcpyAsync(&host_win_[(size_t)s * slot_elems],
                             ring_.slot(start + s), slot_elems,

@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <cuda_runtime.h>
 
 namespace gm {
@@ -25,6 +26,14 @@ struct DeviceRingBuffer {
     size_t                num_bins{0};
     std::atomic<uint64_t> write_idx{0};
     cudaEvent_t           ready{};
+    // Serializes the writer's cudaEventRecord(ready) against every reader's
+    // cudaStreamWaitEvent(ready). One `ready` event is re-recorded each block by
+    // MagBlock and waited on concurrently by FT8/JS8/Waterfall scan streams from
+    // different threads; unsynchronized event ops from multiple threads race and,
+    // under heavy dispatch load, can leave a scan stream permanently waiting on a
+    // torn event state (GPU idle, consumer wedged). `mutable` so const readers can
+    // lock it. Wrap EVERY record/wait on this event with lock_guard(ready_mu).
+    mutable std::mutex    ready_mu;
 
     T* slot(uint64_t idx) const {
         return base_d + (idx % N) * (slot_bytes / sizeof(T));

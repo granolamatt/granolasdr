@@ -138,7 +138,8 @@ void FT8Cuda::launchContScan(uint64_t wi)
     int dev_cont_snap    = (int)(cont_snap % 200);
     slot.snap_start      = cont_snap;
 
-    cudaStreamWaitEvent(cont_scan_stream_, ring_.ready, 0);
+    { std::lock_guard<std::mutex> lk(ring_.ready_mu);
+      cudaStreamWaitEvent(cont_scan_stream_, ring_.ready, 0); }
 
     ft8_gpu_scan(
         ring_.base_d,

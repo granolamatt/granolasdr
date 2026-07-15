@@ -120,7 +120,8 @@ int MagBlock<N>::doCopy(uint64_t now)
                         &inData_d_[length * (now % inShape_[0])],
                         length * sizeof(std::complex<float>),
                         cudaMemcpyDeviceToDevice, stream_);
-        cuda_check_error(cudaEventRecord(complex_ring_.ready, stream_));
+        { std::lock_guard<std::mutex> lk(complex_ring_.ready_mu);
+          cuda_check_error(cudaEventRecord(complex_ring_.ready, stream_)); }
         ++cplx_wi_;
         complex_ring_.write_idx.store(cplx_wi_, std::memory_order_release);
     }
@@ -167,7 +168,8 @@ int MagBlock<N>::doCopy(uint64_t now)
 
         if (retain_complex_) slot_cplx_idx_[wi % N] = cplx_start;
 
-        cuda_check_error(cudaEventRecord(ring_.ready, stream_));
+        { std::lock_guard<std::mutex> lk(ring_.ready_mu);
+          cuda_check_error(cudaEventRecord(ring_.ready, stream_)); }
         ring_.write_idx.fetch_add(1, std::memory_order_release);
     }
     return 1;

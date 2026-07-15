@@ -164,7 +164,8 @@ void JS8Cuda<N>::scanLoop()
         int snap_start       = (int)((wi - cap_blocks_) % N);
         slot.snap_start      = wi - cap_blocks_;   // absolute, for refine's ring map
 
-        cudaStreamWaitEvent(js8_scan_stream_, ring_.ready, 0);
+        { std::lock_guard<std::mutex> lk(ring_.ready_mu);
+          cudaStreamWaitEvent(js8_scan_stream_, ring_.ready, 0); }
 
         scan_fn_(
             ring_.base_d, snap_start, N,
