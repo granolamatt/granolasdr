@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--out", default=None, help="output WAV path")
     ap.add_argument("--rate", type=int, default=None, help="audio/IQ rate (default 8000 cw/ssb, 48000 iq)")
     ap.add_argument("--bfo", type=float, default=600.0, help="cw beat pitch (Hz)")
-    ap.add_argument("--bw", type=float, default=800.0, help="cw filter bandwidth (Hz)")
+    ap.add_argument("--bw", type=float, default=300.0, help="cw filter bandwidth (Hz)")
     ap.add_argument("--width", type=float, default=3000.0, help="ssb passband width (Hz)")
     args = ap.parse_args()
 

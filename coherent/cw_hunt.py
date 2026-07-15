@@ -13,9 +13,12 @@ Usage:
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
+
+HAVE_SOX = shutil.which("sox") is not None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CW_OFFLINE = os.path.join(HERE, "..", "build", "cw_offline")
@@ -51,6 +54,14 @@ def make_audio(cap, freq, t, dur, out):
     subprocess.run([sys.executable, CW_AUDIO, cap, "--freq", f"{freq:.1f}",
                     "--mode", "cw", "--start", str(max(0, t - 4)), "--dur", str(dur),
                     "--out", out], capture_output=True, timeout=300)
+
+
+def make_spectrogram(wav, png, title):
+    """sox spectrogram PNG so the dit/dah keying can be verified visually."""
+    if not HAVE_SOX:
+        return
+    subprocess.run(["sox", wav, "-n", "spectrogram", "-x", "1000", "-y", "220",
+                    "-t", title, "-o", png], capture_output=True, timeout=120)
 
 
 def main():
@@ -103,13 +114,17 @@ def main():
             drift = a["fmax"] - a["fmin"]                 # kHz spread across windows
             wav = ""
             if i <= n_audio:
-                wav = f"{i:02d}_{call}_{a['freq']:.1f}.wav"
-                make_audio(args.capture, a["freq"], int(a["t"]), args.dur,
-                           os.path.join(args.outdir, wav))
+                base = f"{i:02d}_{call}_{a['freq']:.1f}"
+                wav = base + ".wav"
+                wpath = os.path.join(args.outdir, wav)
+                make_audio(args.capture, a["freq"], int(a["t"]), args.dur, wpath)
+                make_spectrogram(wpath, os.path.join(args.outdir, base + ".png"),
+                                 f"#{i} {call} {a['freq']:.1f}kHz {conf} cnt={a['count']} snr={a['snr']}")
             row = (f"{i:>3} {call:<9} {conf:<4} {a['count']:>3} {a['snr']:>3} "
                    f"{a['freq']:>9.3f} {int(a['t']):>6} {a['wpm']:>3} {drift:>5.2f}  {wav}")
             print(row); idx.write(row + "\n")
-    print(f"\nmanifest: {idx_path}   WAVs: {args.outdir}/  "
+    png = "+ .png spectrograms " if HAVE_SOX else ""
+    print(f"\nmanifest: {idx_path}   WAVs {png}in {args.outdir}/  "
           f"(HIGH=likely real, LOW=verify carefully)")
 
 
