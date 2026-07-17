@@ -259,12 +259,35 @@ void FT8Cuda::contWorker()
             continue;
         }
         ContScanResult& slot = cont_slots_[ri % CONTINUOUS_SLOTS];
-        while (!slot.dispatched.load(std::memory_order_acquire))
+        // Watchdog: both waits below are unbounded. A rare wedge (~24h) leaves the
+        // consumer spinning silently while the producer drops. Log the full state
+        // every 10 s when stuck so the wedge self-diagnoses: which wait, which slot,
+        // ri/wi, and the CUDA context error (cudaPeekAtLastError is non-destructive).
+        int waited = 0;
+        while (!slot.dispatched.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (++waited >= 10000) {
+                fprintf(stderr, "[CONT] WEDGE: slot %llu not dispatched >10s (ri=%llu wi=%llu)\n",
+                        (unsigned long long)(ri % CONTINUOUS_SLOTS), (unsigned long long)ri,
+                        (unsigned long long)cont_write_idx_.load(std::memory_order_acquire));
+                waited = 0;
+            }
+        }
 
         cudaError_t ev;
-        while ((ev = cudaEventQuery(slot.event)) == cudaErrorNotReady)
+        waited = 0;
+        while ((ev = cudaEventQuery(slot.event)) == cudaErrorNotReady) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (++waited >= 10000) {
+                cudaError_t peek = cudaPeekAtLastError();
+                fprintf(stderr, "[CONT] WEDGE: slot %llu event NotReady >10s (ri=%llu wi=%llu "
+                        "eventQuery=%s ctxLastError=%s)\n",
+                        (unsigned long long)(ri % CONTINUOUS_SLOTS), (unsigned long long)ri,
+                        (unsigned long long)cont_write_idx_.load(std::memory_order_acquire),
+                        cudaGetErrorString(ev), cudaGetErrorString(peek));
+                waited = 0;
+            }
+        }
 
         if (ev != cudaSuccess) {
             fprintf(stderr, "[CONT] CUDA event error at slot %llu: %s\n",
