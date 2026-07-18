@@ -107,7 +107,12 @@ void hashtable_cleanup(uint8_t max_age)
 void hashtable_add(const char* callsign, uint32_t hash)
 {
     int idx_hash = (int)(hash % CALLSIGN_HASHTABLE_SIZE);
-    while (true) {
+    // Bounded probe (at most SIZE steps). The original `while(true)` never exited
+    // on a FULL table (no empty slot, no match) -> infinite loop while holding
+    // decode_mu_, which wedged the continuous scan after ~24 h of accumulated
+    // callsigns (the table is thread_local and the refine worker's copy is never
+    // cleaned). On a full table we fall through and the guard below skips the add.
+    for (int probe = 0; probe < CALLSIGN_HASHTABLE_SIZE; ++probe) {
         if (callsign_hashtable[idx_hash].callsign[0] == '\0')
             break;
         if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) == hash) && (0 == strcmp(callsign_hashtable[idx_hash].callsign, callsign)))
@@ -117,7 +122,7 @@ void hashtable_add(const char* callsign, uint32_t hash)
         }
         idx_hash = (idx_hash + 1) % CALLSIGN_HASHTABLE_SIZE;
     }
-    if (callsign_hashtable[idx_hash].callsign[0] != '\0') return;
+    if (callsign_hashtable[idx_hash].callsign[0] != '\0') return;   // table full: skip
     callsign_hashtable_size++;
     strncpy(callsign_hashtable[idx_hash].callsign, callsign, 11);
     callsign_hashtable[idx_hash].callsign[11] = '\0';
@@ -129,7 +134,9 @@ bool hashtable_lookup(ftx_callsign_hash_type_t hash_type, uint32_t hash, char* c
     int hash_shift = (hash_type == FTX_CALLSIGN_HASH_22_BITS) ? 0 :
                      (hash_type == FTX_CALLSIGN_HASH_12_BITS) ? 10 : 12;
     int idx_hash = (int)((hash << hash_shift) % CALLSIGN_HASHTABLE_SIZE);
-    while (callsign_hashtable[idx_hash].callsign[0] != '\0') {
+    // Bounded probe: a full table would otherwise loop forever here (same hang).
+    for (int probe = 0; probe < CALLSIGN_HASHTABLE_SIZE &&
+                        callsign_hashtable[idx_hash].callsign[0] != '\0'; ++probe) {
         if (((callsign_hashtable[idx_hash].hash & 0x3FFFFFu) >> hash_shift) == hash)
         {
             strcpy(callsign, callsign_hashtable[idx_hash].callsign);
@@ -505,8 +512,13 @@ namespace hf {
             char text[FTX_MAX_MESSAGE_LENGTH];
             {
                 std::lock_guard<std::mutex> lk(decode_mu_);
-                if (ftx_message_decode(&msg, &hash_if, text) != FTX_MESSAGE_RC_OK)
-                    continue;
+                bool ok = (ftx_message_decode(&msg, &hash_if, text) == FTX_MESSAGE_RC_OK);
+                // Age THIS worker's own thread_local callsign table periodically.
+                // flushWindow's cleanup runs on the contWorker thread and never
+                // touches this one, so without this it fills over ~24 h (and, pre-
+                // fix, hung). Bounded scan of the table, so it's cheap under the lock.
+                if (++refine_decode_cnt_ >= 128) { refine_decode_cnt_ = 0; hashtable_cleanup(10); }
+                if (!ok) continue;
             }
             publishSpot(text, job.fo, job.to, job.ts, job.score, job.timestamp);
             captureCand("refine", rllr, job.fo, job.to, job.ts, job.score,

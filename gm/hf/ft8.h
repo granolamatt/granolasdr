@@ -83,6 +83,7 @@ private:
     float osd_score_floor_   = 0.0f;   // Costas sync score; tighter than min_score
     int   osd_max_per_cycle_ = 64;
     int   decode_threads_    = 1;   // parallel BP/OSD workers for the continuous scan
+    int   refine_decode_cnt_ = 0;   // paces the refine worker's callsign-table cleanup
     // Candidate-load readout (periodic summary; see decodeAndPublishContinuous).
     double   cand_report_t0_ = 0.0;
     uint64_t cand_sum_       = 0;
