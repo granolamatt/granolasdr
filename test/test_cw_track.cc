@@ -215,6 +215,30 @@ int main() {
               std::to_string(calls.size()) + " spots");
     }
 
+    // ---- late joiner on a long-lived carrier still emits (recency dominance) --
+    {
+        CwTracker tr;
+        auto snr = snrWith({{100, 30.0f}});   // carrier present every window
+        int w = 0;
+        // K1AAA dominates early then goes QRT; K2BBB takes the same freq much
+        // later. With LIFETIME dominance K2BBB must out-count K1AAA's whole
+        // history -> suppressed forever. Recency dominance lets it emit.
+        std::function<std::string(int)> dec = [&](int) -> std::string {
+            if (w < 20)  return "K1AAA";
+            if (w >= 60) return "K2BBB";
+            return "";                          // carrier up, nothing decoded
+        };
+        std::vector<std::string> calls;
+        for (w = 0; w < 66; ++w) {
+            auto sp = tr.step((uint64_t)(w + 1) * 25, snr.data(), NB, dec, wpm20, binHz);
+            for (auto& s : sp) calls.push_back(s.call);
+        }
+        bool a = false, b = false;
+        for (auto& c : calls) { if (c == "K1AAA") a = true; if (c == "K2BBB") b = true; }
+        check(a && b, "late joiner emits despite prior occupant's lifetime count",
+              std::to_string(calls.size()) + " spots");
+    }
+
     // ---- adaptive gate: k×median floats above the noise floor ----------------
     {
         CwTracker::Config cfg; cfg.snr_thresh = 0.0f; cfg.adapt_k = 2.5f;  // gate = 2.5×median

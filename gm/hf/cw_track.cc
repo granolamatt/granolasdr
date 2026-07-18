@@ -161,21 +161,33 @@ std::vector<CwSpot> CwTracker::step(uint64_t wi, const float* snr, int nbins,
             const std::string call = extractCall(tok);
             if (!call.empty()) seen_now.insert(call);
         }
-        for (const std::string& call : seen_now) ++t.call_cnt[call];
+        for (const std::string& call : seen_now) {
+            auto& cs = t.call_cnt[call];
+            ++cs.count;
+            cs.last_wi = wi;
+        }
 
         // Emit newly-confirmed calls with RELATIVE-DOMINANCE suppression: a QSB/
         // noise misread decodes to a DIFFERENT string on the same carrier only a
         // few times, far less than the true call (7036.8: KJ9C dominates, NF8M/
         // EM9C are sparse) — edit-distance folding can't catch those. So suppress
-        // a call decoded < half as often as the carrier's dominant call. A real
-        // QSO (two stations alternating on one freq, each ~half the windows) has
-        // comparable counts, so both still spot.
+        // a call decoded < half as often as the carrier's dominant call.
+        //
+        // Dominance is over RECENT history only (calls last seen within ttl/4 ≈
+        // 15 s), not lifetime counts: otherwise a station arriving on a long-lived
+        // carrier must out-count the previous occupant's ENTIRE history to emit —
+        // effectively never on a short QSO. A QRT station stops gatekeeping; a
+        // QSB fade (still recent) rides through; two alternating stations both spot.
+        const uint64_t recent = cfg_.ttl_slots / 4;
         for (const std::string& call : seen_now) {
-            if (t.call_cnt[call] < cfg_.confirm || t.emitted.count(call)) continue;
+            const int mine = t.call_cnt[call].count;
+            if (mine < cfg_.confirm || t.emitted.count(call)) continue;
 
-            int mine = t.call_cnt[call], best = 0;
-            for (const auto& kv : t.call_cnt) best = std::max(best, kv.second);
-            if (mine * 2 < best) continue;               // sparse vs dominant -> misread
+            int best = 0;
+            for (const auto& kv : t.call_cnt)
+                if (wi - kv.second.last_wi <= recent)
+                    best = std::max(best, kv.second.count);
+            if (mine * 2 < best) continue;               // sparse vs recently-dominant -> misread
 
             bool is_variant = false;
             for (const std::string& e : t.emitted) {

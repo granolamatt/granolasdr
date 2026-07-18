@@ -58,13 +58,14 @@ public:
     int liveTracks() const { return (int)tracks_.size(); }
 
 private:
+    struct CallStat { int count = 0; uint64_t last_wi = 0; };  // times decoded + last window
     struct Track {
         int      bin;           // current center bin (follows drift)
         float    snr_ema;       // smoothed detection metric
         uint64_t born_wi;
         uint64_t last_wi;       // last window this track was matched
-        std::unordered_map<std::string,int> call_cnt;  // callsign -> windows decoded
-        std::unordered_set<std::string>     emitted;   // already spotted
+        std::unordered_map<std::string, CallStat> call_cnt;  // callsign -> {count, last_wi}
+        std::unordered_set<std::string>           emitted;   // already spotted
     };
 
     Config cfg_{};
