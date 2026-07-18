@@ -217,8 +217,9 @@ void CWSkimmerCuda<N>::worker() {
             [&](int)    { return dec.wpm(); },
             [&](int bin){ return binToHz(bin); });
         for (const auto& sp : spots) {
-            printf("[%s] %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s\n",
-                   label_, sp.hz / 1000.0, (double)sp.wpm, (double)sp.snr, sp.call.c_str());
+            printf("[%s] %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s%s\n",
+                   label_, sp.hz / 1000.0, (double)sp.wpm, (double)sp.snr, sp.call.c_str(),
+                   sp.cq ? "  CQ" : "");
             gm::hf::decode_stats_count(label_);
         }
     }

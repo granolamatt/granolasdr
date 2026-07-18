@@ -20,6 +20,7 @@ struct CwSpot {
     float       wpm;   // decoder speed estimate at emit time
     float       snr;   // track's smoothed detection metric
     std::string call;  // the callsign
+    bool        cq = false;  // station was heard calling CQ/QRZ (available to work)
 };
 
 // CwTracker: the per-signal continuity layer over the CW skimmer's per-window
@@ -58,7 +59,7 @@ public:
     int liveTracks() const { return (int)tracks_.size(); }
 
 private:
-    struct CallStat { int count = 0; uint64_t last_wi = 0; };  // times decoded + last window
+    struct CallStat { int count = 0; uint64_t last_wi = 0; bool cq = false; };  // + heard calling CQ
     struct Track {
         int      bin;           // current center bin (follows drift)
         float    snr_ema;       // smoothed detection metric

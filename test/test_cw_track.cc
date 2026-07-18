@@ -259,6 +259,28 @@ int main() {
               std::to_string(calls.size()) + " spots");
     }
 
+    // ---- CQ flag: a station heard calling CQ is tagged, a bare call is not ----
+    {
+        CwTracker tr;
+        auto snr = snrWith({{100, 30.0f}, {200, 30.0f}});
+        // bin 100 calls "CQ K4RO"; bin 200 sends a bare "W1XYZ" (working someone).
+        std::function<std::string(int)> dec = [&](int b) -> std::string {
+            return b < 150 ? std::string("CQ K4RO") : std::string("W1XYZ");
+        };
+        std::vector<gm::hf::CwSpot> spots;
+        for (int w = 0; w < 3; ++w) {
+            auto sp = tr.step((uint64_t)(w+1)*25, snr.data(), NB, dec, wpm20, binHz);
+            for (auto& s : sp) spots.push_back(s);
+        }
+        bool cq_ok = false, plain_ok = false;
+        for (auto& s : spots) {
+            if (s.call == "K4RO"  && s.cq)  cq_ok = true;
+            if (s.call == "W1XYZ" && !s.cq) plain_ok = true;
+        }
+        check(cq_ok && plain_ok, "CQ flag set for CQ-context call, clear for bare call",
+              std::to_string(spots.size()) + " spots");
+    }
+
     // ---- crowded band: 20 carriers, all distinct, each once ------------------
     {
         CwTracker tr;

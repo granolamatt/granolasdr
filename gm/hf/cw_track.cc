@@ -157,14 +157,21 @@ std::vector<CwSpot> CwTracker::step(uint64_t wi, const float* snr, int nbins,
         // Unique valid calls in THIS window's decode (a call repeated within one
         // window is one sighting, not proof — confirmation must span windows).
         std::unordered_set<std::string> seen_now;
+        bool window_cq = false;                       // a CQ/QRZ appeared this window
         for (const std::string& tok : tokens(txt)) {
+            if (tok == "CQ" || tok == "QRZ") { window_cq = true; continue; }
             const std::string call = extractCall(tok);
-            if (!call.empty()) seen_now.insert(call);
+            if (call.empty()) continue;
+            // A call recovered by stripping a CQ/QRZ prefix (e.g. CQK4RO) is itself CQ.
+            if (call != tok && (tok.rfind("CQ", 0) == 0 || tok.rfind("QRZ", 0) == 0))
+                window_cq = true;
+            seen_now.insert(call);
         }
         for (const std::string& call : seen_now) {
             auto& cs = t.call_cnt[call];
             ++cs.count;
             cs.last_wi = wi;
+            if (window_cq) cs.cq = true;              // sticky: heard calling at least once
         }
 
         // Emit newly-confirmed calls with RELATIVE-DOMINANCE suppression: a QSB/
@@ -198,7 +205,7 @@ std::vector<CwSpot> CwTracker::step(uint64_t wi, const float* snr, int nbins,
             if (is_variant) continue;
 
             t.emitted.insert(call);
-            spots.push_back(CwSpot{hz, wpm(t.bin), t.snr_ema, call});
+            spots.push_back(CwSpot{hz, wpm(t.bin), t.snr_ema, call, t.call_cnt[call].cq});
         }
     }
     return spots;

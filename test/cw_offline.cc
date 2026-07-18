@@ -183,8 +183,8 @@ int main(int argc, char** argv) {
             [&](int bin) { return binToHz(bin); });
         const double t = start_sec + (double)s * RFFT / SR;
         for (const auto& sp : spots) {
-            printf("[CW] t=%6.0fs  %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s\n",
-                   t, sp.hz / 1000.0, sp.wpm, sp.snr, sp.call.c_str());
+            printf("[CW] t=%6.0fs  %9.3f kHz  ~%2.0f wpm  snr %2.0f  %s%s\n",
+                   t, sp.hz / 1000.0, sp.wpm, sp.snr, sp.call.c_str(), sp.cq ? "  CQ" : "");
             all_calls.push_back(sp.call);
         }
     }
