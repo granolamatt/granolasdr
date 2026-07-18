@@ -93,7 +93,9 @@ def main():
             a["count"] += 1
             a["fmin"] = min(a["fmin"], freq); a["fmax"] = max(a["fmax"], freq)
             if snr > a["snr"]:
-                a["snr"], a["freq"], a["t"], a["wpm"] = snr, freq, st + t, wpm
+                # cw_offline already prints ABSOLUTE capture time (start_sec + rel),
+                # so store t directly — adding st again double-offsets the clip.
+                a["snr"], a["freq"], a["t"], a["wpm"] = snr, freq, t, wpm
         print(f"  {st:.0f}s: {len(spots)} spots, {len(agg)} signals so far")
 
     ranked = sorted(agg.items(), key=lambda kv: (kv[1]["count"], kv[1]["snr"]), reverse=True)
